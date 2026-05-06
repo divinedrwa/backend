@@ -8,6 +8,7 @@
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy:retry": "node scripts/prisma-migrate-deploy-retry.js",
     "prisma:seed": "tsx prisma/seed.ts",
     "prisma:seed-demo": "tsx prisma/seed.demo-full.ts",
     "db:wipe-admin": "tsx scripts/wipe-db-and-seed-admin.ts",

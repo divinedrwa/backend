@@ -103,6 +103,14 @@ npx prisma migrate deploy
 npm run start
 ```
 
+If your DB provider occasionally times out on Prisma advisory locks (for example Neon on cold/wake), use:
+
+```bash
+npm run prisma:migrate:deploy:retry
+```
+
+This retries transient `P1002` advisory-lock failures before exiting.
+
 Make sure:
 
 - `DATABASE_URL` points to production Postgres
