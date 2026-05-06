@@ -1,0 +1,216 @@
+// Monthly Expenses Management System
+// Add this to your main schema.prisma file
+
+// ==========================================
+// MONTHLY EXPENSES MODELS
+// ==========================================
+
+// Expense Categories (Admin can create custom)
+model ExpenseCategory {
+  id              String    @id @default(uuid())
+  societyId       String
+  society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  
+  // Category Info
+  name            String    // "Electricity", "Garbage Collection", "Security Salary", etc.
+  description     String?
+  icon            String?   // Icon name for UI
+  color           String?   // Hex color for UI (#FF5733)
+  
+  // Category Type
+  type            ExpenseType @default(OTHER)
+  
+  // Settings
+  isActive        Boolean   @default(true)
+  isRecurring     Boolean   @default(false)  // If true, auto-create monthly
+  defaultAmount   Float?    // For recurring expenses
+  
+  // Relations
+  expenses        Expense[]
+  
+  // Tracking
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       String?
+  
+  @@index([societyId])
+  @@index([type])
+  @@unique([societyId, name])
+}
+
+enum ExpenseType {
+  ELECTRICITY           // Electricity bills/recharge
+  WATER                 // Water bills
+  GARBAGE_COLLECTION    // Garbage collector payment
+  SECURITY_SALARY       // Security guard salary
+  HOUSEKEEPING_SALARY   // Housekeeping staff salary
+  MAINTENANCE_STAFF     // Maintenance staff
+  GARDENING             // Gardening services
+  PEST_CONTROL          // Pest control
+  LIFT_MAINTENANCE      // Lift maintenance
+  GENERATOR_MAINTENANCE // Generator maintenance/fuel
+  PUMP_MAINTENANCE      // Water pump maintenance
+  COMMON_AREA_REPAIR    // Common area repairs
+  LEGAL_FEES            // Legal/professional fees
+  INSURANCE             // Society insurance
+  TAXES                 // Property tax, etc.
+  BANK_CHARGES          // Bank charges
+  SOFTWARE_SUBSCRIPTION // Management software (like ours!)
+  MISCELLANEOUS         // Miscellaneous
+  OTHER                 // Other (custom)
+}
+
+// Individual Expense Entries
+model Expense {
+  id              String    @id @default(uuid())
+  societyId       String
+  society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  
+  categoryId      String
+  category        ExpenseCategory @relation(fields: [categoryId], references: [id])
+  
+  // Expense Details
+  title           String    // "Electricity Bill - March 2026", "Guard Salary - John Doe"
+  description     String?
+  amount          Float
+  
+  // Payment Info
+  paymentDate     DateTime
+  paymentMode     PaymentMode
+  paymentRef      String?   // Transaction ID, cheque number, etc.
+  paidTo          String    // Vendor/person name
+  paidToContact   String?   // Phone/email
+  
+  // Receipt/Proof
+  receiptUrl      String?   // URL to uploaded receipt image/PDF
+  receiptNumber   String?   // Bill/Receipt number
+  invoiceNumber   String?
+  
+  // Period (for recurring expenses)
+  month           Int?      // 1-12
+  year            Int?      // 2026
+  
+  // Accounting
+  gstAmount       Float?    @default(0)
+  gstPercentage   Float?    @default(0)
+  tdsAmount       Float?    @default(0)
+  tdsPercentage   Float?    @default(0)
+  netAmount       Float     // Total paid amount
+  
+  // Approval Workflow (optional)
+  status          ExpenseStatus @default(APPROVED)
+  approvedBy      String?
+  approvedAt      DateTime?
+  rejectionReason String?
+  
+  // Notes
+  notes           String?
+  tags            String[]  // ["urgent", "quarterly", etc.]
+  
+  // Attachments (multiple files)
+  attachments     ExpenseAttachment[]
+  
+  // Tracking
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       String?   // Admin user ID
+  
+  @@index([societyId])
+  @@index([categoryId])
+  @@index([paymentDate])
+  @@index([month, year])
+  @@index([status])
+}
+
+enum ExpenseStatus {
+  PENDING     // Waiting for approval
+  APPROVED    // Approved and paid
+  REJECTED    // Rejected
+  CANCELLED   // Cancelled
+}
+
+// Multiple attachments per expense
+model ExpenseAttachment {
+  id              String    @id @default(uuid())
+  expenseId       String
+  expense         Expense   @relation(fields: [expenseId], references: [id], onDelete: Cascade)
+  
+  fileName        String
+  fileUrl         String
+  fileType        String    // "image/jpeg", "application/pdf"
+  fileSize        Int       // In bytes
+  
+  uploadedAt      DateTime  @default(now())
+  uploadedBy      String?
+  
+  @@index([expenseId])
+}
+
+// Monthly Expense Summary (for quick access)
+model MonthlyExpenseSummary {
+  id              String    @id @default(uuid())
+  societyId       String
+  society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  
+  // Period
+  month           Int       // 1-12
+  year            Int       // 2026
+  
+  // Summary
+  totalExpenses   Float     @default(0)
+  totalGST        Float     @default(0)
+  totalTDS        Float     @default(0)
+  netAmount       Float     @default(0)
+  
+  // Count
+  expenseCount    Int       @default(0)
+  
+  // Category-wise breakdown (JSON)
+  categoryBreakdown Json?   // { "ELECTRICITY": 5000, "SECURITY_SALARY": 30000, ... }
+  
+  // Last updated
+  lastCalculated  DateTime  @default(now())
+  
+  @@unique([societyId, month, year])
+  @@index([societyId])
+  @@index([year, month])
+}
+
+// Expense Budgets (optional - for budget tracking)
+model ExpenseBudget {
+  id              String    @id @default(uuid())
+  societyId       String
+  society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  
+  categoryId      String?
+  category        ExpenseCategory? @relation(fields: [categoryId], references: [id])
+  
+  // Period
+  month           Int?      // If null, yearly budget
+  year            Int
+  
+  // Budget
+  budgetAmount    Float
+  spentAmount     Float     @default(0)
+  remainingAmount Float     @default(0)
+  
+  // Alerts
+  alertThreshold  Float?    @default(80)  // Alert when 80% spent
+  alertSent       Boolean   @default(false)
+  
+  // Tracking
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+  createdBy       String?
+  
+  @@unique([societyId, categoryId, month, year])
+  @@index([societyId])
+}
+
+// Add these relations to existing Society model
+// society Society {
+//   expenseCategories     ExpenseCategory[]
+//   expenses              Expense[]
+//   monthlyExpenseSummary MonthlyExpenseSummary[]
+//   expenseBudgets        ExpenseBudget[]
+// }
