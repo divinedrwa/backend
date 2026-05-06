@@ -8,6 +8,8 @@
     "start": "node dist/server.js",
     "prisma:generate": "prisma generate",
     "prisma:migrate": "prisma migrate dev",
+    "prisma:migrate:deploy": "prisma migrate deploy",
+    "prisma:baseline": "bash scripts/baseline-existing-database.sh --yes",
     "prisma:migrate:deploy:retry": "node scripts/prisma-migrate-deploy-retry.js",
     "prisma:seed": "tsx prisma/seed.ts",
     "prisma:seed-demo": "tsx prisma/seed.demo-full.ts",
@@ -18,6 +20,9 @@
     "verify:qa-seed": "tsx scripts/verify-qa-seed-users.ts",
     "sync:qa-credentials": "tsx scripts/sync-qa-credentials.ts",
     "validate:tenant-data": "tsx src/scripts/validate-tenant-data.ts",
+    "verify:super-admin": "tsx scripts/verify-super-admin.ts",
+    "diagnose:db": "tsx scripts/diagnose-db-overview.ts",
+    "verify:migrations-safe": "tsx scripts/verify-migrations-safe.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",
     "test": "tsx --test \"src/**/*.test.ts\""
   },

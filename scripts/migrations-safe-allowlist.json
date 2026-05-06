@@ -1,0 +1,4 @@
+{
+  "allowDestructiveInMigrations": [],
+  "_comment": "Folder names under prisma/migrations (e.g. 20260508100500_sync_schema_tables_phase2) whose migration.sql may contain DROP TABLE or TRUNCATE after explicit team review. Leave empty in normal development."
+}

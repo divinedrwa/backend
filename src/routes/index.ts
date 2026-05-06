@@ -40,6 +40,8 @@ import notificationRoutes from "../modules/notifications/routes";
 import billingV1Routes from "../modules/billing-cycle/billing-v1.routes";
 import societySettingsRoutes from "../modules/society-settings/routes";
 import invitationRoutes from "../modules/invitations/routes";
+import importRoutes from "../modules/import/routes";
+import exportRoutes from "../modules/export/routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -67,6 +69,8 @@ router.use("/super", superRoutes);
 router.use("/users", userRoutes);
 router.use("/resident-management", residentManagementRoutes);
 router.use("/villas", villaRoutes);
+router.use("/import", importRoutes);
+router.use("/export", exportRoutes);
 
 // Maintenance & Billing (NEW SYSTEM)
 router.use("/maintenance", maintenancePaymentRoutes);

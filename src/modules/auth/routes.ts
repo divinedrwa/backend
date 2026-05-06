@@ -375,14 +375,22 @@ router.post("/super-admin/login", validateBody(superAdminLoginSchema), async (re
       req.body as z.infer<typeof superAdminLoginSchema>;
     const identifier = username.trim();
 
-    const user = await prisma.user.findFirst({
+    let user = await prisma.user.findFirst({
       where: {
         role: UserRole.SUPER_ADMIN,
-        societyId: null,
         ...identifierWhere(identifier),
       },
       include: loginUserInclude,
     });
+
+    // Platform account must be tenant-scoped to no society; fix mis-seeded or hand-edited rows.
+    if (user && user.societyId !== null) {
+      user = await prisma.user.update({
+        where: { id: user.id },
+        data: { societyId: null },
+        include: loginUserInclude,
+      });
+    }
 
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });

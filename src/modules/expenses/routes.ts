@@ -404,7 +404,11 @@ router.get('/summary/monthly', async (req, res) => {
     
     res.json(summary);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch summary' });
+    console.error('[expenses] GET /summary/monthly', error);
+    res.status(500).json({
+      message: 'Failed to fetch summary',
+      error: 'Failed to fetch summary'
+    });
   }
 });
 
@@ -445,7 +449,11 @@ router.get('/summary/yearly', async (req, res) => {
       }
     });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch yearly summary' });
+    console.error('[expenses] GET /summary/yearly', error);
+    res.status(500).json({
+      message: 'Failed to fetch yearly summary',
+      error: 'Failed to fetch yearly summary'
+    });
   }
 });
 
@@ -484,7 +492,11 @@ router.get('/summary/category-breakdown', async (req, res) => {
     
     res.json(Object.values(breakdown));
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch breakdown' });
+    console.error('[expenses] GET /summary/category-breakdown', error);
+    res.status(500).json({
+      message: 'Failed to fetch breakdown',
+      error: 'Failed to fetch breakdown'
+    });
   }
 });
 
@@ -528,7 +540,11 @@ router.get('/analytics/trends', async (req, res) => {
     
     res.json(trends);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch trends' });
+    console.error('[expenses] GET /analytics/trends', error);
+    res.status(500).json({
+      message: 'Failed to fetch trends',
+      error: 'Failed to fetch trends'
+    });
   }
 });
 
@@ -569,7 +585,11 @@ router.get('/analytics/top-categories', async (req, res) => {
     
     res.json(result);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch top categories' });
+    console.error('[expenses] GET /analytics/top-categories', error);
+    res.status(500).json({
+      message: 'Failed to fetch top categories',
+      error: 'Failed to fetch top categories'
+    });
   }
 });
 
