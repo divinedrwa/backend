@@ -44,9 +44,14 @@ ALTER TABLE "Society" ADD CONSTRAINT "Society_createdByUserId_fkey" FOREIGN KEY 
 ALTER TABLE "Invitation" ADD CONSTRAINT "Invitation_societyId_fkey" FOREIGN KEY ("societyId") REFERENCES "Society"("id") ON DELETE CASCADE ON UPDATE CASCADE;
 
 -- Backfill tenant on payment_logs from owning user (improves admin reporting / validation)
-UPDATE "payment_logs" pl
-SET "societyId" = u."societyId"
-FROM "User" u
-WHERE pl."userId" = u.id
-  AND pl."societyId" IS NULL
-  AND u."societyId" IS NOT NULL;
+DO $$
+BEGIN
+  IF to_regclass('public.payment_logs') IS NOT NULL THEN
+    UPDATE "payment_logs" pl
+    SET "societyId" = u."societyId"
+    FROM "User" u
+    WHERE pl."userId" = u.id
+      AND pl."societyId" IS NULL
+      AND u."societyId" IS NOT NULL;
+  END IF;
+END $$;
