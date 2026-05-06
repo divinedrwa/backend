@@ -5,6 +5,11 @@ const prisma = new PrismaClient();
 
 async function main() {
   console.log("🌱 Starting seed...");
+  const adminEmail = (process.env.DEMO_ADMIN_EMAIL ?? "admin@society.local").trim();
+  const adminUsername = (process.env.DEMO_ADMIN_USERNAME ?? "admin").trim();
+  const adminPassword = (process.env.DEMO_ADMIN_PASSWORD ?? "ChangeMe123!").trim();
+  const guardPassword = (process.env.DEMO_GUARD_PASSWORD ?? "ChangeMe123!").trim();
+  const residentPassword = (process.env.DEMO_RESIDENT_PASSWORD ?? "ChangeMe123!").trim();
 
   // Create default society
   const society = await prisma.society.upsert({
@@ -20,15 +25,15 @@ async function main() {
   console.log("✅ Society created:", society.name);
 
   // Create admin user
-  const adminPasswordHash = await bcrypt.hash("admin123", 10);
+  const adminPasswordHash = await bcrypt.hash(adminPassword, 10);
   const admin = await prisma.user.upsert({
-    where: { email: "admin@society.local" },
+    where: { email: adminEmail },
     update: {},
     create: {
       societyId: society.id,
-      username: "admin",
+      username: adminUsername,
       name: "Admin User",
-      email: "admin@society.local",
+      email: adminEmail,
       passwordHash: adminPasswordHash,
       role: "ADMIN",
       phone: "+91 9876543210",
@@ -96,7 +101,7 @@ async function main() {
   // Create 3 guard users (one for each gate)
   const guards = [];
   for (let i = 1; i <= 3; i++) {
-    const guardPasswordHash = await bcrypt.hash("guard123", 10);
+    const guardPasswordHash = await bcrypt.hash(guardPassword, 10);
     
     const guard = await prisma.user.upsert({
       where: { email: `guard${i}@society.local` },
@@ -130,7 +135,7 @@ async function main() {
 
   // Create sample residents for first 3 villas
   for (let i = 1; i <= 3; i++) {
-    const residentPasswordHash = await bcrypt.hash("resident123", 10);
+    const residentPasswordHash = await bcrypt.hash(residentPassword, 10);
     
     // Owner as resident
     const resident = await prisma.user.create({
@@ -250,9 +255,9 @@ async function main() {
   console.log(`- ${villas.length} Maintenance bills`);
   console.log("- 1 Sample payment");
   console.log("\n🔐 Login Credentials:");
-  console.log("Admin: admin@society.local / admin123");
-  console.log("Guard1: guard1@society.local / guard123");
-  console.log("Resident1: resident1@example.com / resident123");
+  console.log(`Admin: ${adminEmail} / (set via DEMO_ADMIN_PASSWORD)`);
+  console.log("Guard1: guard1@society.local / (set via DEMO_GUARD_PASSWORD)");
+  console.log("Resident1: resident1@example.com / (set via DEMO_RESIDENT_PASSWORD)");
 }
 
 main()

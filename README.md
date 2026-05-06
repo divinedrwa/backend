@@ -62,11 +62,11 @@ Common scripts from `package.json`:
 
 ## Seed Credentials
 
-Default minimal seed creates:
+Default minimal seed creates a generic local admin:
 
-- Email: `drwa@divine.com`
-- Username: `drwa`
-- Password: `Divine@123`
+- Email: `admin@society.local`
+- Username: `admin`
+- Password: `ChangeMe123!` (rotate immediately)
 
 Override via env vars:
 

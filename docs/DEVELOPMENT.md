@@ -32,7 +32,7 @@ cp .env.example .env
 
 npm run prisma:generate
 npm run prisma:migrate   # or: npx prisma migrate dev --name init
-npm run prisma:seed      # minimal: one society + admin drwa@divine.com / Divine@123 (see below)
+npm run prisma:seed      # minimal: one society + generic admin (see below)
 npm run dev              # listens on 0.0.0.0:PORT — reachable from LAN for physical devices
 ```
 
@@ -43,9 +43,9 @@ npm run dev              # listens on 0.0.0.0:PORT — reachable from LAN for ph
 
 **Default seed (`npm run prisma:seed`)** creates one society and a single admin:
 
-- Email: `drwa@divine.com`
-- Username: `drwa`
-- Password: `Divine@123`
+- Email: `admin@society.local`
+- Username: `admin`
+- Password: `ChangeMe123!` (change immediately)
 
 Override at seed time: `ADMIN_EMAIL`, `ADMIN_PASSWORD`, `ADMIN_USERNAME`, `SOCIETY_NAME`.
 

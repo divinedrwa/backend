@@ -5,10 +5,10 @@
  *   CONFIRM_DB_WIPE=1 npm run db:wipe-admin
  *
  * Defaults (override with env):
- *   ADMIN_EMAIL=drwa@divine.com
- *   ADMIN_PASSWORD=Divine@123
- *   ADMIN_USERNAME=drwa
- *   SOCIETY_NAME=Divine Society
+ *   ADMIN_EMAIL=admin@society.local
+ *   ADMIN_PASSWORD=ChangeMe123!
+ *   ADMIN_USERNAME=admin
+ *   SOCIETY_NAME=Default Society
  */
 import "dotenv/config";
 import bcrypt from "bcryptjs";
@@ -16,10 +16,10 @@ import { PrismaClient } from "@prisma/client";
 
 const prisma = new PrismaClient();
 
-const adminEmail = (process.env.ADMIN_EMAIL ?? "drwa@divine.com").trim();
-const adminPassword = (process.env.ADMIN_PASSWORD ?? "Divine@123").trim();
-const adminUsername = (process.env.ADMIN_USERNAME ?? "drwa").trim();
-const societyName = (process.env.SOCIETY_NAME ?? "Divine Society").trim();
+const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@society.local").trim();
+const adminPassword = (process.env.ADMIN_PASSWORD ?? "ChangeMe123!").trim();
+const adminUsername = (process.env.ADMIN_USERNAME ?? "admin").trim();
+const societyName = (process.env.SOCIETY_NAME ?? "Default Society").trim();
 
 async function truncateAllApplicationData(): Promise<void> {
   const rows = await prisma.$queryRaw<{ tablename: string }[]>`
@@ -84,7 +84,7 @@ async function main() {
   console.log(`   Society: ${society.name} (${society.id})`);
   console.log(`   Login:   ${adminEmail}`);
   console.log(`   Username:${adminUsername}`);
-  console.log(`   Password: (set via ADMIN_PASSWORD — default Divine@123)`);
+  console.log("   Password: (set via ADMIN_PASSWORD)");
 }
 
 main()

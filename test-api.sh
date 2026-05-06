@@ -5,6 +5,8 @@
 
 BASE_URL="http://localhost:4000"
 TOKEN=""
+ADMIN_EMAIL="${ADMIN_EMAIL:-admin@society.local}"
+ADMIN_PASSWORD="${ADMIN_PASSWORD:-ChangeMe123!}"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -32,7 +34,7 @@ echo ""
 echo "📍 Test 2: Login"
 RESPONSE=$(curl -s -X POST "$BASE_URL/api/auth/login" \
   -H "Content-Type: application/json" \
-  -d '{"email":"admin@society.local","password":"admin123"}')
+  -d "{\"email\":\"$ADMIN_EMAIL\",\"password\":\"$ADMIN_PASSWORD\"}")
 
 if echo "$RESPONSE" | grep -q '"token"'; then
     TOKEN=$(echo "$RESPONSE" | grep -o '"token":"[^"]*' | cut -d'"' -f4)
@@ -247,4 +249,4 @@ echo "- Authentication working"
 echo "- Role-based access control verified"
 echo ""
 echo "Next: Test frontend at http://localhost:3000"
-echo "Login: admin@society.local / admin123"
+echo "Login: $ADMIN_EMAIL / (set via ADMIN_PASSWORD)"

@@ -9,10 +9,10 @@ import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
 
-const adminEmail = (process.env.ADMIN_EMAIL ?? "drwa@divine.com").trim();
-const adminPassword = (process.env.ADMIN_PASSWORD ?? "Divine@123").trim();
-const adminUsername = (process.env.ADMIN_USERNAME ?? "drwa").trim();
-const societyName = (process.env.SOCIETY_NAME ?? "Divine Society").trim();
+const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@society.local").trim();
+const adminPassword = (process.env.ADMIN_PASSWORD ?? "ChangeMe123!").trim();
+const adminUsername = (process.env.ADMIN_USERNAME ?? "admin").trim();
+const societyName = (process.env.SOCIETY_NAME ?? "Default Society").trim();
 
 async function main() {
   console.log("🌱 Minimal seed (admin only)…");
