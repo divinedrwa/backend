@@ -31,5 +31,24 @@ app.get("/health", (_req, res) => {
   res.json({ ok: true });
 });
 
+/**
+ * Compatibility: some clients call `/auth/...`, `/public/...`, or `/super/...` without the `/api` prefix.
+ * Rewrites to `/api/...` so routes still match (same router as `app.use("/api", routes)`).
+ */
+app.use((req, _res, next) => {
+  const p = req.path ?? "";
+  const needsApiPrefix =
+    p === "/auth" ||
+    p.startsWith("/auth/") ||
+    p === "/public" ||
+    p.startsWith("/public/") ||
+    p === "/super" ||
+    p.startsWith("/super/");
+  if (needsApiPrefix) {
+    req.url = `/api${req.url}`;
+  }
+  next();
+});
+
 app.use("/api", routes);
 app.use(errorHandler);
