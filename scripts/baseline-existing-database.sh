@@ -19,11 +19,22 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
+# Do not `source` .env: values with spaces (e.g. SOCIETY_NAME=Super Admin Society) break the shell.
+# Load only DB URLs the same way Node/Prisma do (dotenv).
 if [[ -f .env ]]; then
-  set -a
-  # shellcheck source=/dev/null
-  source .env
-  set +a
+  eval "$(
+    node -e "
+      require('dotenv').config({ path: '.env' });
+      const out = (k) => {
+        const v = process.env[k];
+        if (v != null && v !== '') {
+          process.stdout.write('export ' + k + '=' + JSON.stringify(v) + '\n');
+        }
+      };
+      out('DATABASE_URL');
+      out('DIRECT_URL');
+    "
+  )"
 fi
 
 if [[ -z "${DATABASE_URL:-}" ]]; then

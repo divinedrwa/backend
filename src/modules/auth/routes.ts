@@ -428,7 +428,7 @@ router.post("/admin/login", validateBody(adminLoginSchema), async (req, res, nex
       req.body as z.infer<typeof adminLoginSchema>;
     const identifier = username.trim();
 
-    const user = await prisma.user.findFirst({
+    const candidates = await prisma.user.findMany({
       where: {
         societyId,
         role: UserRole.ADMIN,
@@ -437,9 +437,16 @@ router.post("/admin/login", validateBody(adminLoginSchema), async (req, res, nex
       include: loginUserInclude,
     });
 
-    if (!user) {
+    if (candidates.length === 0) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
+    if (candidates.length > 1) {
+      return res.status(401).json({
+        message:
+          "Multiple accounts match this login. Use your username or email (not phone) if more than one admin shares this number.",
+      });
+    }
+    const user = candidates[0];
     if (!user.isActive) {
       return res.status(401).json({ message: "Account is inactive" });
     }
@@ -473,7 +480,7 @@ router.post("/login", validateBody(tenantLoginSchema), async (req, res, next) =>
       req.body as z.infer<typeof tenantLoginSchema>;
     const identifier = username.trim();
 
-    const user = await prisma.user.findFirst({
+    const candidates = await prisma.user.findMany({
       where: {
         societyId,
         role: { in: [UserRole.RESIDENT, UserRole.GUARD] },
@@ -482,9 +489,16 @@ router.post("/login", validateBody(tenantLoginSchema), async (req, res, next) =>
       include: loginUserInclude,
     });
 
-    if (!user) {
+    if (candidates.length === 0) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
+    if (candidates.length > 1) {
+      return res.status(401).json({
+        message:
+          "Multiple accounts match this login. Sign in with your username or email — this phone is linked to more than one account in this society.",
+      });
+    }
+    const user = candidates[0];
     if (!user.isActive) {
       return res.status(401).json({ message: "Account is inactive" });
     }
