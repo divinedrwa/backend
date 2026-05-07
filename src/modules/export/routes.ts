@@ -31,6 +31,8 @@ router.get("/villas-csv", async (req, res, next) => {
       "ownerEmail",
       "ownerPhone",
       "monthlyMaintenance",
+      "ownerUsername",
+      "ownerPassword",
     ];
 
     const rows = villas.map((v) => [
@@ -42,6 +44,8 @@ router.get("/villas-csv", async (req, res, next) => {
       v.ownerEmail ?? "",
       v.ownerPhone ?? "",
       Number(v.monthlyMaintenance),
+      "",
+      "",
     ]);
 
     const csv = rowsToCsv(headers, rows);

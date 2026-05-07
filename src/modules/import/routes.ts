@@ -1,10 +1,17 @@
 import bcrypt from "bcryptjs";
-import { Prisma, UserRole, ResidentType } from "@prisma/client";
+import { UserRole, ResidentType } from "@prisma/client";
 import { Router } from "express";
 import multer from "multer";
 import { prisma } from "../../lib/prisma";
 import { parseCsvRows, csvRowsToRecords } from "../../lib/csv";
 import { requireAuth, requireRole } from "../../middlewares/auth";
+import {
+  formatUserUniqueConstraintError,
+  findOrCreateShellVillaForResident,
+  loadVillaLookupMap,
+  optionalTrimmedPhone,
+  provisionImportedVillaOwnerAccount,
+} from "../../services/societyProvisioning";
 
 const router = Router();
 const upload = multer({
@@ -19,24 +26,18 @@ type ImportResult = {
   created: number;
   skipped: number;
   errors: Array<{ line: number; message: string }>;
+  /** Residents CSV: placeholder villas created when villaNumber was missing in this society */
+  villasAutoCreated?: number;
+  /** Villas CSV: owner RESIDENT users created for rows with ownerEmail */
+  usersCreated?: number;
+  /** Villas CSV: login details when a temporary password was generated */
+  ownerCredentials?: Array<{
+    line: number;
+    username: string;
+    email: string;
+    temporaryPassword?: string;
+  }>;
 };
-
-/** Non-empty phone for DB (optional field). Multiple residents may share a phone number per society. */
-function residentPhone(raw: string | undefined): string | undefined {
-  const t = raw?.trim() ?? "";
-  return t === "" ? undefined : t;
-}
-
-function importUserCreateErrorMessage(e: unknown): string {
-  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
-    const target = (e.meta?.target as string[] | undefined) ?? [];
-    const t = target.join(", ");
-    if (t.includes("email")) return "Email already exists.";
-    if (t.includes("username")) return "Username already exists.";
-    return `Unique constraint failed (${t || "record"})`;
-  }
-  return e instanceof Error ? e.message : "Create failed";
-}
 
 function parseMoney(raw: string): number | null {
   const t = raw.trim();
@@ -45,7 +46,7 @@ function parseMoney(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance */
+/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: ownerUsername,ownerPassword (otherwise username from email, password generated). With ownerEmail set, creates a RESIDENT owner account for this society linked to the villa. */
 router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -79,7 +80,13 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
     }
 
     const records = csvRowsToRecords(header, rows.slice(1));
-    const result: ImportResult = { created: 0, skipped: 0, errors: [] };
+    const result: ImportResult = {
+      created: 0,
+      skipped: 0,
+      errors: [],
+      usersCreated: 0,
+      ownerCredentials: [],
+    };
 
     for (let i = 0; i < records.length; i++) {
       const line = i + 2;
@@ -118,7 +125,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
       }
 
       try {
-        await prisma.villa.create({
+        const villa = await prisma.villa.create({
           data: {
             societyId,
             villaNumber,
@@ -135,6 +142,30 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
           },
         });
         result.created++;
+
+        const provision = await provisionImportedVillaOwnerAccount({
+          societyId,
+          villaId: villa.id,
+          line,
+          ownerName,
+          ownerEmail: r.ownerEmail,
+          ownerPhone: r.ownerPhone,
+          ownerUsernameRaw: r.ownerUsername,
+          ownerPasswordRaw: r.ownerPassword,
+        });
+        if (provision.kind === "created") {
+          result.usersCreated = (result.usersCreated ?? 0) + provision.usersCreated;
+          if (provision.credential && result.ownerCredentials) {
+            result.ownerCredentials.push(provision.credential);
+          }
+        } else if (provision.kind === "skipped_email_taken") {
+          result.errors.push({
+            line,
+            message: `Owner login not created: email "${provision.email}" is already registered`,
+          });
+        } else if (provision.kind === "error") {
+          result.errors.push({ line: provision.line, message: provision.message });
+        }
       } catch (e) {
         result.errors.push({
           line,
@@ -144,13 +175,16 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
       }
     }
 
+    if (result.ownerCredentials?.length === 0) delete result.ownerCredentials;
+    if (result.usersCreated === 0) delete result.usersCreated;
+
     return res.status(201).json(result);
   } catch (error) {
     next(error);
   }
 });
 
-/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate */
+/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate — creates the villa under this society if villaNumber does not exist yet (placeholder ownerName = resident name, maintenance 0). */
 router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -183,16 +217,10 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       });
     }
 
-    const villas = await prisma.villa.findMany({
-      where: { societyId },
-      select: { id: true, villaNumber: true },
-    });
-    const villaByNumber = new Map(
-      villas.map((v) => [v.villaNumber.trim().toLowerCase(), v.id] as const),
-    );
+    const villaByNumber = await loadVillaLookupMap(societyId);
 
     const records = csvRowsToRecords(header, rows.slice(1));
-    const result: ImportResult = { created: 0, skipped: 0, errors: [] };
+    const result: ImportResult = { created: 0, skipped: 0, errors: [], villasAutoCreated: 0 };
 
     for (let i = 0; i < records.length; i++) {
       const line = i + 2;
@@ -201,8 +229,8 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       const name = r.name?.trim();
       const email = r.email?.trim();
       const password = r.password?.trim();
-      const villaNumber = r.villaNumber?.trim().toLowerCase();
-      const phone = residentPhone(r.phone);
+      const displayVillaNumber = r.villaNumber?.trim() ?? "";
+      const phone = optionalTrimmedPhone(r.phone);
 
       if (!username || username.length < 3 || !name || !email || !password || password.length < 6) {
         result.errors.push({
@@ -213,14 +241,29 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
         continue;
       }
 
-      const villaId = villaNumber ? villaByNumber.get(villaNumber) : undefined;
-      if (!villaId) {
+      if (!displayVillaNumber) {
         result.errors.push({
           line,
-          message: `Unknown villaNumber "${r.villaNumber?.trim() ?? ""}" for this society`,
+          message: "villaNumber is required",
         });
         result.skipped++;
         continue;
+      }
+
+      const villaOutcome = await findOrCreateShellVillaForResident({
+        societyId,
+        displayVillaNumber,
+        placeholderOwnerName: name,
+        villaByLookupKey: villaByNumber,
+      });
+      if (!villaOutcome.ok) {
+        result.errors.push({ line, message: villaOutcome.message });
+        result.skipped++;
+        continue;
+      }
+      const villaId = villaOutcome.villaId;
+      if (villaOutcome.created) {
+        result.villasAutoCreated = (result.villasAutoCreated ?? 0) + 1;
       }
 
       let residentType: ResidentType = ResidentType.OWNER;
@@ -272,11 +315,13 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       } catch (e) {
         result.errors.push({
           line,
-          message: importUserCreateErrorMessage(e),
+          message: formatUserUniqueConstraintError(e),
         });
         result.skipped++;
       }
     }
+
+    if (result.villasAutoCreated === 0) delete result.villasAutoCreated;
 
     return res.status(201).json(result);
   } catch (error) {
@@ -318,7 +363,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
       const name = r.name?.trim();
       const email = r.email?.trim();
       const password = r.password?.trim();
-      const phone = residentPhone(r.phone);
+      const phone = optionalTrimmedPhone(r.phone);
 
       if (!username || username.length < 3 || !name || !email || !password || password.length < 6) {
         result.errors.push({
@@ -365,7 +410,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
       } catch (e) {
         result.errors.push({
           line,
-          message: importUserCreateErrorMessage(e),
+          message: formatUserUniqueConstraintError(e),
         });
         result.skipped++;
       }

@@ -5,20 +5,42 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
 
 const router = Router();
 
-const createUserSchema = z.object({
-  username: z.string().min(3).max(50),
-  name: z.string().min(2),
-  email: z.string().email(),
-  password: z.string().min(6),
-  phone: z.string().optional(),
-  role: z.nativeEnum(UserRole),
-  residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
-  villaId: z.string().optional(),
-  moveInDate: z.string().datetime().optional(),
-});
+const createUserSchema = z
+  .object({
+    username: z.string().min(3).max(50),
+    name: z.string().min(2),
+    email: z.string().email(),
+    password: z.string().min(6),
+    phone: z.string().optional(),
+    role: z.nativeEnum(UserRole),
+    residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
+    villaId: z.string().optional(),
+    /** When set without villaId, matches CSV import: create shell villa in this society if needed */
+    villaNumber: z.string().min(1).optional(),
+    moveInDate: z.string().datetime().optional(),
+  })
+  .refine(
+    (d) => {
+      if (d.role !== UserRole.RESIDENT) return true;
+      const hasVid = Boolean(d.villaId?.trim());
+      const hasNum = Boolean(d.villaNumber?.trim());
+      return hasVid || hasNum;
+    },
+    { message: "Residents require villaId or villaNumber", path: ["villaNumber"] },
+  )
+  .refine(
+    (d) => {
+      if (d.role !== UserRole.RESIDENT) return true;
+      const hasVid = Boolean(d.villaId?.trim());
+      const hasNum = Boolean(d.villaNumber?.trim());
+      return !(hasVid && hasNum);
+    },
+    { message: "Provide either villaId or villaNumber, not both", path: ["villaNumber"] },
+  );
 
 const updateUserSchema = z.object({
   name: z.string().min(1).optional(),
@@ -106,9 +128,35 @@ router.post(
         }
       }
 
+      const societyId = req.auth!.societyId;
+      let resolvedVillaId: string | undefined =
+        payload.villaId?.trim() || undefined;
+
+      if (payload.role === UserRole.RESIDENT) {
+        if (payload.villaId?.trim()) {
+          const villa = await prisma.villa.findFirst({
+            where: { id: payload.villaId, societyId },
+          });
+          if (!villa) {
+            return res.status(400).json({ message: "Villa not found in this society" });
+          }
+          resolvedVillaId = villa.id;
+        } else if (payload.villaNumber?.trim()) {
+          const shell = await findOrCreateShellVillaForResident({
+            societyId,
+            displayVillaNumber: payload.villaNumber.trim(),
+            placeholderOwnerName: payload.name,
+          });
+          if (!shell.ok) {
+            return res.status(400).json({ message: shell.message });
+          }
+          resolvedVillaId = shell.villaId;
+        }
+      }
+
       const user = await prisma.user.create({
         data: {
-          societyId: req.auth!.societyId,
+          societyId,
           username: payload.username,
           name: payload.name,
           email: payload.email,
@@ -118,7 +166,10 @@ router.post(
           residentType: payload.role === UserRole.RESIDENT && payload.residentType 
             ? payload.residentType 
             : "OWNER",
-          villaId: payload.villaId,
+          villaId:
+            payload.role === UserRole.RESIDENT
+              ? resolvedVillaId
+              : payload.villaId?.trim() || undefined,
           moveInDate: payload.moveInDate ? new Date(payload.moveInDate) : new Date(),
           isActive: true,
         },
