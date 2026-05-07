@@ -1,5 +1,5 @@
 import bcrypt from "bcryptjs";
-import { UserRole, ResidentType } from "@prisma/client";
+import { Prisma, UserRole, ResidentType } from "@prisma/client";
 import { Router } from "express";
 import multer from "multer";
 import { prisma } from "../../lib/prisma";
@@ -20,6 +20,26 @@ type ImportResult = {
   skipped: number;
   errors: Array<{ line: number; message: string }>;
 };
+
+/** Non-empty phone for DB (partial unique index on societyId + phone when phone is set). */
+function residentPhone(raw: string | undefined): string | undefined {
+  const t = raw?.trim() ?? "";
+  return t === "" ? undefined : t;
+}
+
+function importUserCreateErrorMessage(e: unknown): string {
+  if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === "P2002") {
+    const target = (e.meta?.target as string[] | undefined) ?? [];
+    const t = target.join(", ");
+    if (t.includes("phone") && t.includes("societyId")) {
+      return "Phone number already used by another user in this society. Use a unique phone per person, leave phone blank if shared/unknown, or fix duplicate rows in the CSV.";
+    }
+    if (t.includes("email")) return "Email already exists.";
+    if (t.includes("username")) return "Username already exists.";
+    return `Unique constraint failed (${t || "record"})`;
+  }
+  return e instanceof Error ? e.message : "Create failed";
+}
 
 function parseMoney(raw: string): number | null {
   const t = raw.trim();
@@ -176,6 +196,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
 
     const records = csvRowsToRecords(header, rows.slice(1));
     const result: ImportResult = { created: 0, skipped: 0, errors: [] };
+    const phonesSeenThisFile = new Set<string>();
 
     for (let i = 0; i < records.length; i++) {
       const line = i + 2;
@@ -185,6 +206,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       const email = r.email?.trim();
       const password = r.password?.trim();
       const villaNumber = r.villaNumber?.trim().toLowerCase();
+      const phone = residentPhone(r.phone);
 
       if (!username || username.length < 3 || !name || !email || !password || password.length < 6) {
         result.errors.push({
@@ -233,6 +255,30 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
         continue;
       }
 
+      if (phone) {
+        if (phonesSeenThisFile.has(phone)) {
+          result.errors.push({
+            line,
+            message: `Duplicate phone "${phone}" in this CSV (same society allows only one account per phone). Remove duplicate rows or use unique phones.`,
+          });
+          result.skipped++;
+          continue;
+        }
+        const phoneTaken = await prisma.user.findFirst({
+          where: { societyId, phone },
+          select: { id: true },
+        });
+        if (phoneTaken) {
+          result.errors.push({
+            line,
+            message: `Phone "${phone}" is already registered in this society. Use another number or leave phone empty.`,
+          });
+          result.skipped++;
+          continue;
+        }
+        phonesSeenThisFile.add(phone);
+      }
+
       try {
         const passwordHash = await bcrypt.hash(password, 10);
         await prisma.user.create({
@@ -241,7 +287,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
             username,
             name,
             email,
-            phone: r.phone?.trim() || undefined,
+            phone,
             passwordHash,
             role: UserRole.RESIDENT,
             residentType,
@@ -254,7 +300,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       } catch (e) {
         result.errors.push({
           line,
-          message: e instanceof Error ? e.message : "Create failed",
+          message: importUserCreateErrorMessage(e),
         });
         result.skipped++;
       }
@@ -292,6 +338,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
 
     const records = csvRowsToRecords(header, rows.slice(1));
     const result: ImportResult = { created: 0, skipped: 0, errors: [] };
+    const phonesSeenThisFile = new Set<string>();
 
     for (let i = 0; i < records.length; i++) {
       const line = i + 2;
@@ -300,6 +347,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
       const name = r.name?.trim();
       const email = r.email?.trim();
       const password = r.password?.trim();
+      const phone = residentPhone(r.phone);
 
       if (!username || username.length < 3 || !name || !email || !password || password.length < 6) {
         result.errors.push({
@@ -327,6 +375,30 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
         continue;
       }
 
+      if (phone) {
+        if (phonesSeenThisFile.has(phone)) {
+          result.errors.push({
+            line,
+            message: `Duplicate phone "${phone}" in this CSV. Use unique phones or leave phone empty.`,
+          });
+          result.skipped++;
+          continue;
+        }
+        const phoneTaken = await prisma.user.findFirst({
+          where: { societyId, phone },
+          select: { id: true },
+        });
+        if (phoneTaken) {
+          result.errors.push({
+            line,
+            message: `Phone "${phone}" is already registered in this society.`,
+          });
+          result.skipped++;
+          continue;
+        }
+        phonesSeenThisFile.add(phone);
+      }
+
       try {
         const passwordHash = await bcrypt.hash(password, 10);
         await prisma.user.create({
@@ -335,7 +407,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
             username,
             name,
             email,
-            phone: r.phone?.trim() || undefined,
+            phone,
             passwordHash,
             role: UserRole.GUARD,
             residentType: ResidentType.OWNER,
@@ -346,7 +418,7 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
       } catch (e) {
         result.errors.push({
           line,
-          message: e instanceof Error ? e.message : "Create failed",
+          message: importUserCreateErrorMessage(e),
         });
         result.skipped++;
       }
