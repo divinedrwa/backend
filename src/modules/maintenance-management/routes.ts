@@ -218,14 +218,15 @@ router.get("/month/:year/:month", async (req, res, next) => {
 // POST /api/maintenance-management/mark-paid
 // Mark a villa's maintenance as paid
 const markPaidSchema = z.object({
-  villaId: z.string().cuid(),
+  // Accept legacy UUID and current CUID ids.
+  villaId: z.string().min(1),
   year: z.number().int().min(2020).max(2100),
   month: z.number().int().min(1).max(12),
   amount: z.number().positive(),
   paymentDate: z.string().datetime(),
   paymentMode: z.enum(["CASH", "UPI", "CHEQUE", "BANK_TRANSFER"]),
   transactionId: z.string().optional(),
-  bankAccountId: z.string().cuid().optional(),
+  bankAccountId: z.string().min(1).optional(),
   remarks: z.string().optional(),
 });
 
