@@ -838,6 +838,37 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
       };
     });
 
+    // Enrich yearlyBreakdown with BillingCycle data where old Maintenance
+    // table has no records (society migrated to the new billing system).
+    const yearBillingCycles = await prisma.billingCycle.findMany({
+      where: { societyId, cycleKey: { startsWith: `${year}-` } },
+      select: {
+        id: true,
+        cycleKey: true,
+        amount: true,
+        payments: {
+          where: { paymentStatus: "SUCCESS" },
+          select: { amountPaid: true, userId: true },
+        },
+      },
+    });
+    for (const bc of yearBillingCycles) {
+      const parts = bc.cycleKey.split("-");
+      const monthNo = parseInt(parts[1], 10);
+      if (monthNo < 1 || monthNo > 12) continue;
+      const entry = yearlyBreakdown[monthNo - 1];
+      if (entry.totalExpected === 0 && entry.paidCount === 0 && entry.unpaidCount === 0) {
+        const bcAmount = Number(bc.amount);
+        const villaCount = villas.length;
+        const collected = bc.payments.reduce((sum, p) => sum + Number(p.amountPaid), 0);
+        const paidUserIds = new Set(bc.payments.map((p) => p.userId));
+        entry.totalExpected = bcAmount * villaCount;
+        entry.totalCollected = collected;
+        entry.paidCount = paidUserIds.size;
+        entry.unpaidCount = Math.max(0, villaCount - paidUserIds.size);
+      }
+    }
+
     return res.json({
       filter: { month, year },
       userSummary: {
