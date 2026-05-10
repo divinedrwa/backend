@@ -636,6 +636,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
   try {
     const { userId, societyId } = req.auth!;
     const { month, year } = parseMonthYear(req.query);
+    const billingCycleId = typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
 
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
@@ -710,6 +711,18 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
           ? null
           : await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
 
+    // When no MaintenanceCollectionCycle snapshots exist but a BillingCycle is
+    // selected, use BillingCycle.amount as the per-villa expected amount
+    // instead of villa.monthlyMaintenance.
+    let billingCycleAmount: number | null = null;
+    if (!cycleCore && billingCycleId) {
+      const bc = await prisma.billingCycle.findFirst({
+        where: { id: billingCycleId, societyId },
+        select: { amount: true },
+      });
+      if (bc) billingCycleAmount = Number(bc.amount);
+    }
+
     const periodLedgerRows = ledgerRows.filter((row) => row.year === year && row.month === month);
     const currentLedgerRow = periodLedgerRows[0] ?? null;
     const totalPaid = ledgerRows.reduce((sum, row) => sum + row.cashPaidAmount, 0);
@@ -747,14 +760,15 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
           const monthly = maintenanceByVilla.get(villa.id);
           const payment = paymentByVilla.get(villa.id);
           const status = monthly?.status ?? "UNPAID";
+          const villaExpected = billingCycleAmount ?? Number(villa.monthlyMaintenance);
           return {
             residentId: villa.id,
             name: villa.ownerName ?? "Unknown",
             flatNumber: villa.villaNumber ?? "-",
             villaNumber: villa.villaNumber ?? "-",
             ownerName: villa.ownerName ?? "Unknown",
-            amount: Number(villa.monthlyMaintenance),
-            paidTowardCycle: status === "PAID" ? Number(villa.monthlyMaintenance) : 0,
+            amount: villaExpected,
+            paidTowardCycle: status === "PAID" ? villaExpected : 0,
             status,
             paymentDate: payment?.paymentDate ?? null,
             paymentMode: payment?.paymentMode ?? null,
@@ -764,7 +778,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         });
     const totalExpectedCollection = useCycleResidents
       ? cycleCore.summary.totalExpected
-      : villas.reduce((sum, villa) => sum + Number(villa.monthlyMaintenance), 0);
+      : billingCycleAmount != null
+        ? villas.length * billingCycleAmount
+        : villas.reduce((sum, villa) => sum + Number(villa.monthlyMaintenance), 0);
     const totalCollectedCollection = useCycleResidents
       ? cycleCore.summary.collected
       : monthPaymentsAll.reduce((sum, payment) => sum + Number(payment.amount), 0);

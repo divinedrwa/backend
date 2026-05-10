@@ -1387,6 +1387,18 @@ router.get("/financial-dashboard", async (req, res, next) => {
     }
 
     const { month, year } = parseMonthYear(req.query);
+    const billingCycleIdParam = typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
+
+    // When no MaintenanceCollectionCycle exists but a BillingCycle is selected,
+    // use BillingCycle.amount as the per-villa expected amount.
+    let billingCycleAmount: number | null = null;
+    if (billingCycleIdParam) {
+      const bc = await prisma.billingCycle.findFirst({
+        where: { id: billingCycleIdParam, societyId },
+        select: { amount: true },
+      });
+      if (bc) billingCycleAmount = Number(bc.amount);
+    }
 
     const [
       villas,
@@ -1444,11 +1456,12 @@ router.get("/financial-dashboard", async (req, res, next) => {
       const m = maintenanceMap.get(villa.id);
       const p = paymentMap.get(villa.id);
       const status = m?.status ?? "UNPAID";
+      const villaExpected = billingCycleAmount ?? Number(villa.monthlyMaintenance);
       return {
         villaId: villa.id,
         villaNumber: villa.villaNumber,
         ownerName: villa.ownerName,
-        amount: Number(villa.monthlyMaintenance),
+        amount: villaExpected,
         status,
         dueDate: m?.dueDate ?? null,
         paidAt: p?.paymentDate ?? null,
@@ -1457,19 +1470,18 @@ router.get("/financial-dashboard", async (req, res, next) => {
       };
     });
 
-    const totalExpected = villas.reduce((sum, v) => sum + Number(v.monthlyMaintenance), 0);
-    // Cycle-progress view: cap each villa's contribution at its expected
-    // amount so the collection rate / pendingAmount reflect "how much of
-    // what's owed has come in", not "how much cash arrived". Overpayments
-    // (advance credits) flow into the fund balance via the uncapped
-    // `monthCashCollected` field below — same split the cycle path uses.
+    const totalExpected = billingCycleAmount != null
+      ? villas.length * billingCycleAmount
+      : villas.reduce((sum, v) => sum + Number(v.monthlyMaintenance), 0);
+    const perVillaExpected = billingCycleAmount ?? null;
     const paidByVilla = new Map<string, number>();
     for (const p of monthPayments) {
       paidByVilla.set(p.villaId, (paidByVilla.get(p.villaId) ?? 0) + Number(p.amount));
     }
     const collected = villas.reduce((sum, v) => {
       const paid = paidByVilla.get(v.id) ?? 0;
-      return sum + Math.min(paid, Number(v.monthlyMaintenance));
+      const cap = perVillaExpected ?? Number(v.monthlyMaintenance);
+      return sum + Math.min(paid, cap);
     }, 0);
     const monthCashCollected = money.maintenanceCashForMonth(month, year);
     const pendingAmount = Math.max(0, totalExpected - collected);
