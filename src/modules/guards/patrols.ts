@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { UserRole, PatrolStatus, IncidentSeverity } from "@prisma/client";
+import { findActiveGuardShift } from "../../lib/guardShiftActive";
 
 const router = Router();
 
@@ -21,19 +22,32 @@ const patrolCheckpointSchema = z.object({
   issuesFound: z.boolean().optional(),
 });
 
+const createIncidentSchema = z.object({
+  title: z.string().min(1),
+  description: z.string().min(1),
+  severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
+  location: z.string().optional(),
+});
+
 // POST /api/guards/start-patrol - Start patrol
 router.post("/start-patrol", requireRole(UserRole.GUARD), validateBody(startPatrolSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { location, notes } = req.body;
 
-    // Get guard's assigned gate
+    // Try active shift gate first, then legacy assignedGate
+    const activeShift = await findActiveGuardShift(prisma, {
+      guardId: userId,
+      societyId,
+    });
+
     const guard = await prisma.user.findUnique({
       where: { id: userId },
       include: { assignedGate: true },
     });
 
-    if (!guard?.assignedGate) {
+    const gateId = activeShift?.gateId ?? guard?.assignedGate?.id;
+    if (!gateId) {
       return res.status(400).json({ message: "No gate assigned to guard" });
     }
 
@@ -41,7 +55,7 @@ router.post("/start-patrol", requireRole(UserRole.GUARD), validateBody(startPatr
       data: {
         societyId,
         guardId: userId,
-        gateId: guard.assignedGate.id,
+        gateId,
         checkpointName: "Patrol Start",
         checkpointLocation: location,
         scheduledTime: new Date(),
@@ -66,13 +80,19 @@ router.post("/patrol-checkpoint", requireRole(UserRole.GUARD), validateBody(patr
     const { userId, societyId } = req.auth!;
     const { location, notes, issuesFound } = req.body;
 
-    // Get guard's assigned gate
+    // Try active shift gate first, then legacy assignedGate
+    const activeShift = await findActiveGuardShift(prisma, {
+      guardId: userId,
+      societyId,
+    });
+
     const guard = await prisma.user.findUnique({
       where: { id: userId },
       include: { assignedGate: true },
     });
 
-    if (!guard?.assignedGate) {
+    const gateId = activeShift?.gateId ?? guard?.assignedGate?.id;
+    if (!gateId) {
       return res.status(400).json({ message: "No gate assigned to guard" });
     }
 
@@ -80,7 +100,7 @@ router.post("/patrol-checkpoint", requireRole(UserRole.GUARD), validateBody(patr
       data: {
         societyId,
         guardId: userId,
-        gateId: guard.assignedGate.id,
+        gateId,
         checkpointName: location || "Checkpoint",
         checkpointLocation: location,
         scheduledTime: new Date(),
@@ -167,14 +187,10 @@ router.get("/patrols-today", requireRole(UserRole.GUARD), async (req, res, next)
 });
 
 // POST /api/guards/create-incident - Report incident
-router.post("/create-incident", requireRole(UserRole.GUARD), async (req, res, next) => {
+router.post("/create-incident", requireRole(UserRole.GUARD), validateBody(createIncidentSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { title, description, location, severity } = req.body;
-
-    if (!title || !description) {
-      return res.status(400).json({ message: "Title and description required" });
-    }
 
     const incident = await prisma.incident.create({
       data: {

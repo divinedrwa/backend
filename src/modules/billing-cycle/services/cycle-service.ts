@@ -1,8 +1,9 @@
 import {
   BillingCycle,
   BillingCycleStatus,
-  NotificationCategory,
   BillingUserPaymentStatus,
+  MaintenanceBillingRole,
+  NotificationCategory,
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
@@ -116,8 +117,17 @@ export async function buildCurrentCycleResponse(input: {
   societyId: string;
   userId: string;
   nowUtc?: Date;
+  /** When set, return ledger + window for this cycle (must belong to society). */
+  billingCycleId?: string;
 }): Promise<Record<string, unknown>> {
   const nowUtc = input.nowUtc ?? new Date();
+  const billingSubject = await prisma.user.findFirst({
+    where: { id: input.userId, societyId: input.societyId },
+    select: { maintenanceBillingRole: true },
+  });
+  const maintenanceBillingExcluded =
+    billingSubject?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
+
   const pendingRows = await prisma.billingCycle.findMany({
     where: { societyId: input.societyId },
     orderBy: { paymentEndDate: "asc" },
@@ -133,26 +143,38 @@ export async function buildCurrentCycleResponse(input: {
     select: { cycleId: true },
   });
   const paidCycleIds = new Set(pendingPayments.map((p) => p.cycleId));
-  const pendingDues = pendingRows
-    .filter((c) => !paidCycleIds.has(c.id))
-    .map((c) => {
-      const isGraceOver =
-        nowUtc.getTime() >
-        c.paymentEndDate.getTime() + c.gracePeriodDays * 24 * 60 * 60 * 1000;
-      const status = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
-      return {
-        cycleId: c.id,
-        cycleKey: c.cycleKey,
-        title: c.title,
-        amount: Number(c.amount),
-        paymentEndDate: c.paymentEndDate.toISOString(),
-        gracePeriodDays: c.gracePeriodDays,
-        isGraceOver,
-        status,
-      };
-    });
+  const pendingDues = maintenanceBillingExcluded
+    ? []
+    : pendingRows
+        .filter((c) => !paidCycleIds.has(c.id))
+        .map((c) => {
+          const isGraceOver =
+            nowUtc.getTime() >
+            c.paymentEndDate.getTime() + c.gracePeriodDays * 24 * 60 * 60 * 1000;
+          const status = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
+          return {
+            cycleId: c.id,
+            cycleKey: c.cycleKey,
+            title: c.title,
+            amount: Number(c.amount),
+            paymentEndDate: c.paymentEndDate.toISOString(),
+            gracePeriodDays: c.gracePeriodDays,
+            isGraceOver,
+            status,
+          };
+        });
 
-  const cycle = await findDisplayCycle(input.societyId, nowUtc);
+  let cycle: BillingCycle | null = null;
+  if (input.billingCycleId?.trim()) {
+    cycle = await prisma.billingCycle.findFirst({
+      where: { id: input.billingCycleId.trim(), societyId: input.societyId },
+    });
+    if (!cycle) {
+      throw new Error("BILLING_CYCLE_NOT_FOUND");
+    }
+  } else {
+    cycle = await findDisplayCycle(input.societyId, nowUtc);
+  }
   if (!cycle) {
     return {
       cycleId: null,
@@ -162,11 +184,13 @@ export async function buildCurrentCycleResponse(input: {
       paymentStartDate: null,
       paymentEndDate: null,
       dueDate: null,
-      isPaid: false,
+      isPaid: maintenanceBillingExcluded,
       lateFee: null,
       totalDue: null,
       effectiveLateFeeComponent: null,
       pendingDues,
+      maintenanceBillingRole: billingSubject?.maintenanceBillingRole ?? null,
+      maintenanceBillingExcluded,
     };
   }
 
@@ -184,7 +208,6 @@ export async function buildCurrentCycleResponse(input: {
       userId_cycleId: { userId: input.userId, cycleId: cycle.id },
     },
   });
-  const isPaid = payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS;
   const ledger = await computeUserBillingLedger(input.societyId, input.userId);
   const currentLedger =
     ledger.cycles.find((row) => row.cycleId === cycle.id) ??
@@ -193,9 +216,13 @@ export async function buildCurrentCycleResponse(input: {
       cycleKey: cycle.cycleKey,
       title: cycle.title,
       expectedAmount: Number(cycle.amount),
-      cashPaidAmount: isPaid ? Number(payment?.amountPaid ?? 0) : 0,
-      paidAmount: isPaid ? Number(payment?.amountPaid ?? 0) : 0,
-      deltaAmount: (isPaid ? Number(payment?.amountPaid ?? 0) : 0) - Number(cycle.amount),
+      cashPaidAmount:
+        payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0,
+      paidAmount:
+        payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0,
+      deltaAmount:
+        (payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0) -
+        Number(cycle.amount),
       balanceBefore: 0,
       balanceAfter: 0,
       paymentStatus: payment?.paymentStatus ?? "NONE",
@@ -204,6 +231,7 @@ export async function buildCurrentCycleResponse(input: {
   const availableCredit = Math.max(0, currentLedger.balanceBefore);
   const previousDue = Math.max(0, -currentLedger.balanceBefore);
   const remainingDue = Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount);
+  const isPaid = remainingDue <= 0.005;
 
   const serverStatus = deriveCycleStatusUtc(nowUtc, cycle.paymentStartDate, cycle.paymentEndDate);
 
@@ -215,19 +243,21 @@ export async function buildCurrentCycleResponse(input: {
     paymentStartDate: cycle.paymentStartDate.toISOString(),
     paymentEndDate: cycle.paymentEndDate.toISOString(),
     dueDate: cycle.paymentEndDate.toISOString(),
-    isPaid,
+    isPaid: maintenanceBillingExcluded ? true : isPaid,
     lateFee: Number(cycle.lateFee),
-    totalDue: due.totalDue,
-    effectiveLateFeeComponent: due.lateFeeAmount,
+    totalDue: maintenanceBillingExcluded ? 0 : due.totalDue,
+    effectiveLateFeeComponent: maintenanceBillingExcluded ? 0 : due.lateFeeAmount,
     cycleKey: cycle.cycleKey,
     expectedAmount: currentLedger.expectedAmount,
       cashPaidAmount: currentLedger.cashPaidAmount,
     paidAmount: currentLedger.paidAmount,
     deltaAmount: currentLedger.deltaAmount,
     availableCredit,
-    remainingDue,
-    previousDue,
+    remainingDue: maintenanceBillingExcluded ? 0 : remainingDue,
+    previousDue: maintenanceBillingExcluded ? 0 : previousDue,
     pendingDues,
+    maintenanceBillingRole: billingSubject?.maintenanceBillingRole ?? null,
+    maintenanceBillingExcluded,
   };
 }
 
@@ -235,13 +265,36 @@ export async function computeUserBillingLedger(
   societyId: string,
   userId: string
 ): Promise<{ cycles: BillingLedgerCycleRow[]; currentBalance: number }> {
+  const user = await prisma.user.findFirst({
+    where: { id: userId, societyId },
+    select: { villaId: true, maintenanceBillingRole: true },
+  });
+  const villaId = user?.villaId ?? null;
+
   const cycles = await prisma.billingCycle.findMany({
     where: { societyId },
     orderBy: [{ cycleKey: "asc" }],
-    select: { id: true, cycleKey: true, title: true, amount: true },
+    select: { id: true, cycleKey: true, title: true, amount: true, financialYearId: true },
   });
   if (cycles.length === 0) {
     return { cycles: [], currentBalance: 0 };
+  }
+
+  if (user?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+    const rows: BillingLedgerCycleRow[] = cycles.map((c) => ({
+      cycleId: c.id,
+      cycleKey: c.cycleKey,
+      title: c.title,
+      expectedAmount: 0,
+      cashPaidAmount: 0,
+      paidAmount: 0,
+      deltaAmount: 0,
+      balanceBefore: 0,
+      balanceAfter: 0,
+      paymentStatus: "NONE",
+      paidAt: null,
+    }));
+    return { cycles: rows, currentBalance: 0 };
   }
 
   const payments = await prisma.userCyclePayment.findMany({
@@ -255,16 +308,82 @@ export async function computeUserBillingLedger(
   });
   const payMap = new Map(payments.map((p) => [p.cycleId, p]));
 
+  /** When society maintenance collection snapshots exist for this villa, they are the source of truth for expected/paid (Maintenance Payment Management UI). */
+  const billingCycleIdToSnap = new Map<
+    string,
+    { expectedAmount: unknown; paidAmount: unknown; status: string }
+  >();
+
+  const fyPairs = cycles
+    .filter((c): c is (typeof c) & { financialYearId: string } => Boolean(c.financialYearId))
+    .map((c) => ({ financialYearId: c.financialYearId, periodKey: c.cycleKey }));
+
+  if (villaId && fyPairs.length > 0) {
+    const maintenanceCycles = await prisma.maintenanceCollectionCycle.findMany({
+      where: { OR: fyPairs },
+      select: { id: true, financialYearId: true, periodKey: true },
+    });
+    const mcIdByKey = new Map(
+      maintenanceCycles.map((m) => [`${m.financialYearId}:${m.periodKey}`, m.id] as const),
+    );
+    const mIds = [...new Set(maintenanceCycles.map((m) => m.id))];
+    if (mIds.length > 0) {
+      const snaps = await prisma.villaMaintenanceSnapshot.findMany({
+        where: { villaId, cycleId: { in: mIds } },
+        select: { cycleId: true, expectedAmount: true, paidAmount: true, status: true },
+      });
+      const snapByMcId = new Map(snaps.map((s) => [s.cycleId, s]));
+      for (const c of cycles) {
+        if (!c.financialYearId) continue;
+        const mcId = mcIdByKey.get(`${c.financialYearId}:${c.cycleKey}`);
+        if (!mcId) continue;
+        const snap = snapByMcId.get(mcId);
+        if (snap) billingCycleIdToSnap.set(c.id, snap);
+      }
+    }
+  }
+
   let rollingBalance = 0;
   const rows: BillingLedgerCycleRow[] = [];
   for (const c of cycles) {
     const p = payMap.get(c.id);
-    const expectedAmount = Number(c.amount);
-    const cashPaidAmount =
-      p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
+    const snap = billingCycleIdToSnap.get(c.id);
+
+    let expectedAmount: number;
+    let cashPaidAmount: number;
+    let paymentStatus: BillingUserPaymentStatus | "NONE";
+    let paidAt: string | null;
+
+    if (snap) {
+      expectedAmount = Number(snap.expectedAmount);
+      let snapPaid = Number(snap.paidAmount);
+      if (snap.status === "WAIVED") {
+        snapPaid = expectedAmount;
+      }
+      const gatewayPaid =
+        p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
+      cashPaidAmount = Math.max(snapPaid, gatewayPaid);
+
+      if (snap.status === "PAID" || snap.status === "WAIVED") {
+        paymentStatus = BillingUserPaymentStatus.SUCCESS;
+      } else if (cashPaidAmount > 0 || snap.status === "PARTIAL") {
+        paymentStatus = BillingUserPaymentStatus.PENDING;
+      } else {
+        paymentStatus = p?.paymentStatus ?? "NONE";
+      }
+      paidAt = p?.paidAt?.toISOString() ?? null;
+    } else {
+      expectedAmount = Number(c.amount);
+      cashPaidAmount =
+        p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
+      paymentStatus = p?.paymentStatus ?? "NONE";
+      paidAt = p?.paidAt?.toISOString() ?? null;
+    }
+
     const balanceBefore = rollingBalance;
     const creditApplied = Math.max(0, Math.min(expectedAmount, balanceBefore));
-    const paidAmount = Math.min(expectedAmount, creditApplied + cashPaidAmount);
+    // Keep paidAmount uncapped so cycle-level overpayment is visible as positive delta/credit.
+    const paidAmount = creditApplied + cashPaidAmount;
     const deltaAmount = paidAmount - expectedAmount;
     rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
     rows.push({
@@ -277,8 +396,8 @@ export async function computeUserBillingLedger(
       deltaAmount,
       balanceBefore,
       balanceAfter: rollingBalance,
-      paymentStatus: p?.paymentStatus ?? "NONE",
-      paidAt: p?.paidAt?.toISOString() ?? null,
+      paymentStatus,
+      paidAt,
     });
   }
 

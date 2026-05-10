@@ -2,7 +2,9 @@ import { Router } from "express";
 import PDFDocument from "pdfkit";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
-import { UserRole } from "@prisma/client";
+import { MaintenanceBillingRole, UserRole } from "@prisma/client";
+import { computeUserBillingLedger } from "../billing-cycle/services/cycle-service";
+import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 
 const router = Router();
 
@@ -10,12 +12,137 @@ router.use(requireAuth);
 
 function parseMonthYear(query: any) {
   const now = new Date();
-  const month = Number(query.month ?? now.getMonth() + 1);
-  const year = Number(query.year ?? now.getFullYear());
+  const rawM = query?.month;
+  const rawY = query?.year;
+  const mPick = Array.isArray(rawM) ? rawM[0] : rawM;
+  const yPick = Array.isArray(rawY) ? rawY[0] : rawY;
+  const month = Number(mPick ?? now.getMonth() + 1);
+  const year = Number(yPick ?? now.getFullYear());
   return {
     month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : now.getMonth() + 1,
     year: Number.isFinite(year) && year >= 2000 ? year : now.getFullYear(),
   };
+}
+
+async function resolveMaintenanceCollectionCycleId(
+  societyId: string,
+  month: number,
+  year: number,
+): Promise<string | null> {
+  const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+    where: {
+      societyId,
+      periodMonth: month,
+      periodYear: year,
+    },
+    orderBy: { dueDate: "desc" },
+    select: { id: true },
+  });
+  return cycle?.id ?? null;
+}
+
+type ResidentLedgerRow = {
+  id: string;
+  cycleId: string;
+  cycleKey: string;
+  title: string;
+  month: number;
+  year: number;
+  dueDate: Date | null;
+  expectedAmount: number;
+  cashPaidAmount: number;
+  creditApplied: number;
+  paidAmount: number;
+  remainingDue: number;
+  balanceBefore: number;
+  carryForwardBalance: number;
+  previousDue: number;
+  availableCredit: number;
+  status: "PAID" | "PARTIAL" | "PENDING" | "OVERDUE" | "AUTO_SETTLED";
+  isOverdue: boolean;
+  paidAt: string | null;
+};
+
+function parseCycleMonthYear(cycleKey: string, dueDate: Date | null): { month: number; year: number } {
+  const m = /^(\d{4})-(\d{2})$/.exec(cycleKey);
+  if (m) {
+    return {
+      year: Number(m[1]),
+      month: Number(m[2]),
+    };
+  }
+  if (dueDate) {
+    return {
+      year: dueDate.getUTCFullYear(),
+      month: dueDate.getUTCMonth() + 1,
+    };
+  }
+  const now = new Date();
+  return { month: now.getMonth() + 1, year: now.getFullYear() };
+}
+
+async function buildResidentLedgerRows(societyId: string, userId: string): Promise<ResidentLedgerRow[]> {
+  const [ledger, cycles] = await Promise.all([
+    computeUserBillingLedger(societyId, userId),
+    prisma.billingCycle.findMany({
+      where: { societyId },
+      select: {
+        id: true,
+        cycleKey: true,
+        title: true,
+        paymentEndDate: true,
+      },
+    }),
+  ]);
+
+  const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
+  const now = new Date();
+
+  return ledger.cycles.map((row) => {
+    const cycle = cycleById.get(row.cycleId);
+    const dueDate = cycle?.paymentEndDate ?? null;
+    const { month, year } = parseCycleMonthYear(row.cycleKey, dueDate);
+    const creditApplied = Math.max(0, Math.min(row.expectedAmount, row.balanceBefore));
+    const remainingDue = Math.max(0, row.expectedAmount - row.paidAmount);
+    const previousDue = Math.max(0, -row.balanceBefore);
+    const availableCredit = Math.max(0, row.balanceBefore);
+    const isOverdue = Boolean(
+      dueDate &&
+        remainingDue > 0.005 &&
+        new Date(dueDate).getTime() < now.getTime(),
+    );
+
+    let status: ResidentLedgerRow["status"] = "PENDING";
+    if (remainingDue <= 0.005) {
+      status = creditApplied > 0 && row.cashPaidAmount <= 0.005 ? "AUTO_SETTLED" : "PAID";
+    } else if (row.paidAmount > 0.005 || row.cashPaidAmount > 0.005) {
+      status = "PARTIAL";
+    } else if (isOverdue) {
+      status = "OVERDUE";
+    }
+
+    return {
+      id: row.cycleId,
+      cycleId: row.cycleId,
+      cycleKey: row.cycleKey,
+      title: cycle?.title ?? row.title,
+      month,
+      year,
+      dueDate,
+      expectedAmount: row.expectedAmount,
+      cashPaidAmount: row.cashPaidAmount,
+      creditApplied,
+      paidAmount: row.paidAmount,
+      remainingDue,
+      balanceBefore: row.balanceBefore,
+      carryForwardBalance: row.balanceAfter,
+      previousDue,
+      availableCredit,
+      status,
+      isOverdue,
+      paidAt: row.paidAt,
+    };
+  });
 }
 
 function buildResidentPdfBuffer(params: {
@@ -65,32 +192,32 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT), async (req, res, n
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, maintenanceBillingRole: true },
     });
 
     if (!user || !user.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    // Get maintenance records
-    const maintenance = await prisma.maintenance.findMany({
-      where: {
-        villaId: user.villaId,
-        societyId,
-      },
-      include: {
-        payments: {
-          orderBy: { paymentDate: "desc" }, // Correct field name
+    if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+      return res.json({
+        maintenance: [],
+        summary: {
+          totalPaid: 0,
+          totalPending: 0,
+          paidCount: 0,
+          pendingCount: 0,
         },
-      },
-      orderBy: [{ year: "desc" }, { month: "desc" }],
-      take: 12, // Last 12 months
-    });
+        maintenanceBillingRole: MaintenanceBillingRole.EXCLUDED,
+        notice:
+          "Maintenance for this villa is billed to the primary resident account. Use that login to view or pay dues.",
+      });
+    }
 
-    const periodKeys = Array.from(
-      new Set(maintenance.map((m) => `${m.year}-${m.month}`))
-    );
-    const periodFilters = periodKeys.map((key) => {
+    const ledgerRows = await buildResidentLedgerRows(societyId, userId);
+    const periodFilters = Array.from(
+      new Set(ledgerRows.map((row) => `${row.year}-${row.month}`)),
+    ).map((key) => {
       const [yearStr, monthStr] = key.split("-");
       return { year: Number(yearStr), month: Number(monthStr) };
     });
@@ -120,7 +247,7 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT), async (req, res, n
     ]);
 
     const summaryMap = new Map(
-      monthlySummaries.map((s) => [`${s.year}-${s.month}`, s])
+      monthlySummaries.map((s) => [`${s.year}-${s.month}`, s]),
     );
     const expenseMap = new Map<string, { total: number; breakdown: Record<string, number> }>();
     for (const expense of monthExpenses) {
@@ -133,45 +260,58 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT), async (req, res, n
       expenseMap.set(key, current);
     }
 
-    // Calculate summary
-    const summary = {
-      totalPaid: 0,
-      totalPending: 0,
-      paidCount: 0,
-      pendingCount: 0,
-    };
-
-    maintenance.forEach((m) => {
-      if (m.status === "PAID") {
-        summary.totalPaid += Number(m.amount);
-        summary.paidCount++;
-      } else {
-        summary.totalPending += Number(m.amount);
-        summary.pendingCount++;
-      }
-    });
+    const summary = ledgerRows.reduce(
+      (acc, row) => {
+        acc.totalPaid += row.cashPaidAmount;
+        acc.totalPending += row.remainingDue;
+        if (row.remainingDue <= 0.005) acc.paidCount++;
+        else acc.pendingCount++;
+        return acc;
+      },
+      { totalPaid: 0, totalPending: 0, paidCount: 0, pendingCount: 0 },
+    );
 
     return res.json({
-      maintenance: maintenance.map((m) => {
-        const key = `${m.year}-${m.month}`;
-        const monthlySummary = summaryMap.get(key);
-        const fallbackExpense = expenseMap.get(key);
-        const summaryBreakdown = (monthlySummary?.categoryBreakdown ?? {}) as Record<string, unknown>;
-        const normalizedBreakdown: Record<string, number> = {};
-        for (const [category, amount] of Object.entries(summaryBreakdown)) {
-          normalizedBreakdown[category] = Number(amount) || 0;
-        }
+      maintenance: ledgerRows
+        .filter((row) => row.cashPaidAmount > 0.005 || row.creditApplied > 0.005 || row.remainingDue > 0.005)
+        .sort((a, b) => (b.year - a.year) || (b.month - a.month))
+        .map((row) => {
+          const key = `${row.year}-${row.month}`;
+          const monthlySummary = summaryMap.get(key);
+          const fallbackExpense = expenseMap.get(key);
+          const summaryBreakdown = (monthlySummary?.categoryBreakdown ?? {}) as Record<string, unknown>;
+          const normalizedBreakdown: Record<string, number> = {};
+          for (const [category, amount] of Object.entries(summaryBreakdown)) {
+            normalizedBreakdown[category] = Number(amount) || 0;
+          }
 
-        return {
-          ...m,
-          societyExpense:
-            Number(monthlySummary?.totalExpenses ?? fallbackExpense?.total ?? 0) || 0,
-          expenseBreakdown:
-            Object.keys(normalizedBreakdown).length > 0
-              ? normalizedBreakdown
-              : (fallbackExpense?.breakdown ?? {}),
-        };
-      }),
+          return {
+            id: row.id,
+            cycleId: row.cycleId,
+            cycleKey: row.cycleKey,
+            title: row.title,
+            month: row.month,
+            year: row.year,
+            amount: row.cashPaidAmount,
+            expectedAmount: row.expectedAmount,
+            paidAmount: row.paidAmount,
+            cashPaidAmount: row.cashPaidAmount,
+            creditApplied: row.creditApplied,
+            remainingDue: row.remainingDue,
+            previousDue: row.previousDue,
+            carryForwardBalance: row.carryForwardBalance,
+            status: row.status,
+            dueDate: row.dueDate,
+            paidAt: row.paidAt,
+            paymentDate: row.paidAt,
+            societyExpense:
+              Number(monthlySummary?.totalExpenses ?? fallbackExpense?.total ?? 0) || 0,
+            expenseBreakdown:
+              Object.keys(normalizedBreakdown).length > 0
+                ? normalizedBreakdown
+                : (fallbackExpense?.breakdown ?? {}),
+          };
+        }),
       summary,
     });
   } catch (error) {
@@ -187,22 +327,29 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, r
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, maintenanceBillingRole: true },
     });
 
     if (!user || !user.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    // Get pending maintenance
-    const pending = await prisma.maintenance.findMany({
-      where: {
-        villaId: user.villaId,
-        societyId,
-        status: { in: ["PENDING", "OVERDUE"] },
-      },
-      orderBy: [{ year: "asc" }, { month: "asc" }],
-    });
+    if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+      return res.json({
+        pending: [],
+        totalDue: 0,
+        pendingCount: 0,
+        overdueCount: 0,
+        overdue: [],
+        maintenanceBillingRole: MaintenanceBillingRole.EXCLUDED,
+        notice:
+          "Maintenance for this villa is billed to the primary resident account. Use that login to view or pay dues.",
+      });
+    }
+
+    const pending = (await buildResidentLedgerRows(societyId, userId))
+      .filter((row) => row.remainingDue > 0.005)
+      .sort((a, b) => (a.year - b.year) || (a.month - b.month));
 
     const periodKeys = Array.from(new Set(pending.map((m) => `${m.year}-${m.month}`)));
     const periodFilters = periodKeys.map((key) => {
@@ -248,7 +395,7 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, r
       expenseMap.set(key, current);
     }
 
-    const totalDue = pending.reduce((sum, m) => sum + Number(m.amount), 0);
+    const totalDue = pending.reduce((sum, m) => sum + Number(m.remainingDue), 0);
 
     // Check if any are overdue
     const now = new Date();
@@ -265,7 +412,23 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, r
           normalizedBreakdown[category] = Number(amount) || 0;
         }
         return {
-          ...m,
+          id: m.id,
+          cycleId: m.cycleId,
+          cycleKey: m.cycleKey,
+          title: m.title,
+          villaId: user.villaId,
+          month: m.month,
+          year: m.year,
+          amount: m.remainingDue,
+          expectedAmount: m.expectedAmount,
+          paidAmount: m.paidAmount,
+          cashPaidAmount: m.cashPaidAmount,
+          creditApplied: m.creditApplied,
+          remainingDue: m.remainingDue,
+          previousDue: m.previousDue,
+          dueDate: m.dueDate,
+          status: m.status,
+          isOverdue: m.isOverdue,
           societyExpense:
             Number(monthlySummary?.totalExpenses ?? fallbackExpense?.total ?? 0) || 0,
           expenseBreakdown:
@@ -277,7 +440,25 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, r
       totalDue,
       pendingCount: pending.length,
       overdueCount: overdue.length,
-      overdue,
+      overdue: overdue.map((m) => ({
+        id: m.id,
+        cycleId: m.cycleId,
+        cycleKey: m.cycleKey,
+        title: m.title,
+        villaId: user.villaId,
+        month: m.month,
+        year: m.year,
+        amount: m.remainingDue,
+        expectedAmount: m.expectedAmount,
+        paidAmount: m.paidAmount,
+        cashPaidAmount: m.cashPaidAmount,
+        creditApplied: m.creditApplied,
+        remainingDue: m.remainingDue,
+        previousDue: m.previousDue,
+        dueDate: m.dueDate,
+        status: m.status,
+        isOverdue: true,
+      })),
     });
   } catch (error) {
     next(error);
@@ -293,11 +474,21 @@ router.get("/maintenance-history/:year", requireRole(UserRole.RESIDENT), async (
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, maintenanceBillingRole: true },
     });
 
     if (!user || !user.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
+    }
+
+    if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+      return res.json({
+        maintenance: [],
+        year: parseInt(year),
+        maintenanceBillingRole: MaintenanceBillingRole.EXCLUDED,
+        notice:
+          "Maintenance for this villa is billed to the primary resident account. Use that login to view history.",
+      });
     }
 
     const maintenance = await prisma.maintenance.findMany({
@@ -455,13 +646,10 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    const [allRecords, currentRecords, payments, pending, globalPending, monthlyExpenseSummary, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceAll, yearPaymentsAll, yearExpenseSummaries] =
+    const [ledgerRows, collectionCycleId, currentRecords, payments, globalPending, monthlyExpenseSummary, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceAll, yearPaymentsAll, yearExpenseSummaries] =
       await Promise.all([
-        prisma.maintenance.findMany({
-          where: { societyId, villaId: user.villaId },
-          orderBy: [{ year: "desc" }, { month: "desc" }],
-          take: 24,
-        }),
+        buildResidentLedgerRows(societyId, userId),
+        resolveMaintenanceCollectionCycleId(societyId, month, year),
         prisma.maintenance.findMany({
           where: { societyId, villaId: user.villaId, month, year },
           orderBy: { createdAt: "desc" },
@@ -470,14 +658,6 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
           where: { societyId, villaId: user.villaId },
           orderBy: { paymentDate: "desc" },
           take: 36,
-        }),
-        prisma.maintenance.findMany({
-          where: {
-            societyId,
-            villaId: user.villaId,
-            status: { in: ["PENDING", "OVERDUE"] },
-          },
-          orderBy: [{ year: "asc" }, { month: "asc" }],
         }),
         prisma.maintenance.findMany({
           where: {
@@ -525,10 +705,20 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         }),
       ]);
 
-    const paid = allRecords.filter((r) => r.status === "PAID");
-    const totalPaid = paid.reduce((sum, r) => sum + Number(r.amount), 0);
-    const totalPending = pending.reduce((sum, r) => sum + Number(r.amount), 0);
+    const cycleCore =
+      collectionCycleId == null
+          ? null
+          : await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
+
+    const periodLedgerRows = ledgerRows.filter((row) => row.year === year && row.month === month);
+    const currentLedgerRow = periodLedgerRows[0] ?? null;
+    const totalPaid = ledgerRows.reduce((sum, row) => sum + row.cashPaidAmount, 0);
+    const totalPending = ledgerRows.reduce((sum, row) => sum + row.remainingDue, 0);
     const latestPayment = payments[0] ?? null;
+    const latestLedgerCashPayment =
+      ledgerRows
+        .filter((row) => row.cashPaidAmount > 0.005 && row.paidAt != null)
+        .sort((a, b) => new Date(b.paidAt ?? 0).getTime() - new Date(a.paidAt ?? 0).getTime())[0] ?? null;
     const currentRecord = currentRecords[0] ?? null;
     const maintenanceByVilla = new Map(monthMaintenanceAll.map((m) => [m.villaId, m]));
     const paymentByVilla = new Map<string, (typeof monthPaymentsAll)[number]>();
@@ -537,34 +727,58 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         paymentByVilla.set(payment.villaId, payment);
       }
     }
-    const residents = villas.map((villa) => {
-      const monthly = maintenanceByVilla.get(villa.id);
-      const payment = paymentByVilla.get(villa.id);
-      const status = monthly?.status ?? "UNPAID";
-      return {
-        residentId: villa.id,
-        name: villa.ownerName ?? "Unknown",
-        flatNumber: villa.villaNumber ?? "-",
-        villaNumber: villa.villaNumber ?? "-",
-        ownerName: villa.ownerName ?? "Unknown",
-        amount: Number(villa.monthlyMaintenance),
-        status,
-        paymentDate: payment?.paymentDate ?? null,
-        paymentMode: payment?.paymentMode ?? null,
-        notes: payment?.remarks ?? null,
-      };
-    });
-    const totalExpectedCollection = villas.reduce(
-      (sum, villa) => sum + Number(villa.monthlyMaintenance),
-      0
-    );
-    const totalCollectedCollection = monthPaymentsAll.reduce(
-      (sum, payment) => sum + Number(payment.amount),
-      0
-    );
-    const totalPendingCollection = Math.max(0, totalExpectedCollection - totalCollectedCollection);
-    const paidResidentsCount = residents.filter((r) => r.status === "PAID").length;
-    const unpaidResidentsCount = residents.length - paidResidentsCount;
+    const useCycleResidents = cycleCore != null && !("error" in cycleCore);
+    const residents = useCycleResidents
+      ? cycleCore.residents.map((resident) => ({
+          residentId: resident.villaId,
+          name: resident.ownerName ?? "Unknown",
+          flatNumber: resident.villaNumber ?? "-",
+          villaNumber: resident.villaNumber ?? "-",
+          ownerName: resident.ownerName ?? "Unknown",
+          amount: resident.amount,
+          paidTowardCycle: resident.paidTowardCycle ?? 0,
+          status: resident.status,
+          paymentDate: resident.paidAt ?? null,
+          paymentMode: resident.paymentMode ?? null,
+          notes: null,
+          dueDate: resident.dueDate,
+        }))
+      : villas.map((villa) => {
+          const monthly = maintenanceByVilla.get(villa.id);
+          const payment = paymentByVilla.get(villa.id);
+          const status = monthly?.status ?? "UNPAID";
+          return {
+            residentId: villa.id,
+            name: villa.ownerName ?? "Unknown",
+            flatNumber: villa.villaNumber ?? "-",
+            villaNumber: villa.villaNumber ?? "-",
+            ownerName: villa.ownerName ?? "Unknown",
+            amount: Number(villa.monthlyMaintenance),
+            paidTowardCycle: status === "PAID" ? Number(villa.monthlyMaintenance) : 0,
+            status,
+            paymentDate: payment?.paymentDate ?? null,
+            paymentMode: payment?.paymentMode ?? null,
+            notes: payment?.remarks ?? null,
+            dueDate: monthly?.dueDate ?? null,
+          };
+        });
+    const totalExpectedCollection = useCycleResidents
+      ? cycleCore.summary.totalExpected
+      : villas.reduce((sum, villa) => sum + Number(villa.monthlyMaintenance), 0);
+    const totalCollectedCollection = useCycleResidents
+      ? cycleCore.summary.collected
+      : monthPaymentsAll.reduce((sum, payment) => sum + Number(payment.amount), 0);
+    const totalPendingCollection = useCycleResidents
+      ? cycleCore.summary.pendingAmount
+      : Math.max(0, totalExpectedCollection - totalCollectedCollection);
+    const paidResidentsCount = useCycleResidents
+      ? cycleCore.summary.paidCount
+      : residents.filter((r) => r.status === "PAID").length;
+    const partialResidentsCount = useCycleResidents ? cycleCore.summary.partialCount : 0;
+    const overdueResidentsCount = useCycleResidents ? cycleCore.summary.overdueCount : 0;
+    const unpaidResidentsCount = useCycleResidents
+      ? Math.max(0, residents.length - paidResidentsCount)
+      : residents.length - paidResidentsCount;
     const pendingResidents = residents.filter((r) => (r.status ?? "").toUpperCase() !== "PAID");
     const expectedByMonth = new Map<number, number>();
     for (const m of yearMaintenanceAll) {
@@ -579,8 +793,18 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
       collectedByMonth.set(p.month, (collectedByMonth.get(p.month) ?? 0) + Number(p.amount));
     }
     const expenseByMonth = new Map<number, number>();
+    const expenseBreakdownByMonth = new Map<number, Record<string, number>>();
     for (const e of yearExpenseSummaries) {
       expenseByMonth.set(e.month, Number(e.totalExpenses ?? 0));
+      const raw = (e.categoryBreakdown ?? {}) as Record<string, unknown>;
+      const normalized: Record<string, number> = {};
+      for (const [cat, amt] of Object.entries(raw)) {
+        const val = Number(amt) || 0;
+        if (val > 0) normalized[cat] = val;
+      }
+      if (Object.keys(normalized).length > 0) {
+        expenseBreakdownByMonth.set(e.month, normalized);
+      }
     }
     const yearlyBreakdown = Array.from({ length: 12 }, (_, i) => i + 1).map((monthNo) => {
       const monthRows = maintenanceByMonth.get(monthNo) ?? [];
@@ -594,6 +818,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         totalCollected: collectedByMonth.get(monthNo) ?? 0,
         totalExpense: expenseByMonth.get(monthNo) ?? 0,
         totalExpected: expectedByMonth.get(monthNo) ?? 0,
+        expenseBreakdown: expenseBreakdownByMonth.get(monthNo) ?? {},
       };
     });
 
@@ -604,11 +829,27 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         villaNumber: user.villa?.villaNumber ?? null,
         totalPaid,
         totalPending,
-        paidCount: paid.length,
-        pendingCount: pending.length,
-        currentStatus: currentRecord?.status ?? "NOT_GENERATED",
-        currentDueDate: currentRecord?.dueDate ?? null,
-        lastPayment: latestPayment
+        paidCount: ledgerRows.filter((row) => row.remainingDue <= 0.005).length,
+        pendingCount: ledgerRows.filter((row) => row.remainingDue > 0.005).length,
+        billingCycleId: currentLedgerRow?.cycleId ?? null,
+        cycleKey: currentLedgerRow?.cycleKey ?? null,
+        currentStatus: currentLedgerRow?.status ?? currentRecord?.status ?? "NOT_GENERATED",
+        currentDueDate: currentLedgerRow?.dueDate ?? currentRecord?.dueDate ?? null,
+        expectedAmount: currentLedgerRow?.expectedAmount ?? 0,
+        paidAmount: currentLedgerRow?.paidAmount ?? 0,
+        cashPaidAmount: currentLedgerRow?.cashPaidAmount ?? 0,
+        creditApplied: currentLedgerRow?.creditApplied ?? 0,
+        remainingDue: currentLedgerRow?.remainingDue ?? 0,
+        previousDue: currentLedgerRow?.previousDue ?? 0,
+        carryForwardBalance: currentLedgerRow?.carryForwardBalance ?? 0,
+        lastPayment: latestLedgerCashPayment
+          ? {
+              amount: latestLedgerCashPayment.cashPaidAmount,
+              paymentDate: latestLedgerCashPayment.paidAt,
+              paymentMode: "RECORDED",
+              receiptNumber: null,
+            }
+          : latestPayment
           ? {
               amount: Number(latestPayment.amount),
               paymentDate: latestPayment.paymentDate,
@@ -617,25 +858,51 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
             }
           : null,
       },
-      paymentHistory: payments.map((p) => ({
-        id: p.id,
-        month: p.month,
-        year: p.year,
-        amount: Number(p.amount),
-        paymentDate: p.paymentDate,
-        paymentMode: p.paymentMode,
-        receiptNumber: p.receiptNumber,
-        transactionId: p.transactionId,
-      })),
-      pendingDues: pending.map((d) => ({
-        id: d.id,
-        month: d.month,
-        year: d.year,
-        amount: Number(d.amount),
-        dueDate: d.dueDate,
-        status: d.status,
-        isOverdue: d.dueDate < new Date() || d.status === "OVERDUE",
-      })),
+      paymentHistory: ledgerRows
+        .filter((row) => row.cashPaidAmount > 0.005 || row.creditApplied > 0.005 || row.remainingDue > 0.005)
+        .sort((a, b) => (b.year - a.year) || (b.month - a.month))
+        .map((row) => ({
+          id: row.id,
+          cycleId: row.cycleId,
+          cycleKey: row.cycleKey,
+          title: row.title,
+          month: row.month,
+          year: row.year,
+          amount: row.cashPaidAmount,
+          expectedAmount: row.expectedAmount,
+          paidAmount: row.paidAmount,
+          cashPaidAmount: row.cashPaidAmount,
+          creditApplied: row.creditApplied,
+          remainingDue: row.remainingDue,
+          previousDue: row.previousDue,
+          carryForwardBalance: row.carryForwardBalance,
+          paymentDate: row.paidAt,
+          paymentMode: row.cashPaidAmount > 0.005 ? "RECORDED" : "AUTO_ADJUSTED",
+          receiptNumber: null,
+          transactionId: null,
+          status: row.status,
+          dueDate: row.dueDate,
+        })),
+      pendingDues: ledgerRows
+        .filter((row) => row.remainingDue > 0.005)
+        .sort((a, b) => (a.year - b.year) || (a.month - b.month))
+        .map((row) => ({
+          id: row.id,
+          cycleId: row.cycleId,
+          cycleKey: row.cycleKey,
+          title: row.title,
+          month: row.month,
+          year: row.year,
+          amount: row.remainingDue,
+          expectedAmount: row.expectedAmount,
+          paidAmount: row.paidAmount,
+          cashPaidAmount: row.cashPaidAmount,
+          creditApplied: row.creditApplied,
+          previousDue: row.previousDue,
+          dueDate: row.dueDate,
+          status: row.status,
+          isOverdue: row.isOverdue,
+        })),
       monthlyExpenseBreakdown: {
         month,
         year,
@@ -647,6 +914,8 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
         totalResidents: residents.length,
         paidCount: paidResidentsCount,
         unpaidCount: unpaidResidentsCount,
+        partialCount: partialResidentsCount,
+        overdueCount: overdueResidentsCount,
         totalExpectedCollection,
         totalCollected: totalCollectedCollection,
         totalPending: totalPendingCollection,
@@ -738,7 +1007,7 @@ router.get("/maintenance-dashboard/report-pdf", requireRole(UserRole.RESIDENT), 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=\"resident_maintenance_${year}_${String(month).padStart(2, "0")}.pdf\"`
+      `attachment; filename="resident_maintenance_${year}_${String(month).padStart(2, "0")}.pdf"`
     );
     return res.send(pdfBuffer);
   } catch (error) {

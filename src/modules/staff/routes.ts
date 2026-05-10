@@ -302,7 +302,11 @@ router.delete(
 );
 
 // Update staff details
-router.patch("/:id", validateBody(updateStaffSchema), async (req, res, next) => {
+router.patch(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  validateBody(updateStaffSchema),
+  async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { id } = req.params;

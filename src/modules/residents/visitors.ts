@@ -46,21 +46,24 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT), async (req, res, next
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user || !user.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
+    const visitMatch = {
+      villaId: user.villaId,
+      ...(user.unitId ? { unitId: user.unitId } : {}),
+    };
+
     // Get visitors for user's villa
     const visitors = await prisma.visitor.findMany({
       where: {
         societyId,
         villaVisits: {
-          some: {
-            villaId: user.villaId,
-          },
+          some: visitMatch,
         },
         ...(status && { status: status as any }),
       },
@@ -72,13 +75,14 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT), async (req, res, next
           },
         },
         villaVisits: {
-          where: { villaId: user.villaId },
+          where: visitMatch,
           select: {
             villa: {
               select: {
                 villaNumber: true,
               },
             },
+            unit: { select: { label: true, unitCode: true } },
           },
         },
       },
@@ -110,12 +114,17 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT), async (req, res, n
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user || !user.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
     }
+
+    const visitMatch = {
+      villaId: user.villaId,
+      ...(user.unitId ? { unitId: user.unitId } : {}),
+    };
 
     // Get today's date range
     const today = new Date();
@@ -127,9 +136,7 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT), async (req, res, n
       where: {
         societyId,
         villaVisits: {
-          some: {
-            villaId: user.villaId,
-          },
+          some: visitMatch,
         },
         checkInTime: {
           gte: today,
@@ -374,13 +381,14 @@ function pickMyVisit(v: { villaVisits: unknown[] }) {
     | undefined;
 }
 
-function visitorApprovalInclude(villaId: string) {
+function visitorApprovalInclude(villaId: string, unitId?: string | null) {
   return {
     gate: { select: { id: true, name: true } },
     villaVisits: {
-      where: { villaId },
+      where: { villaId, ...(unitId ? { unitId } : {}) },
       include: {
         villa: { select: { id: true, villaNumber: true, block: true } },
+        unit: { select: { id: true, label: true, unitCode: true } },
       },
     },
   } as const;
@@ -396,7 +404,7 @@ router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT), async (
 
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user?.villaId) {
@@ -404,15 +412,19 @@ router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT), async (
     }
 
     const villaId = user.villaId;
+    const visitSome = {
+      villaId,
+      ...(user.unitId ? { unitId: user.unitId } : {}),
+    };
 
     const baseWhere: import("@prisma/client").Prisma.VisitorWhereInput = {
       societyId,
-      villaVisits: { some: { villaId } },
+      villaVisits: { some: visitSome },
     };
 
     const visitors = await prisma.visitor.findMany({
       where: baseWhere,
-      include: visitorApprovalInclude(villaId),
+      include: visitorApprovalInclude(villaId, user.unitId),
       orderBy: { checkInTime: "desc" },
       take: 80,
     });
@@ -454,20 +466,25 @@ router.get("/visitor-approval-requests/:visitorId", requireRole(UserRole.RESIDEN
 
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user?.villaId) {
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
+    const visitSome = {
+      villaId: user.villaId,
+      ...(user.unitId ? { unitId: user.unitId } : {}),
+    };
+
     const visitor = await prisma.visitor.findFirst({
       where: {
         id: visitorId,
         societyId,
-        villaVisits: { some: { villaId: user.villaId } },
+        villaVisits: { some: visitSome },
       },
-      include: visitorApprovalInclude(user.villaId),
+      include: visitorApprovalInclude(user.villaId, user.unitId),
     });
 
     if (!visitor) {
@@ -512,7 +529,7 @@ async function applyResidentVisitorDecision(params: {
 }) {
   const user = await prisma.user.findFirst({
     where: { id: params.userId, societyId: params.societyId },
-    select: { villaId: true },
+    select: { villaId: true, unitId: true },
   });
 
   if (!user?.villaId) {
@@ -520,7 +537,11 @@ async function applyResidentVisitorDecision(params: {
   }
 
   const row = await prisma.visitorVilla.findFirst({
-    where: { visitorId: params.visitorId, villaId: user.villaId },
+    where: {
+      visitorId: params.visitorId,
+      villaId: user.villaId,
+      ...(user.unitId ? { unitId: user.unitId } : {}),
+    },
     include: {
       visitor: true,
       villa: { select: { villaNumber: true, block: true } },

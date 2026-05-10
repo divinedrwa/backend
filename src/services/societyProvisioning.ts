@@ -9,6 +9,10 @@
 import { randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 import { Prisma, UserRole, ResidentType } from "@prisma/client";
+import {
+  ensureDefaultUnitAndBillingAccount,
+  getOrCreateDefaultUnitIdForVilla,
+} from "../lib/propertyInfrastructure";
 import { prisma } from "../lib/prisma";
 
 export function normalizeVillaLookupKey(villaNumber: string): string {
@@ -91,14 +95,21 @@ export async function findOrCreateShellVillaForResident(params: {
   }
 
   try {
-    const v = await prisma.villa.create({
-      data: {
+    const v = await prisma.$transaction(async (tx) => {
+      const created = await tx.villa.create({
+        data: {
+          societyId: params.societyId,
+          villaNumber: trimmed,
+          floors: 1,
+          ownerName: params.placeholderOwnerName,
+          monthlyMaintenance: 0,
+        },
+      });
+      await ensureDefaultUnitAndBillingAccount(tx, {
         societyId: params.societyId,
-        villaNumber: trimmed,
-        floors: 1,
-        ownerName: params.placeholderOwnerName,
-        monthlyMaintenance: 0,
-      },
+        villaId: created.id,
+      });
+      return created;
     });
     params.villaByLookupKey?.set(key, v.id);
     return { ok: true, villaId: v.id, created: true };
@@ -164,6 +175,10 @@ export async function provisionImportedVillaOwnerAccount(params: {
 
   try {
     const passwordHash = await bcrypt.hash(passwordPlain, 10);
+    const unitId = await getOrCreateDefaultUnitIdForVilla({
+      societyId: params.societyId,
+      villaId: params.villaId,
+    });
     await prisma.user.create({
       data: {
         societyId: params.societyId,
@@ -175,6 +190,7 @@ export async function provisionImportedVillaOwnerAccount(params: {
         role: UserRole.RESIDENT,
         residentType: ResidentType.OWNER,
         villaId: params.villaId,
+        unitId,
         moveInDate: new Date(),
         isActive: true,
       },

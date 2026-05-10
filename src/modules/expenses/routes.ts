@@ -1,12 +1,74 @@
 import { Router } from 'express';
-import { UserRole } from '@prisma/client';
+import { ExpenseType, PaymentMode, UserRole } from '@prisma/client';
+import { z } from 'zod';
+import { getPagination, paginationMeta } from '../../lib/pagination';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, requireRole } from '../../middlewares/auth';
+import { validateBody } from '../../middlewares/validate';
 
 const router = Router();
 
 router.use(requireAuth);
 router.use(requireRole(UserRole.ADMIN));
+
+// ==========================================
+// VALIDATION SCHEMAS
+// ==========================================
+
+const createCategorySchema = z.object({
+  name: z.string().min(1).max(100),
+  description: z.string().max(500).optional(),
+  type: z.nativeEnum(ExpenseType).optional(),
+  icon: z.string().max(64).optional(),
+  color: z.string().max(32).optional(),
+  isRecurring: z.boolean().optional(),
+  defaultAmount: z.number().nonnegative().optional(),
+});
+
+const updateCategorySchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  description: z.string().max(500).optional().nullable(),
+  icon: z.string().max(64).optional().nullable(),
+  color: z.string().max(32).optional().nullable(),
+  isActive: z.boolean().optional(),
+  isRecurring: z.boolean().optional(),
+  defaultAmount: z.number().nonnegative().optional().nullable(),
+});
+
+const expenseAttachmentSchema = z.object({
+  fileName: z.string().min(1).max(255),
+  fileUrl: z.string().url().max(2048),
+  fileType: z.string().max(64),
+  fileSize: z.number().int().nonnegative(),
+});
+
+const createExpenseSchema = z.object({
+  categoryId: z.string().min(1),
+  title: z.string().min(1).max(200),
+  description: z.string().max(2000).optional(),
+  amount: z.number().nonnegative(),
+  paymentDate: z.string().datetime().or(z.string().min(1)),
+  paymentMode: z.nativeEnum(PaymentMode),
+  paymentRef: z.string().max(200).optional(),
+  paidTo: z.string().min(1).max(200),
+  paidToContact: z.string().max(64).optional(),
+  receiptUrl: z.string().url().max(2048).optional(),
+  receiptNumber: z.string().max(100).optional(),
+  invoiceNumber: z.string().max(100).optional(),
+  month: z.number().int().min(1).max(12).optional(),
+  year: z.number().int().min(2000).max(2100).optional(),
+  gstAmount: z.number().nonnegative().optional(),
+  gstPercentage: z.number().nonnegative().optional(),
+  tdsAmount: z.number().nonnegative().optional(),
+  tdsPercentage: z.number().nonnegative().optional(),
+  notes: z.string().max(2000).optional(),
+  tags: z.array(z.string().max(64)).max(50).optional(),
+  attachments: z.array(expenseAttachmentSchema).max(20).optional(),
+});
+
+const updateExpenseSchema = createExpenseSchema
+  .omit({ attachments: true })
+  .partial();
 
 // ==========================================
 // EXPENSE CATEGORIES
@@ -34,74 +96,81 @@ router.get('/categories', async (req, res) => {
 });
 
 // Create category
-router.post('/categories', async (req, res) => {
+router.post('/categories', validateBody(createCategorySchema), async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
-    const { name, description, type, icon, color, isRecurring, defaultAmount } = req.body;
-    
+    const body = req.body as z.infer<typeof createCategorySchema>;
+
     const category = await prisma.expenseCategory.create({
       data: {
         societyId,
-        name,
-        description,
-        type,
-        icon,
-        color,
-        isRecurring,
-        defaultAmount,
-        createdBy: req.auth!.userId
-      }
+        name: body.name,
+        description: body.description,
+        type: body.type,
+        icon: body.icon,
+        color: body.color,
+        isRecurring: body.isRecurring,
+        defaultAmount: body.defaultAmount,
+        createdBy: req.auth!.userId,
+      },
     });
-    
+
     res.json(category);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to create category' });
+    next(error);
   }
 });
 
 // Update category
-router.put('/categories/:id', async (req, res) => {
+router.put('/categories/:id', validateBody(updateCategorySchema), async (req, res, next) => {
   try {
+    const societyId = req.auth!.societyId;
     const { id } = req.params;
-    const { name, description, icon, color, isActive, isRecurring, defaultAmount } = req.body;
-    
-    const category = await prisma.expenseCategory.update({
-      where: { id },
-      data: {
-        name,
-        description,
-        icon,
-        color,
-        isActive,
-        isRecurring,
-        defaultAmount
-      }
+    const body = req.body as z.infer<typeof updateCategorySchema>;
+
+    const result = await prisma.expenseCategory.updateMany({
+      where: { id, societyId },
+      data: body,
     });
-    
+
+    if (result.count === 0) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    const category = await prisma.expenseCategory.findUnique({ where: { id } });
     res.json(category);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update category' });
+    next(error);
   }
 });
 
 // Delete category
-router.delete('/categories/:id', async (req, res) => {
+router.delete('/categories/:id', async (req, res, next) => {
   try {
+    const societyId = req.auth!.societyId;
     const { id } = req.params;
-    
-    // Check if category has expenses
+
+    // Confirm category belongs to caller's society before any further work.
+    const category = await prisma.expenseCategory.findFirst({
+      where: { id, societyId },
+      select: { id: true },
+    });
+    if (!category) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
     const count = await prisma.expense.count({ where: { categoryId: id } });
     if (count > 0) {
-      return res.status(400).json({ 
-        error: 'Cannot delete category with existing expenses' 
+      return res.status(400).json({
+        error: 'Cannot delete category with existing expenses',
       });
     }
-    
+
     await prisma.expenseCategory.delete({ where: { id } });
-    
+
     res.json({ message: 'Category deleted' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to delete category' });
+    next(error);
   }
 });
 
@@ -110,7 +179,7 @@ router.delete('/categories/:id', async (req, res) => {
 // ==========================================
 
 // Get all expenses (with filters)
-router.get('/', async (req, res) => {
+router.get('/', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { 
@@ -146,226 +215,229 @@ router.get('/', async (req, res) => {
       ];
     }
     
-    const expenses = await prisma.expense.findMany({
-      where,
-      include: {
-        category: true,
-        attachments: true
-      },
-      orderBy: { paymentDate: 'desc' }
-    });
-    
+    const pagination = getPagination(req);
+    const [expenses, total] = await Promise.all([
+      prisma.expense.findMany({
+        where,
+        include: {
+          category: true,
+          attachments: true,
+        },
+        orderBy: { paymentDate: 'desc' },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.expense.count({ where }),
+    ]);
+
+    // Pre-existing clients call this endpoint and expect a bare array.
+    // Surface pagination metadata via response headers so we can ship the
+    // server-side cap without breaking them.
+    res.setHeader('X-Total-Count', String(total));
+    res.setHeader(
+      'X-Pagination',
+      JSON.stringify(paginationMeta(total, expenses.length, pagination)),
+    );
     res.json(expenses);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch expenses' });
+    next(error);
   }
 });
 
 // Get single expense
-router.get('/:id', async (req, res) => {
+router.get('/:id', async (req, res, next) => {
   try {
+    const societyId = req.auth!.societyId;
     const { id } = req.params;
-    
-    const expense = await prisma.expense.findUnique({
-      where: { id },
+
+    const expense = await prisma.expense.findFirst({
+      where: { id, societyId },
       include: {
         category: true,
-        attachments: true
-      }
+        attachments: true,
+      },
     });
-    
+
     if (!expense) {
       return res.status(404).json({ error: 'Expense not found' });
     }
-    
+
     res.json(expense);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch expense' });
+    next(error);
   }
 });
 
 // Create expense
-router.post('/', async (req, res) => {
+router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
-    const {
-      categoryId,
-      title,
-      description,
-      amount,
-      paymentDate,
-      paymentMode,
-      paymentRef,
-      paidTo,
-      paidToContact,
-      receiptUrl,
-      receiptNumber,
-      invoiceNumber,
-      month,
-      year,
-      gstAmount,
-      gstPercentage,
-      tdsAmount,
-      tdsPercentage,
-      notes,
-      tags,
-      attachments
-    } = req.body;
-    
-    // Calculate net amount
-    const netAmount = amount + (gstAmount || 0) - (tdsAmount || 0);
-    
+    const body = req.body as z.infer<typeof createExpenseSchema>;
+
+    // Tenant integrity: the referenced category must belong to this society.
+    const category = await prisma.expenseCategory.findFirst({
+      where: { id: body.categoryId, societyId },
+      select: { id: true },
+    });
+    if (!category) {
+      return res.status(404).json({ error: 'Category not found' });
+    }
+
+    const gstAmount = body.gstAmount ?? 0;
+    const tdsAmount = body.tdsAmount ?? 0;
+    const netAmount = body.amount + gstAmount - tdsAmount;
+
     const expense = await prisma.expense.create({
       data: {
         societyId,
-        categoryId,
-        title,
-        description,
-        amount,
-        paymentDate: new Date(paymentDate),
-        paymentMode,
-        paymentRef,
-        paidTo,
-        paidToContact,
-        receiptUrl,
-        receiptNumber,
-        invoiceNumber,
-        month,
-        year,
-        gstAmount: gstAmount || 0,
-        gstPercentage: gstPercentage || 0,
-        tdsAmount: tdsAmount || 0,
-        tdsPercentage: tdsPercentage || 0,
+        categoryId: body.categoryId,
+        title: body.title,
+        description: body.description,
+        amount: body.amount,
+        paymentDate: new Date(body.paymentDate),
+        paymentMode: body.paymentMode,
+        paymentRef: body.paymentRef,
+        paidTo: body.paidTo,
+        paidToContact: body.paidToContact,
+        receiptUrl: body.receiptUrl,
+        receiptNumber: body.receiptNumber,
+        invoiceNumber: body.invoiceNumber,
+        month: body.month,
+        year: body.year,
+        gstAmount,
+        gstPercentage: body.gstPercentage ?? 0,
+        tdsAmount,
+        tdsPercentage: body.tdsPercentage ?? 0,
         netAmount,
         status: 'APPROVED', // Auto-approve for now
-        notes,
-        tags: tags || [],
+        notes: body.notes,
+        tags: body.tags ?? [],
         createdBy: req.auth!.userId,
-        attachments: {
-          create: attachments || []
-        }
+        attachments: body.attachments && body.attachments.length > 0
+          ? {
+              create: body.attachments.map((a) => ({
+                fileName: a.fileName,
+                fileUrl: a.fileUrl,
+                fileType: a.fileType,
+                fileSize: a.fileSize,
+                uploadedBy: req.auth!.userId,
+              })),
+            }
+          : undefined,
       },
       include: {
         category: true,
-        attachments: true
-      }
+        attachments: true,
+      },
     });
-    
-    // Update monthly summary
-    await updateMonthlySummary(societyId, month, year);
-    
+
+    if (body.month && body.year) {
+      await updateMonthlySummary(societyId, body.month, body.year);
+    }
+
     res.json(expense);
   } catch (error) {
-    console.error(error);
-    res.status(500).json({ error: 'Failed to create expense' });
+    next(error);
   }
 });
 
 // Update expense
-router.put('/:id', async (req, res) => {
+router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => {
   try {
+    const societyId = req.auth!.societyId;
     const { id } = req.params;
-    const {
-      categoryId,
-      title,
-      description,
-      amount,
-      paymentDate,
-      paymentMode,
-      paymentRef,
-      paidTo,
-      paidToContact,
-      receiptUrl,
-      receiptNumber,
-      invoiceNumber,
-      month: bodyMonth,
-      year: bodyYear,
-      gstAmount,
-      gstPercentage,
-      tdsAmount,
-      tdsPercentage,
-      notes,
-      tags
-    } = req.body;
-    
-    // Calculate net amount
-    const netAmount = amount + (gstAmount || 0) - (tdsAmount || 0);
-    
+    const body = req.body as z.infer<typeof updateExpenseSchema>;
+
+    // Tenant scope: the existing expense must belong to this society.
+    const existing = await prisma.expense.findFirst({
+      where: { id, societyId },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Expense not found' });
+    }
+
+    // If categoryId is being changed, the new category must also belong to
+    // this society — otherwise an admin could re-parent into another tenant.
+    if (body.categoryId && body.categoryId !== existing.categoryId) {
+      const category = await prisma.expenseCategory.findFirst({
+        where: { id: body.categoryId, societyId },
+        select: { id: true },
+      });
+      if (!category) {
+        return res.status(404).json({ error: 'Category not found' });
+      }
+    }
+
+    const amount = body.amount ?? existing.amount;
+    const gstAmount = body.gstAmount ?? existing.gstAmount ?? 0;
+    const tdsAmount = body.tdsAmount ?? existing.tdsAmount ?? 0;
+    const netAmount = amount + gstAmount - tdsAmount;
+
     const expense = await prisma.expense.update({
       where: { id },
       data: {
-        ...(categoryId ? { categoryId } : {}),
-        title,
-        description,
-        amount,
-        paymentDate: paymentDate ? new Date(paymentDate) : undefined,
-        paymentMode,
-        paymentRef,
-        paidTo,
-        paidToContact,
-        receiptUrl,
-        receiptNumber,
-        invoiceNumber,
-        gstAmount: gstAmount || 0,
-        gstPercentage: gstPercentage || 0,
-        tdsAmount: tdsAmount || 0,
-        tdsPercentage: tdsPercentage || 0,
+        ...(body.categoryId ? { categoryId: body.categoryId } : {}),
+        title: body.title,
+        description: body.description,
+        amount: body.amount,
+        paymentDate: body.paymentDate ? new Date(body.paymentDate) : undefined,
+        paymentMode: body.paymentMode,
+        paymentRef: body.paymentRef,
+        paidTo: body.paidTo,
+        paidToContact: body.paidToContact,
+        receiptUrl: body.receiptUrl,
+        receiptNumber: body.receiptNumber,
+        invoiceNumber: body.invoiceNumber,
+        gstAmount,
+        gstPercentage: body.gstPercentage ?? 0,
+        tdsAmount,
+        tdsPercentage: body.tdsPercentage ?? 0,
         netAmount,
-        ...(bodyMonth !== undefined && bodyMonth !== null && bodyMonth !== ""
-          ? {
-              month:
-                typeof bodyMonth === "number"
-                  ? bodyMonth
-                  : parseInt(String(bodyMonth), 10),
-            }
-          : {}),
-        ...(bodyYear !== undefined && bodyYear !== null && bodyYear !== ""
-          ? {
-              year:
-                typeof bodyYear === "number"
-                  ? bodyYear
-                  : parseInt(String(bodyYear), 10),
-            }
-          : {}),
-        notes,
-        tags: tags || []
+        ...(body.month !== undefined ? { month: body.month } : {}),
+        ...(body.year !== undefined ? { year: body.year } : {}),
+        notes: body.notes,
+        ...(body.tags !== undefined ? { tags: body.tags } : {}),
       },
       include: {
         category: true,
-        attachments: true
-      }
+        attachments: true,
+      },
     });
-    
-    // Update monthly summary
-    const summaryMonth = expense.month;
-    const summaryYear = expense.year;
-    if (summaryMonth && summaryYear) {
-      await updateMonthlySummary(expense.societyId, summaryMonth, summaryYear);
+
+    if (expense.month && expense.year) {
+      await updateMonthlySummary(expense.societyId, expense.month, expense.year);
     }
-    
+
     res.json(expense);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to update expense' });
+    next(error);
   }
 });
 
 // Delete expense
-router.delete('/:id', async (req, res) => {
+router.delete('/:id', async (req, res, next) => {
   try {
+    const societyId = req.auth!.societyId;
     const { id } = req.params;
-    
-    const expense = await prisma.expense.findUnique({ where: { id } });
-    
-    await prisma.expense.delete({ where: { id } });
-    
-    // Update monthly summary
-    if (expense && expense.month && expense.year) {
-      await updateMonthlySummary(expense.societyId, expense.month, expense.year);
+
+    // Capture month/year before delete for summary recalculation, scoped to society.
+    const existing = await prisma.expense.findFirst({
+      where: { id, societyId },
+      select: { id: true, month: true, year: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ error: 'Expense not found' });
     }
-    
+
+    await prisma.expense.delete({ where: { id: existing.id } });
+
+    if (existing.month && existing.year) {
+      await updateMonthlySummary(societyId, existing.month, existing.year);
+    }
+
     res.json({ message: 'Expense deleted' });
   } catch (error) {
-    res.status(500).json({ error: 'Failed to delete expense' });
+    next(error);
   }
 });
 
@@ -462,35 +534,41 @@ router.get('/summary/category-breakdown', async (req, res) => {
   try {
     const societyId = req.auth!.societyId;
     const { month, year } = req.query;
-    
+
     const where: any = { societyId };
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
-    
-    const expenses = await prisma.expense.findMany({
+
+    // Server-side aggregation using Prisma groupBy
+    const grouped = await prisma.expense.groupBy({
+      by: ['categoryId'],
       where,
-      include: { category: true }
+      _sum: { amount: true },
+      _count: { id: true },
     });
-    
-    // Group by category
-    const breakdown: any = {};
-    expenses.forEach(expense => {
-      const catName = expense.category.name;
-      if (!breakdown[catName]) {
-        breakdown[catName] = {
-          categoryId: expense.categoryId,
-          categoryName: catName,
-          categoryType: expense.category.type,
-          categoryColor: expense.category.color,
-          totalAmount: 0,
-          count: 0
-        };
-      }
-      breakdown[catName].totalAmount += expense.amount;
-      breakdown[catName].count += 1;
+
+    // Fetch category details for the grouped results
+    const categoryIds = grouped.map(g => g.categoryId);
+    const categories = await prisma.expenseCategory.findMany({
+      where: { id: { in: categoryIds } },
+      select: { id: true, name: true, type: true, color: true },
     });
-    
-    res.json(Object.values(breakdown));
+
+    const categoryMap = new Map(categories.map(c => [c.id, c]));
+
+    const breakdown = grouped.map(g => {
+      const cat = categoryMap.get(g.categoryId);
+      return {
+        categoryId: g.categoryId,
+        categoryName: cat?.name ?? 'Unknown',
+        categoryType: cat?.type ?? null,
+        categoryColor: cat?.color ?? null,
+        totalAmount: g._sum.amount ?? 0,
+        count: g._count.id,
+      };
+    });
+
+    res.json(breakdown);
   } catch (error) {
     console.error('[expenses] GET /summary/category-breakdown', error);
     res.status(500).json({
@@ -604,28 +682,42 @@ async function updateMonthlySummary(societyId: string, month: number, year: numb
 }
 
 async function calculateAndSaveMonthlySummary(societyId: string, month: number, year: number) {
-  const expenses = await prisma.expense.findMany({
-    where: {
-      societyId,
-      month,
-      year,
-      status: 'APPROVED'
-    },
-    include: { category: true }
-  });
-  
-  const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
-  const totalGST = expenses.reduce((sum, e) => sum + (e.gstAmount || 0), 0);
-  const totalTDS = expenses.reduce((sum, e) => sum + (e.tdsAmount || 0), 0);
-  const netAmount = expenses.reduce((sum, e) => sum + e.netAmount, 0);
-  
-  // Category breakdown
-  const categoryBreakdown: any = {};
-  expenses.forEach(expense => {
-    const catName = expense.category.name;
-    categoryBreakdown[catName] = (categoryBreakdown[catName] || 0) + expense.amount;
-  });
-  
+  const filterWhere = { societyId, month, year, status: 'APPROVED' as const };
+
+  // Server-side aggregation: totals via aggregate(), breakdown via groupBy()
+  const [aggregates, categoryGrouped] = await Promise.all([
+    prisma.expense.aggregate({
+      where: filterWhere,
+      _sum: { amount: true, gstAmount: true, tdsAmount: true, netAmount: true },
+      _count: { id: true },
+    }),
+    prisma.expense.groupBy({
+      by: ['categoryId'],
+      where: filterWhere,
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const totalExpenses = aggregates._sum.amount ?? 0;
+  const totalGST = aggregates._sum.gstAmount ?? 0;
+  const totalTDS = aggregates._sum.tdsAmount ?? 0;
+  const netAmount = aggregates._sum.netAmount ?? 0;
+  const expenseCount = aggregates._count.id;
+
+  // Build category breakdown keyed by category name
+  let categoryBreakdown: Record<string, number> = {};
+  if (categoryGrouped.length > 0) {
+    const categoryIds = categoryGrouped.map(g => g.categoryId);
+    const categories = await prisma.expenseCategory.findMany({
+      where: { id: { in: categoryIds } },
+      select: { id: true, name: true },
+    });
+    const nameMap = new Map(categories.map(c => [c.id, c.name]));
+    categoryBreakdown = Object.fromEntries(
+      categoryGrouped.map(g => [nameMap.get(g.categoryId) ?? 'Unknown', g._sum.amount ?? 0])
+    );
+  }
+
   return await prisma.monthlyExpenseSummary.upsert({
     where: {
       societyId_month_year: { societyId, month, year }
@@ -635,7 +727,7 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
       totalGST,
       totalTDS,
       netAmount,
-      expenseCount: expenses.length,
+      expenseCount,
       categoryBreakdown,
       lastCalculated: new Date()
     },
@@ -647,7 +739,7 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
       totalGST,
       totalTDS,
       netAmount,
-      expenseCount: expenses.length,
+      expenseCount,
       categoryBreakdown,
       lastCalculated: new Date()
     }

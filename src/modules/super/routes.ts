@@ -162,6 +162,9 @@ router.post("/societies/:societyId/tenant-session", async (req, res, next) => {
 
 /**
  * GET /api/super/societies — list all societies (platform view).
+ *
+ * Includes archived societies so the operator can restore them. The list is
+ * sorted by name; clients should rely on `archivedAt` to filter/sort.
  */
 router.get("/societies", async (_req, res, next) => {
   try {
@@ -172,6 +175,8 @@ router.get("/societies", async (_req, res, next) => {
         name: true,
         address: true,
         status: true,
+        archivedAt: true,
+        archivedBy: true,
         createdAt: true,
         users: {
           where: { role: UserRole.ADMIN, isActive: true },
@@ -219,6 +224,8 @@ router.get("/societies/:societyId", async (req, res, next) => {
         name: true,
         address: true,
         status: true,
+        archivedAt: true,
+        archivedBy: true,
         createdAt: true,
         updatedAt: true,
         createdByUserId: true,
@@ -297,7 +304,16 @@ router.patch(
 );
 
 /**
- * DELETE /api/super/societies/:societyId — permanently remove tenant and all cascade data.
+ * DELETE /api/super/societies/:societyId — soft-archive a tenant.
+ *
+ * Default behavior: sets `archivedAt = now()`, `archivedBy = SUPER_ADMIN
+ * userId`, and forces `status = INACTIVE` so the existing tenant-auth path
+ * blocks all sign-ins. Reversible via POST /restore.
+ *
+ * Hard delete (cascade-permanent): pass `?confirmHardDelete=<societyName>`
+ * with the exact case-insensitive name. The typed-name match is the
+ * defense against an "Are you sure?" → click-yes accident on the wrong row;
+ * it does NOT replace `verify:migrations-safe` or backups.
  */
 router.delete("/societies/:societyId", async (req, res, next) => {
   try {
@@ -309,19 +325,109 @@ router.delete("/societies/:societyId", async (req, res, next) => {
 
     const existing = await prisma.society.findUnique({
       where: { id: societyId },
-      select: { id: true, name: true },
+      select: { id: true, name: true, archivedAt: true },
     });
     if (!existing) {
       res.status(404).json({ message: "Society not found" });
       return;
     }
 
-    await prisma.society.delete({ where: { id: societyId } });
+    const confirmHardDelete = (
+      typeof req.query.confirmHardDelete === "string" ? req.query.confirmHardDelete : ""
+    ).trim();
 
+    if (confirmHardDelete) {
+      // Strict: the typed name must match (case-insensitive, post-trim).
+      // Reject mismatches with 400 — never silently downgrade to soft
+      // archive, otherwise a typo on a destructive button would still feel
+      // "successful" while doing the wrong thing.
+      if (confirmHardDelete.toLowerCase() !== existing.name.toLowerCase()) {
+        res.status(400).json({
+          message:
+            "confirmHardDelete must equal the society name exactly (case-insensitive).",
+        });
+        return;
+      }
+      await prisma.society.delete({ where: { id: societyId } });
+      res.status(200).json({
+        ok: true,
+        mode: "hard_deleted",
+        society: { id: societyId, name: existing.name },
+      });
+      return;
+    }
+
+    // Soft archive (default).
+    if (existing.archivedAt) {
+      res.status(200).json({
+        ok: true,
+        mode: "already_archived",
+        society: { id: societyId, name: existing.name, archivedAt: existing.archivedAt },
+      });
+      return;
+    }
+    const updated = await prisma.society.update({
+      where: { id: societyId },
+      data: {
+        archivedAt: new Date(),
+        archivedBy: req.auth!.userId,
+        status: SocietyStatus.INACTIVE,
+      },
+      select: { id: true, name: true, archivedAt: true, archivedBy: true, status: true },
+    });
     res.status(200).json({
       ok: true,
-      deleted: { id: societyId, name: existing.name },
+      mode: "archived",
+      society: updated,
     });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * POST /api/super/societies/:societyId/restore — reverse a soft-archive.
+ *
+ * Status is intentionally left INACTIVE: restoring brings the row back into
+ * the platform's active surface, but the operator must still flip it to
+ * ACTIVE via PATCH if they want tenants to log in. This is by design — a
+ * one-click "restore" should not also re-open access.
+ */
+router.post("/societies/:societyId/restore", async (req, res, next) => {
+  try {
+    const societyId = req.params.societyId?.trim();
+    if (!societyId) {
+      res.status(400).json({ message: "Missing society id" });
+      return;
+    }
+
+    const existing = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { id: true, name: true, archivedAt: true },
+    });
+    if (!existing) {
+      res.status(404).json({ message: "Society not found" });
+      return;
+    }
+    if (!existing.archivedAt) {
+      res.status(400).json({ message: "Society is not archived" });
+      return;
+    }
+
+    const society = await prisma.society.update({
+      where: { id: societyId },
+      data: {
+        archivedAt: null,
+        archivedBy: null,
+      },
+      select: {
+        id: true,
+        name: true,
+        status: true,
+        archivedAt: true,
+      },
+    });
+    res.json({ ok: true, society });
   } catch (e) {
     next(e);
   }

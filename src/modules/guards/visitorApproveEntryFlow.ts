@@ -1,5 +1,6 @@
 import type { PrismaClient } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
+import { ensureDefaultUnitAndBillingAccount } from "../../lib/propertyInfrastructure";
 
 export const OTP_ALREADY_CONSUMED = "OTP_ALREADY_CONSUMED";
 
@@ -106,10 +107,15 @@ export async function runVisitorApproveEntry(
         },
       });
 
+      const { defaultUnitId } = await ensureDefaultUnitAndBillingAccount(tx, {
+        societyId: p.societyId,
+        villaId: p.villaId,
+      });
       await tx.visitorVilla.create({
         data: {
           visitorId: visitor.id,
           villaId: p.villaId,
+          unitId: defaultUnitId,
           notifiedAt: now,
           notes: "Admitted via OTP approval flow",
         },
@@ -246,10 +252,15 @@ export async function runVisitorAdmitPreApprovedById(
         },
       });
 
+      const { defaultUnitId } = await ensureDefaultUnitAndBillingAccount(tx, {
+        societyId: p.societyId,
+        villaId,
+      });
       await tx.visitorVilla.create({
         data: {
           visitorId: visitor.id,
           villaId,
+          unitId: defaultUnitId,
           notifiedAt: now,
           notes: "Admitted from guard pre-approved list",
         },

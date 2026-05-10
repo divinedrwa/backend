@@ -18,7 +18,7 @@ const updateParcelStatusSchema = z.object({
 
 router.use(requireAuth);
 
-router.get("/", async (req, res, next) => {
+router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const parcels = await prisma.parcel.findMany({
       where: { societyId: req.auth!.societyId },
@@ -84,6 +84,7 @@ router.post(
 
 router.patch(
   "/:id/status",
+  requireRole(UserRole.GUARD, UserRole.ADMIN),
   validateBody(updateParcelStatusSchema),
   async (req, res, next) => {
     try {

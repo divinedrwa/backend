@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -138,13 +139,22 @@ router.get("/", requireAuth, requireRole(UserRole.ADMIN, UserRole.GUARD), async 
     if (status) where.status = status;
     if (villaId) where.villaId = villaId;
 
-    const alerts = await prisma.sOSAlert.findMany({
-      where,
-      include: alertInclude,
-      orderBy: { createdAt: "desc" },
-    });
+    const pagination = getPagination(req);
+    const [alerts, total] = await Promise.all([
+      prisma.sOSAlert.findMany({
+        where,
+        include: alertInclude,
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.sOSAlert.count({ where }),
+    ]);
 
-    return res.json({ alerts });
+    return res.json({
+      alerts,
+      ...paginationMeta(total, alerts.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
@@ -165,6 +175,9 @@ router.get("/active", requireAuth, requireRole(UserRole.ADMIN, UserRole.GUARD), 
   try {
     const { societyId } = req.auth!;
 
+    // Active alerts under normal operation is a small set, but cap the
+    // result so a stuck/never-resolved batch can't return an unbounded
+    // payload to the on-call dashboard.
     const activeAlerts = await prisma.sOSAlert.findMany({
       where: {
         societyId,
@@ -172,6 +185,7 @@ router.get("/active", requireAuth, requireRole(UserRole.ADMIN, UserRole.GUARD), 
       },
       include: alertInclude,
       orderBy: { createdAt: "desc" },
+      take: 200,
     });
 
     return res.json({ alerts: activeAlerts });

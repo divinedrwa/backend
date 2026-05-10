@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -13,23 +14,52 @@ import {
 } from "./visitorResidentApproval.service";
 import { NotificationService } from "../../services/notification.service";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
+import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
+import {
+  resolveVisitorApprovalRecipientIds,
+  type VisitorApprovalTarget,
+} from "./visitorResidentApproval.service";
 
 const router = Router();
 
 router.use(requireAuth);
 
-// Validation schemas
-const checkInSchema = z.object({
-  name: z.string().min(2),
-  phone: z.string().min(10),
-  villaIds: z.array(z.string()).min(1),
-  visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
-  purpose: z.string().optional(),
-  vehicleNumber: z.string().optional(),
-  photo: z.string().optional(),
-  /** When true, visitor stays pending until resident(s) approve; then guard confirms entry. */
-  awaitResidentApproval: z.boolean().optional().default(false),
+const otpRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { message: "Too many OTP attempts. Please wait and try again." },
 });
+
+// Validation schemas
+const visitTargetSchema = z.object({
+  villaId: z.string().min(1),
+  unitId: z.string().optional(),
+  residentUserId: z.string().optional(),
+});
+
+const checkInSchema = z
+  .object({
+    name: z.string().min(2),
+    phone: z.string().min(10),
+    /** Legacy: property ids only (uses default unit per property). */
+    villaIds: z.array(z.string()).optional(),
+    /** Preferred: property + unit + optional specific resident. */
+    visitTargets: z.array(visitTargetSchema).optional(),
+    visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
+    purpose: z.string().optional(),
+    vehicleNumber: z.string().optional(),
+    photo: z.string().optional(),
+    /** When true, visitor stays pending until resident(s) approve; then guard confirms entry. */
+    awaitResidentApproval: z.boolean().optional().default(false),
+  })
+  .refine(
+    (d) =>
+      (d.villaIds != null && d.villaIds.length > 0) ||
+      (d.visitTargets != null && d.visitTargets.length > 0),
+    { message: "Select at least one property or visit target", path: ["villaIds"] },
+  );
 
 const checkOutSchema = z.object({
   visitorId: z.string(),
@@ -70,47 +100,106 @@ const preApprovedAdmitSchema = z.object({
 router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkInSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
+    const body = req.body as z.infer<typeof checkInSchema>;
     const {
       name,
       phone,
       villaIds,
+      visitTargets,
       visitorType,
       purpose,
       vehicleNumber,
       photo,
       awaitResidentApproval,
-    } = req.body;
+    } = body;
 
-    const uniqueVillaIds = [...new Set(villaIds as string[])];
-    if (uniqueVillaIds.length === 0) {
-      return res.status(400).json({ message: "Select at least one flat" });
-    }
+    type VisitRow = { villaId: string; unitId: string; residentUserId: string | null };
+    const visitRows: VisitRow[] = [];
 
-    const villasOk = await prisma.villa.findMany({
-      where: { id: { in: uniqueVillaIds }, societyId },
-      select: { id: true },
-    });
-    if (villasOk.length !== uniqueVillaIds.length) {
-      return res.status(404).json({
-        message: "One or more flats not found in this society. Refresh the flat list and try again.",
-      });
-    }
-
-    if (awaitResidentApproval) {
-      const residentCount = await prisma.user.count({
-        where: {
-          societyId,
-          role: UserRole.RESIDENT,
-          isActive: true,
-          villaId: { in: uniqueVillaIds },
-        },
-      });
-      if (residentCount === 0) {
-        return res.status(400).json({
-          message:
-            "No active resident account is mapped to selected flat(s). Assign resident first, then request approval.",
+    if (visitTargets?.length) {
+      for (const t of visitTargets) {
+        const villaOk = await prisma.villa.findFirst({
+          where: { id: t.villaId, societyId },
+          select: { id: true },
+        });
+        if (!villaOk) {
+          return res.status(404).json({
+            message: "One or more properties not found. Refresh the list and try again.",
+          });
+        }
+        let unitId: string;
+        if (t.unitId?.trim()) {
+          const unitRow = await prisma.unit.findFirst({
+            where: { id: t.unitId.trim(), villaId: t.villaId, societyId },
+            select: { id: true },
+          });
+          if (!unitRow) {
+            return res.status(400).json({ message: "Invalid unit for selected property" });
+          }
+          unitId = unitRow.id;
+        } else {
+          unitId = await getOrCreateDefaultUnitIdForVilla({
+            societyId,
+            villaId: t.villaId,
+          });
+        }
+        visitRows.push({
+          villaId: t.villaId,
+          unitId,
+          residentUserId: t.residentUserId?.trim() || null,
         });
       }
+    } else if (villaIds?.length) {
+      const uniqueVillaIds = [...new Set(villaIds)];
+      const villasOk = await prisma.villa.findMany({
+        where: { id: { in: uniqueVillaIds }, societyId },
+        select: { id: true },
+      });
+      if (villasOk.length !== uniqueVillaIds.length) {
+        return res.status(404).json({
+          message: "One or more flats not found in this society. Refresh the flat list and try again.",
+        });
+      }
+      for (const villaId of uniqueVillaIds) {
+        const unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+        visitRows.push({ villaId, unitId, residentUserId: null });
+      }
+    }
+
+    const uniqueVillaIds = [...new Set(visitRows.map((r) => r.villaId))];
+
+    const notifyTargets: VisitorApprovalTarget[] = visitRows.map((r) => ({
+      villaId: r.villaId,
+      unitId: r.residentUserId ? undefined : r.unitId,
+      residentUserId: r.residentUserId ?? undefined,
+    }));
+
+    if (awaitResidentApproval) {
+      const recipientIds = await resolveVisitorApprovalRecipientIds({
+        prisma,
+        societyId,
+        villaIds: uniqueVillaIds,
+        targets: notifyTargets,
+      });
+      if (recipientIds.length === 0) {
+        return res.status(400).json({
+          message:
+            "No active resident account matches the selected unit or occupant. Assign residents first, then request approval.",
+        });
+      }
+    }
+
+    // Duplicate check-in prevention: reject if same phone is already checked in
+    const existingActive = await prisma.visitor.findFirst({
+      where: {
+        societyId,
+        phone,
+        checkOutTime: null,
+        checkOutAt: null,
+      },
+    });
+    if (existingActive) {
+      return res.status(409).json({ message: "This visitor is already checked in. Please check them out first." });
     }
 
     const now = new Date();
@@ -141,11 +230,12 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       },
     });
 
-    // Create villa visits (many-to-many)
     await prisma.visitorVilla.createMany({
-      data: uniqueVillaIds.map((villaId) => ({
+      data: visitRows.map((r) => ({
         visitorId: visitor.id,
-        villaId,
+        villaId: r.villaId,
+        unitId: r.unitId,
+        residentUserId: r.residentUserId,
         notifiedAt: awaitResidentApproval ? new Date() : null,
       })),
     });
@@ -160,6 +250,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
           visitorName: name,
           purpose: purpose ?? "",
           villaIds: uniqueVillaIds,
+          targets: notifyTargets,
           guardUserId: userId,
           visitorType,
           visitorPhone: phone,
@@ -183,6 +274,8 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
                 villaNumber: true,
               },
             },
+            unit: { select: { unitCode: true, label: true } },
+            resident: { select: { id: true, name: true, residentType: true } },
           },
         },
         gate: {
@@ -228,6 +321,7 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
     const updated = await prisma.visitor.update({
       where: { id: visitorId },
       data: {
+        checkOutAt: new Date(),
         checkOutTime: new Date(),
         status: "CHECKED_OUT",
       },
@@ -445,7 +539,7 @@ router.post("/verify-pre-approved", requireRole(UserRole.GUARD), validateBody(ve
 });
 
 // POST /api/guards/visitor-otp-verify — validate pre-approved OTP at gate
-router.post("/visitor-otp-verify", requireRole(UserRole.GUARD), validateBody(otpVerifySchema), async (req, res, next) => {
+router.post("/visitor-otp-verify", otpRateLimiter, requireRole(UserRole.GUARD), validateBody(otpVerifySchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { otp, villaId } = req.body;
@@ -491,6 +585,7 @@ router.post("/visitor-otp-verify", requireRole(UserRole.GUARD), validateBody(otp
 // POST /api/guards/visitor-approve-entry — atomic verify + consume OTP + visitor check-in
 router.post(
   "/visitor-approve-entry",
+  otpRateLimiter,
   requireRole(UserRole.GUARD),
   validateBody(approveEntrySchema),
   async (req, res, next) => {

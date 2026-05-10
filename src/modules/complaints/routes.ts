@@ -1,6 +1,7 @@
 import { ComplaintStatus, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -22,20 +23,32 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    const complaints = await prisma.complaint.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
-            ownerName: true
-          }
-        }
-      },
-      orderBy: { createdAt: "desc" }
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [complaints, total] = await Promise.all([
+      prisma.complaint.findMany({
+        where,
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              block: true,
+              ownerName: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.complaint.count({ where }),
+    ]);
+    // Domain key kept for backwards compatibility with existing UI; new
+    // pagination metadata lives alongside it.
+    return res.json({
+      complaints,
+      ...paginationMeta(total, complaints.length, pagination),
     });
-    return res.json({ complaints });
   } catch (error) {
     next(error);
   }

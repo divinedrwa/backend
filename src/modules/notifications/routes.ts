@@ -58,12 +58,12 @@ router.post("/devices", validateBody(registerDeviceSchema), async (req, res, nex
       deviceType,
       deviceName: body.deviceName,
     });
-    const tk = body.token;
+    // Don't log device ids or token previews — they're persistent identifiers
+    // that should not appear in operational logs. Only retain enough to
+    // confirm the registration path is being exercised.
     console.log("[DivineFCM-API] mobile_fcm_registered", {
       userId,
       platform: body.platform,
-      deviceIdPreview: deviceId.length > 14 ? `${deviceId.slice(0, 14)}…` : deviceId,
-      tokenPreview: tk.length > 22 ? `${tk.slice(0, 22)}…` : tk,
       firebaseAdminReady: isFirebaseConfigured(),
     });
     return res.status(201).json({ ok: true });

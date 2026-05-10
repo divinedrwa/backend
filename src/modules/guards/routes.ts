@@ -1,6 +1,8 @@
 import { Router } from "express";
+import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
+import { validateBody } from "../../middlewares/validate";
 import { Gate, GuardShift, UserRole, SOSStatus } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 
@@ -221,15 +223,17 @@ router.get("/active-alerts", requireRole(UserRole.GUARD), async (req, res, next)
   }
 });
 
+const sosResponseSchema = z.object({
+  alertId: z.string().min(1),
+  status: z.enum(["ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED"]),
+  notes: z.string().optional(),
+});
+
 // POST /api/guards/sos-response — legacy mobile; prefers PATCH /sos-alerts/:id/*
-router.post("/sos-response", requireRole(UserRole.GUARD), async (req, res, next) => {
+router.post("/sos-response", requireRole(UserRole.GUARD), validateBody(sosResponseSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
-    const { alertId, status } = req.body as { alertId?: string; status?: string };
-
-    if (!alertId || !status) {
-      return res.status(400).json({ message: "Alert ID and status required" });
-    }
+    const { alertId, status } = req.body as z.infer<typeof sosResponseSchema>;
 
     const alert = await prisma.sOSAlert.findFirst({
       where: { id: alertId, societyId },

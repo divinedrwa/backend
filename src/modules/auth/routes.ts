@@ -1,5 +1,6 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import {
   InvitationStatus,
@@ -13,6 +14,22 @@ import { validateBody } from "../../middlewares/validate";
 import { signAuthToken } from "../../utils/jwt";
 
 const router = Router();
+
+/**
+ * Rate limit credential checks per IP. Tuned for human typing rate, not
+ * automated stuffing: 20 attempts / 15 min returns 429. Combined with
+ * `app.set("trust proxy", 1)`, the limiter sees the real client IP behind
+ * the standard one-hop reverse proxy.
+ */
+const loginRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 20,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    message: "Too many login attempts. Please wait a few minutes and try again.",
+  },
+});
 
 class InviteRegisterError extends Error {
   constructor(
@@ -64,13 +81,14 @@ async function applyLoginDevice(opts: {
         lastUsedAt: new Date(),
       },
     });
-    console.log(`✅ Device token registered for user ${userId}:`, {
+  } catch (deviceError) {
+    // Device token registration is best-effort during login. Failure must
+    // not break sign-in; log without leaking the FCM token itself.
+    console.error("[auth] device token upsert failed", {
+      userId,
       deviceId,
       deviceType,
-      tokenPreview: fcmToken.substring(0, 20) + "...",
     });
-  } catch (deviceError) {
-    console.error("❌ Error storing device token:", deviceError);
   }
 }
 
@@ -220,7 +238,7 @@ router.post(
           }
         }
 
-        let phoneValue: string | null = body.phone?.trim() || null;
+        const phoneValue: string | null = body.phone?.trim() || null;
         if (inv.phone) {
           if (!phoneValue) {
             throw new InviteRegisterError(400, "Phone is required for this invitation");
@@ -369,7 +387,7 @@ const superAdminLoginSchema = z
 /**
  * POST /auth/super-admin/login — platform operator (no society).
  */
-router.post("/super-admin/login", validateBody(superAdminLoginSchema), async (req, res, next) => {
+router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLoginSchema), async (req, res, next) => {
   try {
     const { username, password, fcmToken, deviceId, deviceType, deviceName } =
       req.body as z.infer<typeof superAdminLoginSchema>;
@@ -422,7 +440,7 @@ const adminLoginSchema = z
 /**
  * POST /auth/admin/login — society admin web dashboard.
  */
-router.post("/admin/login", validateBody(adminLoginSchema), async (req, res, next) => {
+router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), async (req, res, next) => {
   try {
     const { societyId, username, password, fcmToken, deviceId, deviceType, deviceName } =
       req.body as z.infer<typeof adminLoginSchema>;
@@ -474,7 +492,7 @@ const tenantLoginSchema = z
 /**
  * POST /auth/login — resident/guard mobile (society-scoped).
  */
-router.post("/login", validateBody(tenantLoginSchema), async (req, res, next) => {
+router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (req, res, next) => {
   try {
     const { societyId, username, password, fcmToken, deviceId, deviceType, deviceName } =
       req.body as z.infer<typeof tenantLoginSchema>;

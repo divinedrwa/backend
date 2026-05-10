@@ -2,6 +2,10 @@ import bcrypt from "bcryptjs";
 import { UserRole, ResidentType } from "@prisma/client";
 import { Router } from "express";
 import multer from "multer";
+import {
+  ensureDefaultUnitAndBillingAccount,
+  getOrCreateDefaultUnitIdForVilla,
+} from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { parseCsvRows, csvRowsToRecords } from "../../lib/csv";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -125,21 +129,25 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
       }
 
       try {
-        const villa = await prisma.villa.create({
-          data: {
-            societyId,
-            villaNumber,
-            floors,
-            area:
-              areaVal != null && areaVal > 0
-                ? areaVal
-                : undefined,
-            block: r.block?.trim() || undefined,
-            ownerName,
-            ownerEmail: r.ownerEmail?.trim() || undefined,
-            ownerPhone: r.ownerPhone?.trim() || undefined,
-            monthlyMaintenance: maintenance,
-          },
+        const villa = await prisma.$transaction(async (tx) => {
+          const v = await tx.villa.create({
+            data: {
+              societyId,
+              villaNumber,
+              floors,
+              area:
+                areaVal != null && areaVal > 0
+                  ? areaVal
+                  : undefined,
+              block: r.block?.trim() || undefined,
+              ownerName,
+              ownerEmail: r.ownerEmail?.trim() || undefined,
+              ownerPhone: r.ownerPhone?.trim() || undefined,
+              monthlyMaintenance: maintenance,
+            },
+          });
+          await ensureDefaultUnitAndBillingAccount(tx, { societyId, villaId: v.id });
+          return v;
         });
         result.created++;
 
@@ -296,6 +304,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
 
       try {
         const passwordHash = await bcrypt.hash(password, 10);
+        const unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
         await prisma.user.create({
           data: {
             societyId,
@@ -307,6 +316,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
             role: UserRole.RESIDENT,
             residentType,
             villaId,
+            unitId,
             moveInDate: moveIn,
             isActive: true,
           },

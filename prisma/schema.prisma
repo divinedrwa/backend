@@ -21,10 +21,49 @@ enum ResidentType {
   FAMILY_MEMBER
 }
 
+/// Who is responsible for society maintenance billing for this flat (one demand per villa today).
+enum MaintenanceBillingRole {
+  /// Pays / sees maintenance dues for the villa in the app and billing ledger.
+  PRIMARY
+  /// Not billed (e.g. second occupant when one fixed amount covers the whole villa).
+  EXCLUDED
+}
+
+/// Scope of a billing account (property-level today; reserved for per-unit / split / sqft later).
+enum BillingAccountScope {
+  PROPERTY
+}
+
 enum MaintenanceStatus {
   PENDING
   PAID
   OVERDUE
+}
+
+/// Society maintenance books: financial year and per-period collection (distinct from SaaS BillingCycle).
+enum FinancialYearStatus {
+  ACTIVE
+  CLOSED
+}
+
+enum MaintenanceCollectionCycleStatus {
+  OPEN
+  CLOSED
+  LOCKED
+}
+
+enum MaintenanceCycleRuleType {
+  FIXED_PER_FLAT
+  PER_SQFT
+  CUSTOM
+}
+
+enum VillaMaintenanceSnapshotStatus {
+  PENDING
+  PARTIAL
+  PAID
+  OVERDUE
+  WAIVED
 }
 
 enum PaymentMode {
@@ -76,6 +115,13 @@ model Society {
   createdByUserId String?
   createdBy       User?    @relation("SocietyCreator", fields: [createdByUserId], references: [id], onDelete: SetNull)
 
+  /// Soft-delete timestamp. Non-null = archived: tenants are blocked at the
+  /// auth layer, super-admin must restore or hard-delete to act on it.
+  /// `archivedBy` is the SUPER_ADMIN userId (not an FK; super admins live
+  /// outside any society).
+  archivedAt DateTime?
+  archivedBy String?
+
   invitations Invitation[]
 
   createdAt DateTime @default(now())
@@ -124,6 +170,12 @@ model Society {
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
+
+  financialYears               FinancialYear[]
+  maintenanceCollectionCycles  MaintenanceCollectionCycle[]
+
+  units           Unit[]
+  billingAccounts BillingAccount[]
 
   @@index([status])
 }
@@ -218,12 +270,16 @@ model User {
   /// Null only for SUPER_ADMIN (platform operators).
   societyId    String?
   villaId      String?
+  /// Occupant unit within the property (`Villa`). Billing still uses `villaId` (property-level).
+  unitId       String?
   username     String       @unique
   name         String
   email        String       @unique
   passwordHash String
   role         UserRole
   residentType ResidentType @default(OWNER)
+  /// For RESIDENT: exactly one PRIMARY per active household on a villa is enforced in the API.
+  maintenanceBillingRole MaintenanceBillingRole @default(PRIMARY)
   phone        String?
   /// Society email alerts (billing, notices, etc.) — toggled in mobile settings.
   notifyEmail  Boolean      @default(false)
@@ -261,10 +317,13 @@ model User {
   societiesCreated Society[] @relation("SocietyCreator")
 
   visitorVillaApprovals VisitorVilla[] @relation("VisitorVillaResponder")
+  visitorVillaAsTarget  VisitorVilla[] @relation("VisitorVillaResidentTarget")
   amenityBookings       AmenityBooking[]
+  unit                  Unit?          @relation(fields: [unitId], references: [id], onDelete: Restrict)
 
   @@index([societyId])
   @@index([villaId])
+  @@index([unitId])
   @@index([username])
   @@index([residentType])
 }
@@ -298,8 +357,51 @@ model Villa {
   sosAlerts             SOSAlert[]
   gateVehicleLedgers    GateVehicleLedger[]
   invitations           Invitation[]
+  maintenanceSnapshots  VillaMaintenanceSnapshot[]
+  units                 Unit[]
+  billingAccount        BillingAccount?
 
   @@unique([societyId, villaNumber])
+  @@index([societyId])
+}
+
+/// A floor/flat segment within a property (`Villa`). One property has many units; residents attach here.
+model Unit {
+  id        String   @id @default(cuid())
+  societyId String
+  villaId   String
+  /// Stable code, e.g. V12_GF (unique per property).
+  unitCode  String
+  label     String
+  sortOrder Int      @default(0)
+  /// Auto-created legacy row per property so existing data keeps working.
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  society       Society        @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  villa         Villa          @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  users         User[]
+  visitorVillas VisitorVilla[]
+
+  @@unique([villaId, unitCode])
+  @@index([societyId])
+  @@index([villaId])
+}
+
+/// One billing account per property today (future: per-unit splits, sqft, etc. via `scope` + `metadata`).
+model BillingAccount {
+  id        String              @id @default(cuid())
+  societyId String
+  villaId   String              @unique
+  scope     BillingAccountScope @default(PROPERTY)
+  metadata  Json?
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  villa   Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
+
   @@index([societyId])
 }
 
@@ -347,11 +449,96 @@ model MaintenancePayment {
   bankAccount BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
   maintenance Maintenance? @relation(fields: [maintenanceId], references: [id], onDelete: SetNull)
 
+  maintenanceCollectionCycleId String?
+  maintenanceCollectionCycle   MaintenanceCollectionCycle? @relation(fields: [maintenanceCollectionCycleId], references: [id], onDelete: SetNull)
+  villaMaintenanceSnapshotId   String?
+  villaMaintenanceSnapshot     VillaMaintenanceSnapshot?   @relation(fields: [villaMaintenanceSnapshotId], references: [id], onDelete: SetNull)
+
   @@index([societyId])
   @@index([villaId])
   @@index([maintenanceId])
   @@index([month, year])
   @@index([paymentDate])
+  @@index([maintenanceCollectionCycleId])
+  @@index([villaMaintenanceSnapshotId])
+}
+
+// ==========================================
+// SOCIETY MAINTENANCE: Financial year → billing period → per-villa snapshot
+// ==========================================
+
+model FinancialYear {
+  id        String              @id @default(cuid())
+  societyId String
+  society   Society             @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  label     String
+  startDate DateTime            @db.Date
+  endDate   DateTime            @db.Date
+  status    FinancialYearStatus @default(ACTIVE)
+  createdAt DateTime            @default(now())
+  updatedAt DateTime            @updatedAt
+
+  cycles MaintenanceCollectionCycle[]
+  billingCycles BillingCycle[]
+
+  @@index([societyId])
+  @@index([societyId, status])
+}
+
+model MaintenanceCollectionCycle {
+  id              String                           @id @default(cuid())
+  societyId       String
+  society         Society                          @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  financialYearId String
+  financialYear   FinancialYear                    @relation(fields: [financialYearId], references: [id], onDelete: Cascade)
+  periodKey       String
+  title           String
+  periodMonth     Int
+  periodYear      Int
+  dueDate         DateTime                         @db.Date
+  status          MaintenanceCollectionCycleStatus @default(OPEN)
+  createdAt       DateTime                         @default(now())
+  updatedAt       DateTime                         @updatedAt
+
+  rule      MaintenanceCycleRule?
+  snapshots VillaMaintenanceSnapshot[]
+  payments  MaintenancePayment[]
+
+  @@unique([financialYearId, periodKey])
+  @@index([societyId])
+  @@index([societyId, periodYear, periodMonth])
+}
+
+model MaintenanceCycleRule {
+  id            String                   @id @default(cuid())
+  cycleId       String                   @unique
+  cycle         MaintenanceCollectionCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  ruleType      MaintenanceCycleRuleType
+  baseAmount    Decimal?                 @db.Decimal(12, 2)
+  perSqftRate   Decimal?                 @db.Decimal(12, 4)
+  /// For CUSTOM: map of villaId -> amount (number)
+  customAmounts Json?
+  createdAt     DateTime                 @default(now())
+  updatedAt     DateTime                 @updatedAt
+}
+
+model VillaMaintenanceSnapshot {
+  id             String                         @id @default(cuid())
+  cycleId        String
+  cycle          MaintenanceCollectionCycle     @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  villaId        String
+  villa          Villa                          @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  expectedAmount Decimal                        @db.Decimal(12, 2)
+  paidAmount     Decimal                        @db.Decimal(12, 2) @default(0)
+  status         VillaMaintenanceSnapshotStatus @default(PENDING)
+  breakdown      Json?
+  createdAt      DateTime                       @default(now())
+  updatedAt      DateTime                       @updatedAt
+
+  payments MaintenancePayment[]
+
+  @@unique([cycleId, villaId])
+  @@index([villaId])
 }
 
 enum ComplaintStatus {
@@ -495,6 +682,9 @@ model VisitorVilla {
   id         String   @id @default(cuid())
   visitorId  String
   villaId    String
+  unitId     String
+  /// Specific resident being visited (optional; when set, approval can target this account).
+  residentUserId String?
   notifiedAt DateTime?
   notes      String?
   /// Resident approval for this villa row (guard-initiated approval flow).
@@ -503,13 +693,17 @@ model VisitorVilla {
   respondedByUserId String?
   createdAt  DateTime @default(now())
 
-  visitor Visitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
-  villa   Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  visitor   Visitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  villa     Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  unit      Unit    @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  resident  User?   @relation("VisitorVillaResidentTarget", fields: [residentUserId], references: [id], onDelete: SetNull)
   respondedBy User? @relation("VisitorVillaResponder", fields: [respondedByUserId], references: [id], onDelete: SetNull)
 
-  @@unique([visitorId, villaId])
+  @@unique([visitorId, villaId, unitId])
   @@index([visitorId])
   @@index([villaId])
+  @@index([unitId])
+  @@index([residentUserId])
   @@index([approvalStatus])
 }
 
@@ -1354,6 +1548,8 @@ model BillingCycle {
   id                 String             @id @default(cuid())
   societyId          String
   society            Society            @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  financialYearId    String?
+  financialYear      FinancialYear?     @relation(fields: [financialYearId], references: [id], onDelete: SetNull)
   cycleKey           String
   title              String
   amount             Decimal            @db.Decimal(12, 2)
@@ -1376,6 +1572,7 @@ model BillingCycle {
   @@unique([societyId, cycleKey])
   @@index([societyId])
   @@index([cycleKey])
+  @@index([financialYearId])
 }
 
 model UserCyclePayment {

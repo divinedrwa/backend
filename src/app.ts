@@ -1,14 +1,60 @@
 import "./config/env";
 import cors from "cors";
 import express from "express";
+import helmet from "helmet";
 import path from "path";
+import pinoHttp from "pino-http";
 import routes from "./routes";
 import { errorHandler } from "./middlewares/error";
+import { logger } from "./lib/logger";
+import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 
 export const app = express();
 
-app.use(cors());
+// Trust the first proxy hop so express-rate-limit and similar middlewares
+// see the client IP (not the proxy's) when deployed behind nginx/Vercel/Render.
+app.set("trust proxy", 1);
+
+// Security headers. CSP is left at helmet's default (off) because this
+// process serves an API + uploads; HTML responses come from the Next app.
+app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+
+/**
+ * CORS allow-list. Set CORS_ORIGINS to a comma-separated list of origins
+ * in any non-development environment, e.g.:
+ *   CORS_ORIGINS=https://admin.example.com,https://www.example.com
+ * If unset, falls back to allow-all (dev convenience). Never leave it
+ * unset in production — the API serves bearer-authenticated endpoints.
+ */
+const corsAllowList = (process.env.CORS_ORIGINS ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+if (corsAllowList.length === 0 && process.env.NODE_ENV === "production") {
+  console.warn(
+    "⚠️  CORS_ORIGINS is not set in production — defaulting to restrictive CORS. " +
+    "Set CORS_ORIGINS to a comma-separated allow-list of origins."
+  );
+}
+app.use(
+  cors({
+    origin:
+      corsAllowList.length > 0
+        ? corsAllowList
+        : process.env.NODE_ENV === "production"
+          ? false
+          : true,
+  })
+);
+
+// Structured HTTP request logging — inherits redaction rules from the shared logger.
+app.use(
+  pinoHttp({
+    logger,
+    autoLogging: { ignore: (req) => req.url === "/health" },
+  })
+);
 
 app.post(
   "/api/v1/payments/webhook",
@@ -22,13 +68,23 @@ app.post(
   }
 );
 
-app.use(express.json());
+// Hard cap on JSON body size. Profile-image and attachment uploads go
+// through dedicated multipart endpoints with their own limits.
+app.use(express.json({ limit: "1mb" }));
 
 /** Profile avatars saved under `uploads/avatars` — URL path `/uploads/...` (same origin as API port). */
-app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+app.use("/uploads", (_req, res, next) => {
+  res.setHeader("X-Content-Type-Options", "nosniff");
+  next();
+}, express.static(path.join(process.cwd(), "uploads")));
 
-app.get("/health", (_req, res) => {
-  res.json({ ok: true });
+app.get("/health", async (_req, res) => {
+  try {
+    await prisma.$queryRaw`SELECT 1`;
+    res.json({ ok: true, db: true });
+  } catch {
+    res.status(503).json({ ok: false, db: false });
+  }
 });
 
 /**

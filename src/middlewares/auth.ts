@@ -39,7 +39,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         role: true,
         societyId: true,
         villaId: true,
-        society: { select: { status: true } },
+        unitId: true,
+        society: { select: { status: true, archivedAt: true } },
       },
     });
 
@@ -74,6 +75,13 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         res.status(401).json({ message: "Invalid token" });
         return;
       }
+      // Archived societies are blocked for everyone (including the society
+      // ADMIN) — restore-then-act is the workflow. Inactive societies still
+      // let ADMIN through so they can re-activate.
+      if (user.society?.archivedAt) {
+        res.status(403).json({ message: "Society is archived" });
+        return;
+      }
       if (
         user.society?.status === SocietyStatus.INACTIVE &&
         user.role !== UserRole.ADMIN
@@ -89,6 +97,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       /** Empty for SUPER_ADMIN — tenant-only routes must still treat falsy as forbidden. */
       societyId: user.societyId ?? "",
       villaId: user.villaId,
+      unitId: user.unitId,
     };
 
     const rawHeader =

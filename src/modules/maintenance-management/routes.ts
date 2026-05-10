@@ -1,15 +1,31 @@
-import { UserRole } from "@prisma/client";
+import crypto from "crypto";
+import {
+  BillingPaymentSource,
+  BillingUserPaymentStatus,
+  MaintenanceBillingRole,
+  Prisma,
+  UserRole,
+} from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import PDFDocument from "pdfkit";
+import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
+import collectionRoutes from "./collection-routes";
+import { applyVillaCreditAcrossSnapshots, getVillaCreditBalance } from "./credit-walker";
+import {
+  buildCycleFinancialDashboardCore,
+  pickMaintenanceCollectionCycleId,
+} from "./financial-dashboard-cycle";
 
 const router = Router();
 
 router.use(requireAuth);
 router.use(requireRole(UserRole.ADMIN));
+router.use("/collection", collectionRoutes);
 
 const additionalFundSchema = z.object({
   title: z.string().min(2).max(120),
@@ -23,12 +39,21 @@ const additionalFundSchema = z.object({
 
 function parseMonthYear(query: any) {
   const now = new Date();
-  const month = Number(query.month ?? now.getMonth() + 1);
-  const year = Number(query.year ?? now.getFullYear());
+  const rawM = query?.month;
+  const rawY = query?.year;
+  const mPick = Array.isArray(rawM) ? rawM[0] : rawM;
+  const yPick = Array.isArray(rawY) ? rawY[0] : rawY;
+  const month = Number(mPick ?? now.getMonth() + 1);
+  const year = Number(yPick ?? now.getFullYear());
   return {
     month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : now.getMonth() + 1,
     year: Number.isFinite(year) && year >= 2000 ? year : now.getFullYear(),
   };
+}
+
+function tenantSocietyId(req: { auth?: { societyId?: string | null } }): string | null {
+  const sid = typeof req.auth?.societyId === "string" ? req.auth.societyId.trim() : "";
+  return sid.length > 0 ? sid : null;
 }
 
 function buildMaintenancePdfBuffer(params: {
@@ -222,13 +247,20 @@ const markPaidSchema = z.object({
   villaId: z.string().min(1),
   year: z.number().int().min(2020).max(2100),
   month: z.number().int().min(1).max(12),
-  amount: z.number().positive(),
+  amount: z.number().nonnegative(),
   paymentDate: z.string().datetime(),
   paymentMode: z.enum(["CASH", "UPI", "CHEQUE", "BANK_TRANSFER"]),
   transactionId: z.string().optional(),
   bankAccountId: z.string().min(1).optional(),
   remarks: z.string().optional(),
-});
+  /// When set, payment is allocated to a billing-cycle snapshot (partial payments allowed).
+  maintenanceCollectionCycleId: z.string().min(1).optional(),
+  /// When true with amount=0, triggers credit walker to settle via advance credit.
+  applyCredit: z.boolean().optional(),
+}).refine(
+  (d) => d.amount > 0 || d.applyCredit === true,
+  { message: "Either amount must be positive or applyCredit must be true", path: ["amount"] },
+);
 
 router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) => {
   try {
@@ -247,6 +279,205 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       return res.status(404).json({ message: "Villa not found" });
     }
 
+    if (body.maintenanceCollectionCycleId) {
+      const adminId = req.auth!.userId;
+      const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: body.maintenanceCollectionCycleId, societyId },
+      });
+      if (!cycle) {
+        return res.status(404).json({ message: "Billing cycle not found" });
+      }
+      if (cycle.status === "LOCKED") {
+        return res.status(400).json({ message: "This billing cycle is locked" });
+      }
+      if (cycle.periodMonth !== body.month || cycle.periodYear !== body.year) {
+        return res.status(400).json({ message: "month and year must match the selected billing cycle" });
+      }
+
+      // Validate snapshot exists (lightweight check outside transaction)
+      const snapshotCheck = await prisma.villaMaintenanceSnapshot.findUnique({
+        where: {
+          cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId },
+        },
+        select: { id: true },
+      });
+      if (!snapshotCheck) {
+        return res
+          .status(400)
+          .json({ message: "No billing snapshot for this villa. Generate snapshots for the cycle first." });
+      }
+
+      const receiptNumber = `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+
+      try {
+      const { payment, maintenance } = await prisma.$transaction(async (tx) => {
+        // Re-read snapshot inside transaction with row-level lock to
+        // prevent concurrent mark-paid calls from double-counting.
+        // Timeout raised for Neon cold-start latency + credit-walker queries.
+        const [snapshot] = await tx.$queryRawUnsafe<
+          { id: string; expectedAmount: string; paidAmount: string }[]
+        >(
+          `SELECT id, "expectedAmount"::text, "paidAmount"::text FROM "VillaMaintenanceSnapshot" WHERE id = $1 FOR UPDATE`,
+          snapshotCheck.id,
+        );
+        if (!snapshot) {
+          throw new Error("Snapshot disappeared during transaction");
+        }
+
+        const expected = Number(snapshot.expectedAmount);
+        const paidSoFar = Number(snapshot.paidAmount);
+        const remaining = Math.round((expected - paidSoFar) * 100) / 100;
+        if (remaining <= 0 && !body.applyCredit) {
+          throw Object.assign(new Error("No balance due for this billing cycle"), { statusCode: 400 });
+        }
+        const maintenanceRow = await tx.maintenance.upsert({
+          where: {
+            villaId_month_year: { villaId: body.villaId, month: body.month, year: body.year },
+          },
+          create: {
+            societyId,
+            villaId: body.villaId,
+            month: body.month,
+            year: body.year,
+            amount: snapshot.expectedAmount,
+            dueDate: cycle.dueDate,
+            status: "PENDING",
+          },
+          update: {
+            amount: snapshot.expectedAmount,
+            dueDate: cycle.dueDate,
+          },
+        });
+
+        const paymentRow = await tx.maintenancePayment.create({
+          data: {
+            societyId,
+            villaId: body.villaId,
+            maintenanceId: maintenanceRow.id,
+            month: body.month,
+            year: body.year,
+            amount: body.amount,
+            paymentDate: new Date(body.paymentDate),
+            paymentMode: body.paymentMode,
+            transactionId: body.transactionId,
+            receiptNumber,
+            bankAccountId: body.bankAccountId,
+            remarks: body.remarks,
+            maintenanceCollectionCycleId: cycle.id,
+            villaMaintenanceSnapshotId: snapshot.id,
+          },
+          include: {
+            villa: {
+              select: {
+                villaNumber: true,
+                ownerName: true,
+              },
+            },
+          },
+        });
+
+        // Don't increment snapshot.paidAmount inline — the credit walker
+        // re-derives it from the cash ledger across the whole FY so any
+        // Reconcile snapshots up to this cycle only. Any overpayment
+        // stays as available advance credit — the admin must explicitly
+        // apply it to a subsequent cycle via "Apply credit".
+        await applyVillaCreditAcrossSnapshots(tx, {
+          societyId,
+          villaId: body.villaId,
+          financialYearId: cycle.financialYearId,
+          throughCycleId: cycle.id,
+        });
+
+        // Read back the (possibly cap-adjusted) status so the rest of this
+        // handler — which writes legacy UserCyclePayment rows — uses the
+        // reconciled value.
+        const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
+          where: { id: snapshot.id },
+          select: { status: true },
+        });
+        const snapStatus = reconciledSnapshot?.status ?? "PENDING";
+
+        const billingCycle = await tx.billingCycle.findFirst({
+          where: {
+            societyId,
+            financialYearId: cycle.financialYearId,
+            cycleKey: cycle.periodKey,
+          },
+          select: { id: true },
+        });
+        if (billingCycle) {
+          await clearExcludedResidentsUserCyclePayments(tx, {
+            societyId,
+            villaId: body.villaId,
+            billingCycleId: billingCycle.id,
+          });
+          const primaryResidents = await tx.user.findMany({
+            where: {
+              societyId,
+              villaId: body.villaId,
+              role: UserRole.RESIDENT,
+              isActive: true,
+              maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+            },
+            select: { id: true },
+          });
+          const payStatus =
+            snapStatus === "PAID" || snapStatus === "WAIVED"
+              ? BillingUserPaymentStatus.SUCCESS
+              : BillingUserPaymentStatus.PENDING;
+          const paidAt = new Date(body.paymentDate);
+          for (const u of primaryResidents) {
+            // userCyclePayment.amountPaid is the user-side cash ledger
+            // (drives the resident's billing screen). Increment by the
+            // current call's body.amount so it matches mark-cash's
+            // additive semantics — capping it to snapshot.paidAmount
+            // would silently lose overpayments here too.
+            const existing = await tx.userCyclePayment.findUnique({
+              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+              select: { amountPaid: true },
+            });
+            const updatedAmount = Number(existing?.amountPaid ?? 0) + body.amount;
+            await tx.userCyclePayment.upsert({
+              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+              create: {
+                userId: u.id,
+                cycleId: billingCycle.id,
+                amountPaid: new Prisma.Decimal(updatedAmount),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: adminId,
+                paidAt,
+              },
+              update: {
+                amountPaid: new Prisma.Decimal(updatedAmount),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: adminId,
+                paidAt,
+              },
+            });
+          }
+        }
+
+        return { payment: paymentRow, maintenance: maintenanceRow };
+      }, { timeout: 15000 });
+
+      return res.status(201).json({
+        message: "Payment marked successfully",
+        payment,
+        maintenance,
+      });
+    } catch (txErr: unknown) {
+      // Handle errors thrown from inside the transaction for validation
+      if (txErr && typeof txErr === "object" && "statusCode" in txErr) {
+        const e = txErr as { statusCode: number; message: string };
+        return res.status(e.statusCode).json({ message: e.message });
+      }
+      throw txErr;
+    }
+    }
+
+    // ── Non-cycle path (legacy, no billing cycle selected) ──
     // Find or create maintenance record
     let maintenance = await prisma.maintenance.findFirst({
       where: {
@@ -290,7 +521,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       select: { id: true, receiptNumber: true },
     });
 
-    const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+    const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
     const payment = existingPayment
       ? await prisma.maintenancePayment.update({
@@ -348,6 +579,341 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
   }
 });
 
+// POST /api/maintenance-management/apply-credit
+// Apply advance credit from prior overpayments to a billing cycle
+const applyCreditSchema = z.object({
+  villaId: z.string().min(1),
+  maintenanceCollectionCycleId: z.string().min(1),
+});
+
+router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const adminId = req.auth!.userId;
+    const body = req.body as z.infer<typeof applyCreditSchema>;
+
+    const villa = await prisma.villa.findFirst({ where: { id: body.villaId, societyId } });
+    if (!villa) return res.status(404).json({ message: "Villa not found" });
+
+    const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+      where: { id: body.maintenanceCollectionCycleId, societyId },
+    });
+    if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
+    if (cycle.status === "LOCKED") {
+      return res.status(400).json({ message: "This billing cycle is locked" });
+    }
+
+    const snapshot = await prisma.villaMaintenanceSnapshot.findUnique({
+      where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+    });
+    if (!snapshot) {
+      return res.status(400).json({ message: "No billing snapshot for this villa." });
+    }
+
+    const expectedAmt = Number(snapshot.expectedAmount);
+    const paidSoFar = Number(snapshot.paidAmount);
+    const remaining = Math.round((expectedAmt - paidSoFar) * 100) / 100;
+    if (remaining <= 0) {
+      return res.status(400).json({ message: "No balance due for this billing cycle" });
+    }
+
+    const { creditPool } = await getVillaCreditBalance(prisma, {
+      societyId,
+      villaId: body.villaId,
+      financialYearId: cycle.financialYearId,
+    });
+    if (creditPool <= 0) {
+      return res.status(400).json({ message: "No advance credit available for this villa" });
+    }
+
+    const creditApplied = Math.min(creditPool, remaining);
+
+    const result = await prisma.$transaction(async (tx) => {
+      const maintenanceRow = await tx.maintenance.upsert({
+        where: {
+          villaId_month_year: { villaId: body.villaId, month: cycle.periodMonth, year: cycle.periodYear },
+        },
+        create: {
+          societyId,
+          villaId: body.villaId,
+          month: cycle.periodMonth,
+          year: cycle.periodYear,
+          amount: snapshot.expectedAmount,
+          dueDate: cycle.dueDate,
+          status: "PENDING",
+        },
+        update: {},
+      });
+
+      // Create a ₹0 audit marker payment so the credit application is visible
+      // in the payment ledger.
+      await tx.maintenancePayment.create({
+        data: {
+          societyId,
+          villaId: body.villaId,
+          maintenanceId: maintenanceRow.id,
+          month: cycle.periodMonth,
+          year: cycle.periodYear,
+          amount: 0,
+          paymentDate: new Date(),
+          paymentMode: "CASH",
+          receiptNumber: `CRD-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+          remarks: `Advance credit adjustment (₹${creditApplied} applied)`,
+          maintenanceCollectionCycleId: cycle.id,
+          villaMaintenanceSnapshotId: snapshot.id,
+        },
+      });
+
+      // Walk up to this cycle so prior overpayment credit flows in.
+      await applyVillaCreditAcrossSnapshots(tx, {
+        societyId,
+        villaId: body.villaId,
+        financialYearId: cycle.financialYearId,
+        throughCycleId: cycle.id,
+      });
+
+      const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
+        where: { id: snapshot.id },
+        select: { paidAmount: true, status: true },
+      });
+
+      // Sync UserCyclePayment (same pattern as mark-paid)
+      const billingCycle = await tx.billingCycle.findFirst({
+        where: { societyId, financialYearId: cycle.financialYearId, cycleKey: cycle.periodKey },
+        select: { id: true },
+      });
+      if (billingCycle) {
+        await clearExcludedResidentsUserCyclePayments(tx, {
+          societyId,
+          villaId: body.villaId,
+          billingCycleId: billingCycle.id,
+        });
+        const snapStatus = reconciledSnapshot?.status ?? "PENDING";
+        const payStatus =
+          snapStatus === "PAID" || snapStatus === "WAIVED"
+            ? BillingUserPaymentStatus.SUCCESS
+            : BillingUserPaymentStatus.PENDING;
+        const primaryResidents = await tx.user.findMany({
+          where: {
+            societyId,
+            villaId: body.villaId,
+            role: UserRole.RESIDENT,
+            isActive: true,
+            maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+          },
+          select: { id: true },
+        });
+        for (const u of primaryResidents) {
+          await tx.userCyclePayment.upsert({
+            where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+            create: {
+              userId: u.id,
+              cycleId: billingCycle.id,
+              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(),
+            },
+            update: {
+              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(),
+            },
+          });
+        }
+      }
+
+      return {
+        paidAmount: Number(reconciledSnapshot?.paidAmount ?? 0),
+        status: reconciledSnapshot?.status ?? "PENDING",
+      };
+    }, { timeout: 15000 });
+
+    return res.status(200).json({
+      message: "Advance credit applied successfully",
+      creditApplied,
+      paidAmount: result.paidAmount,
+      status: result.status,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/maintenance-management/manual-credit-adjustment
+// Manually add or deduct advance credit for a villa in the selected cycle
+const manualCreditAdjustmentSchema = z.object({
+  villaId: z.string().min(1),
+  maintenanceCollectionCycleId: z.string().min(1),
+  amount: z.number().refine((v) => v !== 0, "Amount must not be zero"),
+  remarks: z.string().min(1, "Remarks are required"),
+});
+
+router.post(
+  "/manual-credit-adjustment",
+  validateBody(manualCreditAdjustmentSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const body = req.body as z.infer<typeof manualCreditAdjustmentSchema>;
+
+      const villa = await prisma.villa.findFirst({
+        where: { id: body.villaId, societyId },
+      });
+      if (!villa) return res.status(404).json({ message: "Villa not found" });
+
+      // The cycle is used only to identify the financial year and validate
+      // the request context — the payment itself is NOT linked to any cycle
+      // so the credit walker won't auto-consume it against expected amounts.
+      const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: body.maintenanceCollectionCycleId, societyId },
+      });
+      if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
+      if (cycle.status === "LOCKED") {
+        return res.status(400).json({ message: "This billing cycle is locked" });
+      }
+
+      // For deductions, verify there is enough credit to deduct
+      if (body.amount < 0) {
+        const { creditPool } = await getVillaCreditBalance(prisma, {
+          societyId,
+          villaId: body.villaId,
+          financialYearId: cycle.financialYearId,
+        });
+        if (creditPool < Math.abs(body.amount)) {
+          return res.status(400).json({
+            message: `Cannot deduct more than available credit (₹${creditPool.toLocaleString("en-IN")})`,
+          });
+        }
+      }
+
+      const adjustmentType = body.amount > 0 ? "added" : "deducted";
+      const absAmount = Math.abs(body.amount);
+      const adminId = req.auth!.userId;
+
+      const result = await prisma.$transaction(async (tx) => {
+        // Create an unlinked payment (no cycle, no snapshot) so the credit
+        // walker treats it as a floating adjustment that seeds the credit pool.
+        await tx.maintenancePayment.create({
+          data: {
+            societyId,
+            villaId: body.villaId,
+            month: cycle.periodMonth,
+            year: cycle.periodYear,
+            amount: body.amount,
+            paymentDate: new Date(),
+            paymentMode: "CASH",
+            receiptNumber: `ADJ-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+            remarks: `Manual credit ${adjustmentType}: ₹${absAmount.toLocaleString("en-IN")} — ${body.remarks}`,
+            // Deliberately null — keeps it out of the per-cycle cash sums so
+            // the walker won't silently apply it to any cycle's expected amount.
+            maintenanceCollectionCycleId: null,
+            villaMaintenanceSnapshotId: null,
+          },
+        });
+
+        // Reconcile snapshots so paidAmount/status reflect the new credit.
+        // Without this, the read-only walker would consume credit against
+        // unpaid cycles but snapshots would still show paidAmount=0, causing
+        // the grid to report advanceCredit=0 for villas with pending cycles.
+        await applyVillaCreditAcrossSnapshots(tx, {
+          societyId,
+          villaId: body.villaId,
+          financialYearId: cycle.financialYearId,
+          throughCycleId: cycle.id,
+        });
+
+        // Sync UserCyclePayment for affected cycles so mobile app reflects
+        // the updated status (same pattern as apply-credit).
+        const walkedCycles = await tx.maintenanceCollectionCycle.findMany({
+          where: { societyId, financialYearId: cycle.financialYearId },
+          orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+          select: { id: true, periodMonth: true, periodYear: true, periodKey: true },
+        });
+        const throughIdx = walkedCycles.findIndex((c) => c.id === cycle.id);
+        const cyclesToSync = throughIdx >= 0 ? walkedCycles.slice(0, throughIdx + 1) : walkedCycles;
+
+        for (const wc of cyclesToSync) {
+          const snap = await tx.villaMaintenanceSnapshot.findUnique({
+            where: { cycleId_villaId: { cycleId: wc.id, villaId: body.villaId } },
+            select: { paidAmount: true, status: true },
+          });
+          if (!snap) continue;
+
+          const billingCycle = await tx.billingCycle.findFirst({
+            where: { societyId, financialYearId: cycle.financialYearId, cycleKey: wc.periodKey },
+            select: { id: true },
+          });
+          if (!billingCycle) continue;
+
+          await clearExcludedResidentsUserCyclePayments(tx, {
+            societyId,
+            villaId: body.villaId,
+            billingCycleId: billingCycle.id,
+          });
+
+          const snapStatus = snap.status;
+          const payStatus =
+            snapStatus === "PAID" || snapStatus === "WAIVED"
+              ? BillingUserPaymentStatus.SUCCESS
+              : BillingUserPaymentStatus.PENDING;
+          const primaryResidents = await tx.user.findMany({
+            where: {
+              societyId,
+              villaId: body.villaId,
+              role: UserRole.RESIDENT,
+              isActive: true,
+              maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+            },
+            select: { id: true },
+          });
+          for (const u of primaryResidents) {
+            await tx.userCyclePayment.upsert({
+              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+              create: {
+                userId: u.id,
+                cycleId: billingCycle.id,
+                amountPaid: new Prisma.Decimal(Number(snap.paidAmount)),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: adminId,
+                paidAt: new Date(),
+              },
+              update: {
+                amountPaid: new Prisma.Decimal(Number(snap.paidAmount)),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: adminId,
+                paidAt: new Date(),
+              },
+            });
+          }
+        }
+
+        // Read credit balance after reconciliation
+        const { creditPool } = await getVillaCreditBalance(tx, {
+          societyId,
+          villaId: body.villaId,
+          financialYearId: cycle.financialYearId,
+        });
+        return { creditPool };
+      }, { timeout: 15000 });
+
+      return res.status(200).json({
+        message: `₹${absAmount.toLocaleString("en-IN")} advance credit ${adjustmentType} for Villa ${villa.villaNumber}`,
+        adjustmentType,
+        amount: absAmount,
+        newCreditBalance: result.creditPool,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // GET /api/maintenance-management/year-report/:year
 // Get year-wise payment report
 router.get("/year-report/:year", async (req, res, next) => {
@@ -359,52 +925,115 @@ router.get("/year-report/:year", async (req, res, next) => {
       return res.status(400).json({ message: "Invalid year" });
     }
 
-    // Get total villas and their monthly maintenance
-    const villas = await prisma.villa.findMany({
-      where: { societyId },
-      select: { monthlyMaintenance: true },
-    });
+    // Fetch historical maintenance records, snapshot totals per cycle, and
+    // payment data in parallel.  Maintenance records store per-villa
+    // expectedAmount at the time a billing cycle was generated, so they
+    // reflect the actual rate that was in effect — not the current rate.
+    const [maintenanceRecords, snapshotCycleTotals, yearPayments, villas] =
+      await Promise.all([
+        prisma.maintenance.findMany({
+          where: { societyId, year },
+          select: { month: true, amount: true },
+        }),
+        // Aggregate snapshot expectedAmount per collection cycle that falls in
+        // this calendar year.  This covers months that have snapshots but may
+        // not yet have Maintenance rows.
+        prisma.maintenanceCollectionCycle.findMany({
+          where: { societyId, periodYear: year },
+          select: {
+            periodMonth: true,
+            snapshots: {
+              select: { expectedAmount: true },
+            },
+          },
+        }),
+        prisma.maintenancePayment.findMany({
+          where: { societyId, year },
+          select: { month: true, amount: true },
+        }),
+        // Current villa rates — used only as a last-resort fallback for months
+        // that have neither Maintenance records nor snapshots.
+        prisma.villa.findMany({
+          where: { societyId },
+          select: { monthlyMaintenance: true },
+        }),
+      ]);
 
-    const monthlyExpectedTotal = villas.reduce(
+    // Build per-month expected totals from historical Maintenance records.
+    const expectedFromMaintenance = new Map<number, number>();
+    for (const m of maintenanceRecords) {
+      expectedFromMaintenance.set(
+        m.month,
+        (expectedFromMaintenance.get(m.month) ?? 0) + Number(m.amount)
+      );
+    }
+
+    // Build per-month expected totals from VillaMaintenanceSnapshot sums
+    // (covers months where snapshots exist but Maintenance rows may not).
+    const expectedFromSnapshots = new Map<number, number>();
+    for (const c of snapshotCycleTotals) {
+      const snapTotal = c.snapshots.reduce(
+        (sum, s) => sum + Number(s.expectedAmount),
+        0
+      );
+      if (snapTotal > 0) {
+        expectedFromSnapshots.set(
+          c.periodMonth,
+          (expectedFromSnapshots.get(c.periodMonth) ?? 0) + snapTotal
+        );
+      }
+    }
+
+    // Fallback: sum of current villa.monthlyMaintenance (only used when
+    // neither historical source has data for a month).
+    const currentMonthlyTotal = villas.reduce(
       (sum, v) => sum + Number(v.monthlyMaintenance),
       0
     );
 
-    // Get maintenance payments for each month
+    // Build per-month collected totals from payments.
+    const collectedByMonth = new Map<number, number>();
+    const paymentCountByMonth = new Map<number, number>();
+    for (const p of yearPayments) {
+      collectedByMonth.set(
+        p.month,
+        (collectedByMonth.get(p.month) ?? 0) + Number(p.amount)
+      );
+      paymentCountByMonth.set(
+        p.month,
+        (paymentCountByMonth.get(p.month) ?? 0) + 1
+      );
+    }
+
     const monthlyData = [];
 
     for (let month = 1; month <= 12; month++) {
-      const payments = await prisma.maintenancePayment.findMany({
-        where: {
-          societyId,
-          year,
-          month,
-        },
-      });
+      // Prefer historical Maintenance records, then snapshot totals, then
+      // fall back to the current villa rates.
+      const totalAmount =
+        expectedFromMaintenance.get(month) ??
+        expectedFromSnapshots.get(month) ??
+        currentMonthlyTotal;
 
-      const collected = payments.reduce(
-        (sum, p) => sum + Number(p.amount),
-        0
-      );
-      const pending = monthlyExpectedTotal - collected;
-      const collectionRate = monthlyExpectedTotal > 0
-        ? Math.round((collected / monthlyExpectedTotal) * 100)
-        : 0;
+      const collected = collectedByMonth.get(month) ?? 0;
+      const pending = Math.max(0, totalAmount - collected);
+      const collectionRate =
+        totalAmount > 0 ? Math.round((collected / totalAmount) * 100) : 0;
 
       monthlyData.push({
         month,
-        totalAmount: monthlyExpectedTotal,
+        totalAmount,
         collected,
         pending,
         collectionRate,
-        paymentCount: payments.length,
+        paymentCount: paymentCountByMonth.get(month) ?? 0,
       });
     }
 
-    // Calculate yearly totals
-    const yearlyTotal = monthlyExpectedTotal * 12;
+    // Calculate yearly totals from per-month data (not a flat multiply).
+    const yearlyTotal = monthlyData.reduce((sum, m) => sum + m.totalAmount, 0);
     const yearlyCollected = monthlyData.reduce((sum, m) => sum + m.collected, 0);
-    const yearlyPending = yearlyTotal - yearlyCollected;
+    const yearlyPending = Math.max(0, yearlyTotal - yearlyCollected);
     const yearlyRate = yearlyTotal > 0
       ? Math.round((yearlyCollected / yearlyTotal) * 100)
       : 0;
@@ -526,12 +1155,14 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
     const { societyId } = req.auth!;
     const { payments: paymentsData } = req.body as z.infer<typeof bulkMarkPaidSchema>;
 
-    const results = [];
+    // Wrap all payment operations in a single transaction so either all
+    // succeed or none are committed, preventing inconsistent partial states.
+    const results = await prisma.$transaction(async (tx) => {
+      const txResults = [];
 
-    for (const paymentData of paymentsData) {
-      try {
+      for (const paymentData of paymentsData) {
         // Find or create maintenance
-        let maintenance = await prisma.maintenance.findFirst({
+        let maintenance = await tx.maintenance.findFirst({
           where: {
             societyId,
             villaId: paymentData.villaId,
@@ -542,7 +1173,7 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
 
         if (!maintenance) {
           const dueDate = new Date(paymentData.year, paymentData.month - 1, 5);
-          maintenance = await prisma.maintenance.create({
+          maintenance = await tx.maintenance.create({
             data: {
               societyId,
               villaId: paymentData.villaId,
@@ -554,13 +1185,13 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
             },
           });
         } else {
-          maintenance = await prisma.maintenance.update({
+          maintenance = await tx.maintenance.update({
             where: { id: maintenance.id },
             data: { status: "PAID" },
           });
         }
 
-        const existingPayment = await prisma.maintenancePayment.findFirst({
+        const existingPayment = await tx.maintenancePayment.findFirst({
           where: {
             societyId,
             villaId: paymentData.villaId,
@@ -571,10 +1202,10 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
           select: { id: true, receiptNumber: true },
         });
 
-        const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${Math.floor(Math.random() * 1000)}`;
+        const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
         const payment = existingPayment
-          ? await prisma.maintenancePayment.update({
+          ? await tx.maintenancePayment.update({
               where: { id: existingPayment.id },
               data: {
                 maintenanceId: maintenance.id,
@@ -585,7 +1216,7 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
                 bankAccountId: paymentData.bankAccountId,
               },
             })
-          : await prisma.maintenancePayment.create({
+          : await tx.maintenancePayment.create({
               data: {
                 societyId,
                 villaId: paymentData.villaId,
@@ -601,20 +1232,14 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
               },
             });
 
-        results.push({ success: true, villaId: paymentData.villaId, payment });
-      } catch (err) {
-        results.push({ 
-          success: false, 
-          villaId: paymentData.villaId, 
-          error: (err as Error).message 
-        });
+        txResults.push({ success: true as const, villaId: paymentData.villaId, payment });
       }
-    }
 
-    const successCount = results.filter((r) => r.success).length;
+      return txResults;
+    }, { timeout: 15000 });
 
     return res.status(201).json({
-      message: `${successCount} of ${results.length} payments marked successfully`,
+      message: `${results.length} of ${results.length} payments marked successfully`,
       results,
     });
   } catch (error) {
@@ -623,9 +1248,144 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
 });
 
 // GET /api/maintenance-management/financial-dashboard
+// Query: optional `cycleId` or `maintenanceCollectionCycleId` for billing-period (snapshot) view.
 router.get("/financial-dashboard", async (req, res, next) => {
   try {
-    const { societyId } = req.auth!;
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+
+    if (collectionCycleId) {
+      const core = await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
+      if ("error" in core) {
+        return res.status(400).json({ message: core.error });
+      }
+      const month = core.month;
+      const year = core.year;
+
+      const [globalPending, expenses, recentAdditionalFunds, money] = await Promise.all([
+        prisma.maintenance.findMany({
+          where: { societyId, status: { in: ["PENDING", "OVERDUE"] } },
+          include: { villa: { select: { villaNumber: true, ownerName: true } } },
+          orderBy: { dueDate: "asc" },
+          take: 250,
+        }),
+        prisma.expense.findMany({
+          where: { societyId, month, year },
+          select: {
+            amount: true,
+            category: { select: { name: true } },
+          },
+        }),
+        prisma.additionalFund.findMany({
+          where: { societyId },
+          orderBy: { receivedDate: "desc" },
+          take: 25,
+        }),
+        // Canonical fund snapshot — reads both ledgers (MaintenancePayment +
+        // UserCyclePayment) and reconciles per (villa, cycle) so historical
+        // data captured under the capping bug still lands in the balance.
+        computeSocietyMoneySnapshot(prisma, societyId),
+      ]);
+
+      const allTimeCollected = money.maintenanceCashAllTime + money.additionalFundsAllTime;
+      const allTimeSpent = money.expensesAllTime;
+      const currentFundBalance = money.currentFundBalance;
+      const monthCashCollected = money.maintenanceCashForMonth(month, year);
+      const mergedAllTimeInflow = money.additionalFundsAllTime;
+      const mergedMonthInflow = money.additionalFundsForMonth(month, year);
+
+      const categoryTotals = new Map<string, number>();
+      for (const expense of expenses) {
+        const key = expense.category?.name ?? "Other";
+        categoryTotals.set(key, (categoryTotals.get(key) ?? 0) + Number(expense.amount));
+      }
+
+      const expenseTotal = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
+      // Cycle-progress collected via the canonical snapshot (capped per
+      // villa) — falls back to the snapshot-rollup that financial-dashboard-
+      // cycle already computes if the snapshot service has no data yet.
+      const cycleProgressCollected = Math.max(
+        money.cycleProgressCollectedForCycle(collectionCycleId),
+        core.summary.collected,
+      );
+      const cycleCashCollected = money.maintenanceCashForCycle(collectionCycleId);
+
+      return res.json({
+        filter: {
+          month,
+          year,
+          maintenanceCollectionCycleId: collectionCycleId,
+          cycleTitle: core.cycle.title,
+        },
+        summary: {
+          totalVillas: core.summary.totalVillas,
+          paidCount: core.summary.paidCount,
+          unpaidCount: core.summary.unpaidCount,
+          overdueCount: core.summary.overdueCount,
+          partialCount: core.summary.partialCount,
+          totalExpected: core.summary.totalExpected,
+          collected: cycleProgressCollected,
+          /** Total cash actually received against this cycle (uncapped). */
+          cycleCashCollected,
+          pendingAmount: Math.max(0, core.summary.totalExpected - cycleProgressCollected),
+          collectionRate:
+            core.summary.totalExpected > 0
+              ? Math.round((cycleProgressCollected / core.summary.totalExpected) * 100)
+              : 0,
+        },
+        paymentHistory: core.paymentHistory,
+        residents: core.residents,
+        monthlyExpenseBreakdown: {
+          month,
+          year,
+          categories: Array.from(categoryTotals.entries()).map(([category, total]) => ({
+            category,
+            total,
+          })),
+          total: expenseTotal,
+        },
+        fund: {
+          currentFundBalance,
+          allTimeCollected,
+          allTimeSpent,
+          // Cycle-attributed (capped at expected per villa) — drives the
+          // collection rate / progress bars on this cycle's UI.
+          maintenanceCollected: cycleProgressCollected,
+          // Calendar-month cash received (uncapped) — drives the fund-flow
+          // numbers; reflects what actually hit the bank account.
+          monthCashCollected,
+          additionalMergedInflowAllTime: mergedAllTimeInflow,
+          additionalMergedInflowMonth: mergedMonthInflow,
+          monthNet: monthCashCollected + mergedMonthInflow - expenseTotal,
+          /** Surplus held by residents as advance credit (not yet consumed). */
+          totalAdvanceCredit: money.totalAdvanceCredit,
+        },
+        additionalFunds: recentAdditionalFunds.map((f) => ({
+          id: f.id,
+          title: f.title,
+          amount: Number(f.amount),
+          destination: f.destination,
+          source: f.source,
+          notes: f.notes,
+          receivedDate: f.receivedDate,
+        })),
+        globalPendingDues: globalPending.map((g) => ({
+          id: g.id,
+          villaId: g.villaId,
+          villaNumber: g.villa?.villaNumber ?? null,
+          ownerName: g.villa?.ownerName ?? null,
+          month: g.month,
+          year: g.year,
+          amount: Number(g.amount),
+          dueDate: g.dueDate,
+          status: g.status,
+        })),
+      });
+    }
+
     const { month, year } = parseMonthYear(req.query);
 
     const [
@@ -634,11 +1394,8 @@ router.get("/financial-dashboard", async (req, res, next) => {
       monthPayments,
       globalPending,
       expenses,
-      allTimeCollections,
-      allTimeExpenses,
-      allTimeAdditionalMerged,
-      monthAdditionalMerged,
       recentAdditionalFunds,
+      money,
     ] = await Promise.all([
       prisma.villa.findMany({
         where: { societyId },
@@ -667,29 +1424,17 @@ router.get("/financial-dashboard", async (req, res, next) => {
       }),
       prisma.expense.findMany({
         where: { societyId, month, year },
-        include: { category: true },
-      }),
-      prisma.maintenancePayment.aggregate({
-        where: { societyId },
-        _sum: { amount: true },
-      }),
-      prisma.expense.aggregate({
-        where: { societyId },
-        _sum: { amount: true },
-      }),
-      prisma.additionalFund.aggregate({
-        where: { societyId, destination: "MERGE_WITH_MAINTENANCE" },
-        _sum: { amount: true },
-      }),
-      prisma.additionalFund.aggregate({
-        where: { societyId, month, year, destination: "MERGE_WITH_MAINTENANCE" },
-        _sum: { amount: true },
+        select: {
+          amount: true,
+          category: { select: { name: true } },
+        },
       }),
       prisma.additionalFund.findMany({
         where: { societyId },
         orderBy: { receivedDate: "desc" },
         take: 25,
       }),
+      computeSocietyMoneySnapshot(prisma, societyId),
     ]);
 
     const maintenanceMap = new Map(monthMaintenance.map((m) => [m.villaId, m]));
@@ -713,17 +1458,30 @@ router.get("/financial-dashboard", async (req, res, next) => {
     });
 
     const totalExpected = villas.reduce((sum, v) => sum + Number(v.monthlyMaintenance), 0);
-    const collected = monthPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+    // Cycle-progress view: cap each villa's contribution at its expected
+    // amount so the collection rate / pendingAmount reflect "how much of
+    // what's owed has come in", not "how much cash arrived". Overpayments
+    // (advance credits) flow into the fund balance via the uncapped
+    // `monthCashCollected` field below — same split the cycle path uses.
+    const paidByVilla = new Map<string, number>();
+    for (const p of monthPayments) {
+      paidByVilla.set(p.villaId, (paidByVilla.get(p.villaId) ?? 0) + Number(p.amount));
+    }
+    const collected = villas.reduce((sum, v) => {
+      const paid = paidByVilla.get(v.id) ?? 0;
+      return sum + Math.min(paid, Number(v.monthlyMaintenance));
+    }, 0);
+    const monthCashCollected = money.maintenanceCashForMonth(month, year);
     const pendingAmount = Math.max(0, totalExpected - collected);
     const paidCount = residents.filter((r) => r.status === "PAID").length;
     const overdueCount = residents.filter((r) => r.status === "OVERDUE").length;
     const unpaidCount = residents.length - paidCount;
 
-    const mergedAllTimeInflow = Number(allTimeAdditionalMerged._sum.amount || 0);
-    const mergedMonthInflow = Number(monthAdditionalMerged._sum.amount || 0);
-    const allTimeCollected = Number(allTimeCollections._sum.amount || 0) + mergedAllTimeInflow;
-    const allTimeSpent = Number(allTimeExpenses._sum.amount || 0);
-    const currentFundBalance = allTimeCollected - allTimeSpent;
+    const allTimeCollected = money.maintenanceCashAllTime + money.additionalFundsAllTime;
+    const allTimeSpent = money.expensesAllTime;
+    const currentFundBalance = money.currentFundBalance;
+    const mergedAllTimeInflow = money.additionalFundsAllTime;
+    const mergedMonthInflow = money.additionalFundsForMonth(month, year);
 
     const categoryTotals = new Map<string, number>();
     for (const expense of expenses) {
@@ -768,10 +1526,19 @@ router.get("/financial-dashboard", async (req, res, next) => {
         currentFundBalance,
         allTimeCollected,
         allTimeSpent,
+        // Cycle-progress (capped per villa) — drives collection rate UI.
         maintenanceCollected: collected,
+        // Calendar-month cash received (uncapped) — drives fund flow so
+        // overpayments / advance credits show up in the balance.
+        monthCashCollected,
         additionalMergedInflowAllTime: mergedAllTimeInflow,
         additionalMergedInflowMonth: mergedMonthInflow,
-        monthNet: collected + mergedMonthInflow - expenses.reduce((sum, e) => sum + Number(e.amount), 0),
+        monthNet:
+          monthCashCollected +
+          mergedMonthInflow -
+          expenses.reduce((sum, e) => sum + Number(e.amount), 0),
+        /** Surplus held by residents as advance credit (not yet consumed). */
+        totalAdvanceCredit: money.totalAdvanceCredit,
       },
       additionalFunds: recentAdditionalFunds.map((f) => ({
         id: f.id,
@@ -916,9 +1683,63 @@ router.post("/send-dues-reminders", async (req, res, next) => {
 });
 
 // GET /api/maintenance-management/financial-dashboard/report-pdf
+// Query: optional `cycleId` or `maintenanceCollectionCycleId`.
 router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
   try {
-    const { societyId } = req.auth!;
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+
+    if (collectionCycleId) {
+      const core = await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
+      if ("error" in core) {
+        return res.status(400).json({ message: core.error });
+      }
+      const { month, year } = core;
+      const expected = core.summary.totalExpected;
+      const collected = core.summary.collected;
+      const pending = core.summary.pendingAmount;
+      const rate = core.summary.collectionRate;
+
+      const pendingRows = core.residents
+        .map((r) => {
+          const paid = r.paidTowardCycle ?? (r.status === "PAID" ? r.amount : 0);
+          const remaining = Math.max(0, Math.round((r.amount - paid) * 100) / 100);
+          return {
+            villaNumber: r.villaNumber,
+            ownerName: r.ownerName,
+            amount: remaining,
+            month,
+            year,
+          };
+        })
+        .filter((row) => row.amount > 0.001);
+
+      const pdfBuffer = await buildMaintenancePdfBuffer({
+        title: `Maintenance Report — ${core.cycle.title}`,
+        month,
+        year,
+        summaryRows: [
+          { label: "Billing period", value: core.cycle.title },
+          { label: "Total Villas", value: `${core.summary.totalVillas}` },
+          { label: "Total Expected", value: `Rs. ${expected.toFixed(0)}` },
+          { label: "Collected", value: `Rs. ${collected.toFixed(0)}` },
+          { label: "Pending", value: `Rs. ${pending.toFixed(0)}` },
+          { label: "Collection Rate", value: `${rate}%` },
+        ],
+        pendingRows,
+      });
+
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="maintenance_cycle_${year}_${String(month).padStart(2, "0")}_${collectionCycleId.slice(0, 8)}.pdf"`
+      );
+      return res.send(pdfBuffer);
+    }
+
     const { month, year } = parseMonthYear(req.query);
 
     const [villas, monthPayments, globalPending] = await Promise.all([
@@ -964,7 +1785,7 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader(
       "Content-Disposition",
-      `attachment; filename=\"maintenance_dashboard_${year}_${String(month).padStart(2, "0")}.pdf\"`
+      `attachment; filename="maintenance_dashboard_${year}_${String(month).padStart(2, "0")}.pdf"`
     );
     return res.send(pdfBuffer);
   } catch (error) {

@@ -1,16 +1,22 @@
+import crypto from "crypto";
 import { Router } from "express";
 import { z } from "zod";
 import {
   BillingCycleStatus,
   BillingPaymentSource,
   BillingUserPaymentStatus,
+  MaintenanceBillingRole,
   NotificationCategory,
+  Prisma,
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
 import { prisma } from "../../lib/prisma";
+import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
+import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { computeAmountDueForCycle } from "./domain/amountDue";
 import {
@@ -51,8 +57,22 @@ router.get("/cycles/current", requireAuth, async (req, res, next) => {
       return;
     }
 
-    const payload = await buildCurrentCycleResponse({ societyId, userId });
-    res.json(payload);
+    const billingCycleId =
+      typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
+    try {
+      const payload = await buildCurrentCycleResponse({
+        societyId,
+        userId,
+        billingCycleId: billingCycleId || undefined,
+      });
+      res.json(payload);
+    } catch (err) {
+      if (err instanceof Error && err.message === "BILLING_CYCLE_NOT_FOUND") {
+        res.status(404).json({ message: "Billing cycle not found" });
+        return;
+      }
+      throw err;
+    }
   } catch (e) {
     next(e);
   }
@@ -60,6 +80,7 @@ router.get("/cycles/current", requireAuth, async (req, res, next) => {
 
 const createCycleSchema = z.object({
   societyId: z.string().optional(),
+  financialYearId: z.string().min(1),
   cycleMonth: z.string().regex(/^\d{4}-\d{2}$/),
   title: z.string().min(1).max(200),
   amount: z.number().positive(),
@@ -76,14 +97,34 @@ router.post(
   validateBody(createCycleSchema),
   async (req, res, next) => {
     try {
-      let { societyId, cycleMonth, title, amount, paymentStartDate, paymentEndDate, lateFee, gracePeriodDays } =
-        req.body as z.infer<typeof createCycleSchema>;
+      const body = req.body as z.infer<typeof createCycleSchema>;
+      const {
+        financialYearId,
+        cycleMonth,
+        title,
+        amount,
+        paymentStartDate,
+        paymentEndDate,
+        lateFee,
+        gracePeriodDays,
+      } = body;
       const auth = req.auth!;
+      // societyId is the only field that gets defaulted from the auth
+      // context, so it stays mutable while everything else is `const`.
+      let societyId = body.societyId;
       if (!societyId) {
         societyId = auth.societyId;
       }
       if (!mustMatchSociety(auth.societyId, societyId)) {
         res.status(403).json({ message: "societyId mismatch" });
+        return;
+      }
+      const fy = await prisma.financialYear.findFirst({
+        where: { id: financialYearId, societyId },
+        select: { id: true, startDate: true, endDate: true, label: true },
+      });
+      if (!fy) {
+        res.status(404).json({ message: "Financial year not found" });
         return;
       }
 
@@ -92,6 +133,12 @@ router.post(
       const m = Number(monthStr);
       const startDate = new Date(Date.UTC(y, m - 1, 1));
       const endDate = new Date(Date.UTC(y, m, 0));
+      if (startDate < fy.startDate || endDate > fy.endDate) {
+        res.status(400).json({
+          message: `Selected month is outside financial year ${fy.label}`,
+        });
+        return;
+      }
 
       const pStart = new Date(paymentStartDate);
       const pEnd = new Date(paymentEndDate);
@@ -108,6 +155,7 @@ router.post(
       const cycle = await prisma.billingCycle.create({
         data: {
           societyId,
+          financialYearId,
           cycleKey: cycleMonth,
           title,
           amount,
@@ -128,7 +176,7 @@ router.post(
         action: "billing_cycle.create",
         entityType: "BillingCycle",
         entityId: cycle.id,
-        metadata: { cycleKey: cycleMonth },
+        metadata: { cycleKey: cycleMonth, financialYearId },
       });
 
       await syncAllBillingCycleStatuses();
@@ -222,6 +270,189 @@ router.put(
   }
 );
 
+router.delete(
+  "/admin/cycles/:id",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { id } = req.params;
+      const found = await prisma.billingCycle.findFirst({
+        where: { id, societyId: auth.societyId },
+      });
+      if (!found) {
+        res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+
+      const paymentCount = await prisma.userCyclePayment.count({
+        where: { cycleId: id },
+      });
+      if (paymentCount > 0) {
+        res.status(409).json({
+          message: "Cannot delete cycle with payment records. Close it instead.",
+        });
+        return;
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.billingLateFeeWaiver.deleteMany({ where: { cycleId: id } });
+        await tx.billingPaymentLog.deleteMany({ where: { cycleId: id } });
+        await tx.billingCycle.delete({ where: { id } });
+      });
+
+      await invalidateDisplayCycleHint(auth.societyId);
+      await writeAdminAuditLog({
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "billing_cycle.delete",
+        entityType: "BillingCycle",
+        entityId: id,
+        metadata: { cycleKey: found.cycleKey, title: found.title },
+      });
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+/**
+ * Financial years for the authenticated society (read-only).
+ * Used by admin billing UI and resident mobile to pick a year before choosing a billing cycle month.
+ */
+router.get(
+  "/financial-years",
+  requireAuth,
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const rows = await prisma.financialYear.findMany({
+        where: { societyId: auth.societyId },
+        orderBy: { startDate: "desc" },
+        select: {
+          id: true,
+          label: true,
+          startDate: true,
+          endDate: true,
+          status: true,
+        },
+      });
+      res.json({ financialYears: rows });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+/**
+ * Billing cycles that exist for a financial year (same source as web "Billing cycles").
+ * Query: financialYearId (required). Residents only see their society's data via JWT.
+ */
+router.get(
+  "/billing-cycles",
+  requireAuth,
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const financialYearId =
+        typeof req.query.financialYearId === "string" ? req.query.financialYearId.trim() : "";
+      if (!financialYearId) {
+        res.status(400).json({ message: "financialYearId is required" });
+        return;
+      }
+      const fy = await prisma.financialYear.findFirst({
+        where: { id: financialYearId, societyId: auth.societyId },
+        select: { id: true, label: true },
+      });
+      if (!fy) {
+        res.status(404).json({ message: "Financial year not found" });
+        return;
+      }
+      const cycles = await prisma.billingCycle.findMany({
+        where: { societyId: auth.societyId, financialYearId },
+        orderBy: { cycleKey: "asc" },
+        select: {
+          id: true,
+          cycleKey: true,
+          title: true,
+          amount: true,
+          paymentStartDate: true,
+          paymentEndDate: true,
+          lateFee: true,
+          gracePeriodDays: true,
+        },
+      });
+      const nowUtc = new Date();
+      const rows = cycles.map((c) => ({
+        id: c.id,
+        cycleKey: c.cycleKey,
+        title: c.title,
+        amount: Number(c.amount),
+        status: deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate),
+        paymentStartDate: c.paymentStartDate.toISOString(),
+        paymentEndDate: c.paymentEndDate.toISOString(),
+        lateFee: Number(c.lateFee),
+        gracePeriodDays: c.gracePeriodDays,
+      }));
+      res.json({
+        financialYear: { id: fy.id, label: fy.label },
+        cycles: rows,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
+/**
+ * Resolve a billing cycle to its financial year (same society as JWT).
+ * Used for deep links that only pass `billingCycleId` (no month/year).
+ */
+router.get(
+  "/billing-cycles/context",
+  requireAuth,
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const billingCycleId =
+        typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
+      if (!billingCycleId) {
+        res.status(400).json({ message: "billingCycleId is required" });
+        return;
+      }
+      const cycle = await prisma.billingCycle.findFirst({
+        where: { id: billingCycleId, societyId: auth.societyId },
+        select: {
+          id: true,
+          cycleKey: true,
+          title: true,
+          financialYearId: true,
+          financialYear: { select: { id: true, label: true } },
+        },
+      });
+      if (!cycle?.financialYearId || !cycle.financialYear) {
+        res.status(404).json({ message: "Billing cycle not found" });
+        return;
+      }
+      res.json({
+        financialYear: { id: cycle.financialYear.id, label: cycle.financialYear.label },
+        billingCycle: {
+          id: cycle.id,
+          cycleKey: cycle.cycleKey,
+          title: cycle.title,
+        },
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
+
 router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const auth = req.auth!;
@@ -229,6 +460,9 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
       where: { societyId: auth.societyId },
       orderBy: { paymentStartDate: "desc" },
       take: 120,
+      include: {
+        financialYear: { select: { id: true, label: true } },
+      },
     });
 
     const residentCount = await prisma.user.count({
@@ -244,6 +478,8 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
           id: c.id,
           cycleKey: c.cycleKey,
           month: c.cycleKey,
+          financialYearId: c.financialYearId,
+          financialYearLabel: c.financialYear?.label ?? null,
           title: c.title,
           amount: Number(c.amount),
           status: deriveCycleStatusUtc(new Date(), c.paymentStartDate, c.paymentEndDate),
@@ -264,6 +500,124 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
     next(e);
   }
 });
+
+router.get("/admin/financial-years", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const auth = req.auth!;
+    const rows = await prisma.financialYear.findMany({
+      where: { societyId: auth.societyId },
+      orderBy: { startDate: "desc" },
+      select: {
+        id: true,
+        label: true,
+        startDate: true,
+        endDate: true,
+        status: true,
+      },
+    });
+    res.json({ financialYears: rows });
+  } catch (e) {
+    next(e);
+  }
+});
+
+const updateFinancialYearSchema = z.object({
+  label: z.string().min(2).max(80),
+  startDate: z.string().datetime(),
+  endDate: z.string().datetime(),
+});
+
+router.put(
+  "/admin/financial-years/:id",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  validateBody(updateFinancialYearSchema),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { id } = req.params;
+      const body = req.body as z.infer<typeof updateFinancialYearSchema>;
+      const found = await prisma.financialYear.findFirst({
+        where: { id, societyId: auth.societyId },
+      });
+      if (!found) {
+        res.status(404).json({ message: "Financial year not found" });
+        return;
+      }
+      const startDate = new Date(body.startDate);
+      const endDate = new Date(body.endDate);
+      if (startDate >= endDate) {
+        res.status(400).json({ message: "startDate must be before endDate" });
+        return;
+      }
+
+      const updated = await prisma.financialYear.update({
+        where: { id },
+        data: {
+          label: body.label,
+          startDate,
+          endDate,
+        },
+      });
+
+      await writeAdminAuditLog({
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "financial_year.update",
+        entityType: "FinancialYear",
+        entityId: id,
+        metadata: { label: body.label, startDate: body.startDate, endDate: body.endDate },
+      });
+
+      res.json({ financialYear: updated });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+router.delete(
+  "/admin/financial-years/:id",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { id } = req.params;
+      const found = await prisma.financialYear.findFirst({
+        where: { id, societyId: auth.societyId },
+      });
+      if (!found) {
+        res.status(404).json({ message: "Financial year not found" });
+        return;
+      }
+
+      const [legacyCycleCount, collectionCycleCount] = await Promise.all([
+        prisma.billingCycle.count({ where: { financialYearId: id } }),
+        prisma.maintenanceCollectionCycle.count({ where: { financialYearId: id } }),
+      ]);
+      if (legacyCycleCount > 0 || collectionCycleCount > 0) {
+        res.status(409).json({
+          message: "Cannot delete financial year with billing cycles. Delete cycles first.",
+        });
+        return;
+      }
+
+      await prisma.financialYear.delete({ where: { id } });
+      await writeAdminAuditLog({
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "financial_year.delete",
+        entityType: "FinancialYear",
+        entityId: id,
+        metadata: { label: found.label },
+      });
+      res.json({ success: true });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
 
 const createOrderSchema = z.object({
   cycleId: z.string().min(1),
@@ -448,39 +802,183 @@ router.post(
         res.status(404).json({ message: "Resident not found" });
         return;
       }
+      if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+        res.status(400).json({
+          message:
+            "This resident is not the maintenance billing contact for their villa. Record cash against the primary resident instead.",
+          code: "MAINTENANCE_BILLING_EXCLUDED",
+        });
+        return;
+      }
 
-      const existing = await prisma.userCyclePayment.findUnique({
-        where: { userId_cycleId: { userId, cycleId } },
-      });
-      const updatedAmount = Number(existing?.amountPaid ?? 0) + amountPaid;
-      const updated = await prisma.userCyclePayment.update({
-        where: {
-          id:
-            (
-              await prisma.userCyclePayment.upsert({
-                where: { userId_cycleId: { userId, cycleId } },
-                create: {
-                  userId,
-                  cycleId,
-                  amountPaid: 0,
-                  paymentStatus: BillingUserPaymentStatus.SUCCESS,
-                  source: BillingPaymentSource.CASH_MANUAL,
-                  manualMarkedByAdminId: auth.userId,
-                  paidAt: new Date(),
-                  paymentGatewayOrderId: null,
+      const paidAt = new Date();
+      const updated = await prisma.$transaction(async (tx) => {
+        // Row-level lock to prevent concurrent mark-cash calls from
+        // reading the same amountPaid and double-counting.
+        const [existing] = await tx.$queryRawUnsafe<
+          { amountPaid: string }[] | []
+        >(
+          `SELECT "amountPaid"::text FROM "UserCyclePayment" WHERE "userId" = $1 AND "cycleId" = $2 FOR UPDATE`,
+          userId,
+          cycleId,
+        );
+        const updatedAmount = Number(existing?.amountPaid ?? 0) + amountPaid;
+
+        const payment = await tx.userCyclePayment.update({
+          where: {
+            id:
+              (
+                await tx.userCyclePayment.upsert({
+                  where: { userId_cycleId: { userId, cycleId } },
+                  create: {
+                    userId,
+                    cycleId,
+                    amountPaid: 0,
+                    paymentStatus: BillingUserPaymentStatus.SUCCESS,
+                    source: BillingPaymentSource.CASH_MANUAL,
+                    manualMarkedByAdminId: auth.userId,
+                    paidAt,
+                    paymentGatewayOrderId: null,
+                  },
+                  update: {},
+                  select: { id: true },
+                })
+              ).id,
+          },
+          data: {
+            amountPaid: updatedAmount,
+            paymentStatus: BillingUserPaymentStatus.SUCCESS,
+            source: BillingPaymentSource.CASH_MANUAL,
+            manualMarkedByAdminId: auth.userId,
+            paidAt,
+          },
+        });
+
+        if (user.villaId && cycle.financialYearId) {
+          const maintenanceCycle = await tx.maintenanceCollectionCycle.findFirst({
+            where: {
+              societyId: auth.societyId,
+              financialYearId: cycle.financialYearId,
+              periodKey: cycle.cycleKey,
+            },
+          });
+
+          if (maintenanceCycle) {
+            // Lock the snapshot row to prevent concurrent mark-cash calls
+            // from reading the same paidAmount and double-counting.
+            const [snapshot] = await tx.$queryRawUnsafe<
+              { id: string; expectedAmount: string; paidAmount: string }[]
+            >(
+              `SELECT id, "expectedAmount"::text, "paidAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
+              maintenanceCycle.id,
+              user.villaId,
+            );
+
+            if (snapshot) {
+              const expected = Number(snapshot.expectedAmount);
+              const paidSoFar = Number(snapshot.paidAmount);
+              // Snapshot tracks cycle progress only — capped at expected.
+              // The excess remains visible to the resident via the rolling
+              // ledger (cycle-service.ts) as advance credit.
+              const appliedToCycle = Math.max(0, Math.min(amountPaid, expected - paidSoFar));
+              const newPaid = paidSoFar + appliedToCycle;
+              const snapStatus = refreshSnapshotStatus(expected, newPaid, maintenanceCycle.dueDate);
+
+              const maintenanceRow = await tx.maintenance.upsert({
+                where: {
+                  villaId_month_year: {
+                    villaId: user.villaId,
+                    month: maintenanceCycle.periodMonth,
+                    year: maintenanceCycle.periodYear,
+                  },
                 },
-                update: {},
-                select: { id: true },
-              })
-            ).id,
-        },
-        data: {
-          amountPaid: updatedAmount,
-          paymentStatus: BillingUserPaymentStatus.SUCCESS,
-          source: BillingPaymentSource.CASH_MANUAL,
-          manualMarkedByAdminId: auth.userId,
-          paidAt: new Date(),
-        },
+                create: {
+                  societyId: auth.societyId,
+                  villaId: user.villaId,
+                  month: maintenanceCycle.periodMonth,
+                  year: maintenanceCycle.periodYear,
+                  amount: snapshot.expectedAmount,
+                  dueDate: maintenanceCycle.dueDate,
+                  status:
+                    snapStatus === "PAID"
+                        ? "PAID"
+                        : snapStatus === "OVERDUE"
+                            ? "OVERDUE"
+                            : "PENDING",
+                },
+                update: {
+                  amount: snapshot.expectedAmount,
+                  dueDate: maintenanceCycle.dueDate,
+                  status:
+                    snapStatus === "PAID"
+                        ? "PAID"
+                        : snapStatus === "OVERDUE"
+                            ? "OVERDUE"
+                            : "PENDING",
+                },
+              });
+
+              // Record the FULL cash received as a MaintenancePayment row,
+              // not the cycle-applied portion. This is the cash ledger that
+              // [maintenance-management/financial-dashboard] reads to compute
+              // `allTimeCollected` and `currentFundBalance`. Capping it here
+              // historically lost the overpayment — e.g. a ₹1300 payment for
+              // a ₹370 cycle would only be visible as ₹370 in the society
+              // balance, even though the full ₹1300 hit the bank account.
+              if (amountPaid > 0.005) {
+                await tx.maintenancePayment.create({
+                  data: {
+                    societyId: auth.societyId,
+                    villaId: user.villaId,
+                    maintenanceId: maintenanceRow.id,
+                    month: maintenanceCycle.periodMonth,
+                    year: maintenanceCycle.periodYear,
+                    amount: new Prisma.Decimal(amountPaid),
+                    paymentDate: paidAt,
+                    paymentMode: "CASH",
+                    receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+                    remarks:
+                      note && note.trim().length > 0
+                        ? `Billing cash sync: ${note.trim()}`
+                        : "Billing cash sync",
+                    maintenanceCollectionCycleId: maintenanceCycle.id,
+                    villaMaintenanceSnapshotId: snapshot.id,
+                  },
+                });
+              }
+
+              await tx.villaMaintenanceSnapshot.update({
+                where: { id: snapshot.id },
+                data: {
+                  paidAmount: new Prisma.Decimal(newPaid),
+                  status: snapStatus,
+                },
+              });
+            }
+
+            // Reconcile snapshots up to this cycle only. Any overpayment
+            // stays as available advance credit — admin must explicitly
+            // apply it via "Apply credit" when the resident requests.
+            if (user.villaId && maintenanceCycle) {
+              await applyVillaCreditAcrossSnapshots(tx, {
+                societyId: auth.societyId,
+                villaId: user.villaId,
+                financialYearId: cycle.financialYearId,
+                throughCycleId: maintenanceCycle.id,
+              });
+            }
+          }
+        }
+
+        if (user.villaId) {
+          await clearExcludedResidentsUserCyclePayments(tx, {
+            societyId: auth.societyId,
+            villaId: user.villaId,
+            billingCycleId: cycleId,
+          });
+        }
+
+        return payment;
       });
 
       await writeAdminAuditLog({
@@ -489,7 +987,7 @@ router.post(
         action: "billing.mark_cash",
         entityType: "UserCyclePayment",
         entityId: updated.id,
-        metadata: { userId, cycleId, amountPaid, totalAmountAfter: updatedAmount, note },
+        metadata: { userId, cycleId, amountPaid, totalAmountAfter: Number(updated.amountPaid), note },
       });
 
       res.json({ payment: updated });
@@ -520,6 +1018,23 @@ router.post(
       });
       if (!cycle) {
         res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+
+      const waiveUser = await prisma.user.findFirst({
+        where: { id: userId, societyId: auth.societyId, role: UserRole.RESIDENT },
+        select: { maintenanceBillingRole: true },
+      });
+      if (!waiveUser) {
+        res.status(404).json({ message: "Resident not found" });
+        return;
+      }
+      if (waiveUser.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+        res.status(400).json({
+          message:
+            "Late fee waivers apply to the primary maintenance billing resident for this villa.",
+          code: "MAINTENANCE_BILLING_EXCLUDED",
+        });
         return;
       }
 
@@ -624,23 +1139,23 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
     const ledgers = await Promise.all(users.map((u) => computeUserBillingLedger(auth.societyId, u.id)));
     const ledgerByUser = new Map(users.map((u, idx) => [u.id, ledgers[idx]]));
 
-    const rows: Array<Record<string, unknown>> = [];
-    for (const u of users) {
-      const userLedger = ledgerByUser.get(u.id);
-      for (const c of cycles) {
-        const p = payMap.get(`${u.id}:${c.id}`);
-        const isPaid = p?.paymentStatus === BillingUserPaymentStatus.SUCCESS;
-        const ledgerRow = userLedger?.cycles.find((row) => row.cycleId === c.id);
-        const expectedAmount = ledgerRow?.expectedAmount ?? 0;
-        const cashPaidAmount = ledgerRow?.cashPaidAmount ?? 0;
-        const paidAmount = ledgerRow?.paidAmount ?? 0;
-        const deltaAmount = ledgerRow?.deltaAmount ?? 0;
-        const effectiveStatus = deltaAmount > 0 ? "CREDIT" : deltaAmount < 0 ? "DUE" : "SETTLED";
-        if (paidFilter === "PAID" && !isPaid) continue;
-        if (paidFilter === "UNPAID" && isPaid) continue;
-        if (paidFilter === "CREDIT" && effectiveStatus !== "CREDIT") continue;
-        if (paidFilter === "DUE" && effectiveStatus !== "DUE") continue;
-        if (paidFilter === "SETTLED" && effectiveStatus !== "SETTLED") continue;
+      const rows: Array<Record<string, unknown>> = [];
+      for (const u of users) {
+        const userLedger = ledgerByUser.get(u.id);
+        for (const c of cycles) {
+          const p = payMap.get(`${u.id}:${c.id}`);
+          const ledgerRow = userLedger?.cycles.find((row) => row.cycleId === c.id);
+          const expectedAmount = ledgerRow?.expectedAmount ?? 0;
+          const cashPaidAmount = ledgerRow?.cashPaidAmount ?? 0;
+          const paidAmount = ledgerRow?.paidAmount ?? 0;
+          const deltaAmount = ledgerRow?.deltaAmount ?? 0;
+          const effectiveStatus = deltaAmount > 0 ? "CREDIT" : deltaAmount < 0 ? "DUE" : "SETTLED";
+          const settledByLedger = paidAmount >= expectedAmount - 0.005;
+          if (paidFilter === "PAID" && !settledByLedger) continue;
+          if (paidFilter === "UNPAID" && settledByLedger) continue;
+          if (paidFilter === "CREDIT" && effectiveStatus !== "CREDIT") continue;
+          if (paidFilter === "DUE" && effectiveStatus !== "DUE") continue;
+          if (paidFilter === "SETTLED" && effectiveStatus !== "SETTLED") continue;
 
         rows.push({
           userId: u.id,
@@ -680,7 +1195,8 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
     }>(
       (acc, row) => {
         const expected = Number(row.expectedAmount ?? 0);
-        const collected = Number(row.effectivePaidAmount ?? row.paidAmount ?? 0);
+        // "Collected" on admin billing dashboard should reflect actual cash received.
+        const collected = Number(row.cashPaidAmount ?? row.amountPaid ?? 0);
         const delta = Number(row.deltaAmount ?? 0);
         acc.totalExpected += expected;
         acc.totalCollected += collected;

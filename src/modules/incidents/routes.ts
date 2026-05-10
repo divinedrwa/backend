@@ -1,6 +1,7 @@
 import { IncidentSeverity, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -24,8 +25,8 @@ router.use(requireAuth);
 // List incidents (admin sees all, guard sees own)
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: any = {
-      societyId: req.auth!.societyId
+    const whereClause: { societyId: string; reportedBy?: string } = {
+      societyId: req.auth!.societyId,
     };
 
     // Guards see only their own reports
@@ -33,21 +34,29 @@ router.get("/", async (req, res, next) => {
       whereClause.reportedBy = req.auth!.userId;
     }
 
-    const incidents = await prisma.incident.findMany({
-      where: whereClause,
-      include: {
-        guard: {
-          select: {
-            id: true,
-            name: true
-          }
-        }
-      },
-      orderBy: { createdAt: "desc" },
-      take: 100
-    });
+    const pagination = getPagination(req);
+    const [incidents, total] = await Promise.all([
+      prisma.incident.findMany({
+        where: whereClause,
+        include: {
+          guard: {
+            select: {
+              id: true,
+              name: true,
+            },
+          },
+        },
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.incident.count({ where: whereClause }),
+    ]);
 
-    return res.json({ incidents });
+    return res.json({
+      incidents,
+      ...paginationMeta(total, incidents.length, pagination),
+    });
   } catch (error) {
     next(error);
   }

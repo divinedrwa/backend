@@ -17,10 +17,82 @@ const visitorWithVillas = {
   villaVisits: {
     include: {
       villa: { select: { id: true, villaNumber: true, block: true } },
+      unit: { select: { id: true, unitCode: true, label: true } },
+      resident: { select: { id: true, name: true, residentType: true } },
     },
   },
   gate: { select: { id: true, name: true } },
 } as const;
+
+export type VisitorApprovalTarget = {
+  villaId: string;
+  unitId?: string | null;
+  residentUserId?: string | null;
+};
+
+/** Resolve who would receive an approval request (no notifications). */
+export async function resolveVisitorApprovalRecipientIds(params: {
+  prisma: PrismaClient;
+  societyId: string;
+  villaIds: string[];
+  targets?: VisitorApprovalTarget[];
+}): Promise<string[]> {
+  if (params.targets && params.targets.length > 0) {
+    const ids = new Set<string>();
+    for (const t of params.targets) {
+      if (t.residentUserId) {
+        const u = await params.prisma.user.findFirst({
+          where: {
+            id: t.residentUserId,
+            societyId: params.societyId,
+            role: UserRole.RESIDENT,
+            isActive: true,
+            villaId: t.villaId,
+          },
+          select: { id: true },
+        });
+        if (u) ids.add(u.id);
+        continue;
+      }
+      if (t.unitId) {
+        const list = await params.prisma.user.findMany({
+          where: {
+            societyId: params.societyId,
+            role: UserRole.RESIDENT,
+            isActive: true,
+            villaId: t.villaId,
+            unitId: t.unitId,
+          },
+          select: { id: true },
+        });
+        for (const x of list) ids.add(x.id);
+        continue;
+      }
+      const list = await params.prisma.user.findMany({
+        where: {
+          societyId: params.societyId,
+          role: UserRole.RESIDENT,
+          isActive: true,
+          villaId: t.villaId,
+        },
+        select: { id: true },
+      });
+      for (const x of list) ids.add(x.id);
+    }
+    return [...ids];
+  }
+  const residents = await params.prisma.user.findMany({
+    where: {
+      societyId: params.societyId,
+      role: UserRole.RESIDENT,
+      isActive: true,
+      villaId: { in: params.villaIds },
+    },
+    select: { id: true },
+    distinct: ["id"],
+  });
+  return residents.map((r) => r.id);
+}
 
 export type VisitorForApprovalPayload = Prisma.VisitorGetPayload<{
   include: typeof visitorWithVillas;
@@ -49,6 +121,7 @@ export async function notifyResidentsVisitorApprovalRequest(params: {
   visitorName: string;
   purpose: string;
   villaIds: string[];
+  targets?: VisitorApprovalTarget[];
   guardUserId: string;
   visitorType: string;
   visitorPhone?: string;
@@ -60,16 +133,13 @@ export async function notifyResidentsVisitorApprovalRequest(params: {
   });
   const guardName = guard?.name?.trim() || "Security";
 
-  const residents = await params.prisma.user.findMany({
-    where: {
-      societyId: params.societyId,
-      role: UserRole.RESIDENT,
-      isActive: true,
-      villaId: { in: params.villaIds },
-    },
-    select: { id: true },
-    distinct: ["id"],
+  const recipientIds = await resolveVisitorApprovalRecipientIds({
+    prisma: params.prisma,
+    societyId: params.societyId,
+    villaIds: params.villaIds,
+    targets: params.targets,
   });
+  const residents = recipientIds.map((id) => ({ id }));
 
   const when = new Date().toISOString();
   const purposeLine = params.purpose?.trim() || "Visit";

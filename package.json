@@ -24,7 +24,12 @@
     "diagnose:db": "tsx scripts/diagnose-db-overview.ts",
     "verify:migrations-safe": "tsx scripts/verify-migrations-safe.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",
-    "test": "tsx --test \"src/**/*.test.ts\""
+    "reconcile:villa-credits": "tsx scripts/reconcile-villa-credits.ts",
+    "test": "tsx --test \"src/**/*.test.ts\"",
+    "lint": "eslint \"src/**/*.ts\"",
+    "format": "prettier --write \"src/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\"",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@prisma/client": "^6.7.0",
@@ -34,12 +39,16 @@
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
     "express": "^4.19.2",
+    "express-rate-limit": "^8.5.1",
     "firebase-admin": "^12.7.0",
+    "helmet": "^8.1.0",
     "ioredis": "^5.10.1",
     "jsonwebtoken": "^9.0.2",
     "multer": "^2.1.1",
     "node-cron": "^4.2.1",
     "pdfkit": "^0.18.0",
+    "pino": "^10.3.1",
+    "pino-http": "^11.0.0",
     "razorpay": "^2.9.6",
     "zod": "^3.23.8"
   },
@@ -51,6 +60,10 @@
     "@types/multer": "^2.1.0",
     "@types/node": "^22.7.4",
     "@types/node-cron": "^3.0.11",
+    "@typescript-eslint/eslint-plugin": "^7.18.0",
+    "@typescript-eslint/parser": "^7.18.0",
+    "eslint": "^8.57.1",
+    "prettier": "^3.8.3",
     "prisma": "^6.7.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.2"

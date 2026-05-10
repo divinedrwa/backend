@@ -1,6 +1,8 @@
 import { UserRole } from "@prisma/client";
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -27,6 +29,14 @@ function generateOTP(): string {
 }
 
 router.use(requireAuth);
+
+const otpRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { message: "Too many OTP attempts. Please wait and try again." },
+});
 
 // List pre-approved visitors (admin sees all, resident sees own)
 router.get("/", async (req, res, next) => {
@@ -61,9 +71,10 @@ router.get("/", async (req, res, next) => {
   }
 });
 
-// Create pre-approved visitor with OTP (residents)
+// Create pre-approved visitor with OTP (residents and admins only)
 router.post(
   "/",
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT),
   validateBody(createPreApprovedVisitorSchema),
   async (req, res, next) => {
     try {
@@ -135,6 +146,7 @@ router.post(
 // Verify OTP at gate (guards)
 router.post(
   "/verify",
+  otpRateLimiter,
   requireRole(UserRole.GUARD, UserRole.ADMIN),
   validateBody(verifyOtpSchema),
   async (req, res, next) => {
@@ -173,6 +185,11 @@ router.post(
         }
       });
 
+      const unitId = await getOrCreateDefaultUnitIdForVilla({
+        societyId: req.auth!.societyId,
+        villaId: visitor.villaId,
+      });
+
       // Create visitor log entry
       await prisma.visitor.create({
         data: {
@@ -184,6 +201,7 @@ router.post(
           villaVisits: {
             create: {
               villaId: visitor.villaId,
+              unitId,
               notifiedAt: new Date()
             }
           }

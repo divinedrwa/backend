@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { ensureDefaultUnitAndBillingAccount } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { UserRole } from "@prisma/client";
@@ -8,6 +9,12 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 // Validation schemas
+const unitInputSchema = z.object({
+  unitCode: z.string().min(1).max(64),
+  label: z.string().min(1).max(120),
+  sortOrder: z.number().int().min(0).max(999).optional(),
+});
+
 const createVillaSchema = z.object({
   villaNumber: z.string().min(1),
   floors: z.number().int().min(1).max(10),
@@ -17,6 +24,8 @@ const createVillaSchema = z.object({
   ownerEmail: z.string().email().optional(),
   ownerPhone: z.string().optional(),
   monthlyMaintenance: z.number().positive(),
+  /** Extra occupant units (GF, F1, …). A default unit is always created automatically. */
+  units: z.array(unitInputSchema).optional(),
 });
 
 const updateVillaSchema = z.object({
@@ -27,6 +36,8 @@ const updateVillaSchema = z.object({
   ownerEmail: z.string().email().optional(),
   ownerPhone: z.string().optional(),
   monthlyMaintenance: z.number().positive().optional(),
+  /** Upsert units by `unitCode` (does not remove existing units). */
+  units: z.array(unitInputSchema).optional(),
 });
 
 const bulkMaintenanceAmountSchema = z.object({
@@ -57,9 +68,14 @@ router.get("/", requireAuth, async (req, res, next) => {
             name: true,
             email: true,
             role: true,
+            residentType: true,
             moveInDate: true,
+            unitId: true,
+            unit: { select: { id: true, unitCode: true, label: true } },
           },
         },
+        units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
+        billingAccount: { select: { id: true, scope: true, villaId: true } },
         _count: {
           select: {
             users: true,
@@ -70,7 +86,12 @@ router.get("/", requireAuth, async (req, res, next) => {
       orderBy: { villaNumber: "asc" },
     });
 
-    return res.json({ villas });
+    return res.json({
+      villas: villas.map((v) => ({
+        ...v,
+        propertyId: v.id,
+      })),
+    });
   } catch (error) {
     next(error);
   }
@@ -85,6 +106,8 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     const villa = await prisma.villa.findFirst({
       where: { id, societyId },
       include: {
+        units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
+        billingAccount: { select: { id: true, scope: true, metadata: true } },
         users: {
           where: { isActive: true },
           select: {
@@ -93,6 +116,9 @@ router.get("/:id", requireAuth, async (req, res, next) => {
             email: true,
             phone: true,
             role: true,
+            residentType: true,
+            unitId: true,
+            unit: { select: { id: true, unitCode: true, label: true } },
             moveInDate: true,
             moveOutDate: true,
             isActive: true,
@@ -121,7 +147,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
       return res.status(404).json({ message: "Villa not found" });
     }
 
-    return res.json({ villa });
+    return res.json({ villa: { ...villa, propertyId: villa.id } });
   } catch (error) {
     next(error);
   }
@@ -136,15 +162,40 @@ router.post(
   async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
+    const body = req.body as z.infer<typeof createVillaSchema>;
+    const { units: extraUnits, ...villaFields } = body;
 
-    const villa = await prisma.villa.create({
-      data: {
-        societyId,
-        ...req.body,
-      },
+    const villa = await prisma.$transaction(async (tx) => {
+      const v = await tx.villa.create({
+        data: {
+          societyId,
+          ...villaFields,
+        },
+      });
+      await ensureDefaultUnitAndBillingAccount(tx, { societyId, villaId: v.id });
+      for (const u of extraUnits ?? []) {
+        if (u.unitCode === "_DEFAULT") continue;
+        await tx.unit.create({
+          data: {
+            societyId,
+            villaId: v.id,
+            unitCode: u.unitCode,
+            label: u.label,
+            sortOrder: u.sortOrder ?? 10,
+            isDefault: false,
+          },
+        });
+      }
+      return tx.villa.findUniqueOrThrow({
+        where: { id: v.id },
+        include: {
+          units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
+          billingAccount: { select: { id: true, scope: true } },
+        },
+      });
     });
 
-    return res.status(201).json({ villa });
+    return res.status(201).json({ villa: { ...villa, propertyId: villa.id } });
   } catch (error) {
     next(error);
   }
@@ -161,21 +212,66 @@ router.patch(
   try {
     const { societyId } = req.auth!;
     const { id } = req.params;
+    const body = req.body as z.infer<typeof updateVillaSchema>;
+    const { units: patchUnits, ...villaPatch } = body;
 
-    const villa = await prisma.villa.updateMany({
+    const exists = await prisma.villa.findFirst({
       where: { id, societyId },
-      data: req.body,
+      select: { id: true },
     });
-
-    if (villa.count === 0) {
+    if (!exists) {
       return res.status(404).json({ message: "Villa not found" });
     }
 
+    if (Object.keys(villaPatch).length > 0) {
+      await prisma.villa.updateMany({
+        where: { id, societyId },
+        data: villaPatch,
+      });
+    }
+
+    if (patchUnits?.length) {
+      await prisma.$transaction(async (tx) => {
+        for (const u of patchUnits) {
+          if (u.unitCode === "_DEFAULT") {
+            await tx.unit.updateMany({
+              where: { villaId: id, unitCode: "_DEFAULT" },
+              data: { label: u.label, sortOrder: u.sortOrder ?? 0 },
+            });
+            continue;
+          }
+          await tx.unit.upsert({
+            where: { villaId_unitCode: { villaId: id, unitCode: u.unitCode } },
+            create: {
+              societyId,
+              villaId: id,
+              unitCode: u.unitCode,
+              label: u.label,
+              sortOrder: u.sortOrder ?? 10,
+              isDefault: false,
+            },
+            update: {
+              label: u.label,
+              sortOrder: u.sortOrder ?? undefined,
+            },
+          });
+        }
+      });
+    }
+
+    await ensureDefaultUnitAndBillingAccount(prisma, { societyId, villaId: id });
+
     const updatedVilla = await prisma.villa.findUnique({
       where: { id },
+      include: {
+        units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
+        billingAccount: { select: { id: true, scope: true } },
+      },
     });
 
-    return res.json({ villa: updatedVilla });
+    return res.json({
+      villa: updatedVilla ? { ...updatedVilla, propertyId: updatedVilla.id } : updatedVilla,
+    });
   } catch (error) {
     next(error);
   }

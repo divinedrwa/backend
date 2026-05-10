@@ -1,6 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { PaymentMode, UserRole } from "@prisma/client";
@@ -167,25 +169,34 @@ router.get("/payments", requireAuth, requireRole(UserRole.ADMIN), async (req, re
     if (year) where.year = parseInt(year as string);
     if (villaId) where.villaId = villaId;
 
-    const payments = await prisma.maintenancePayment.findMany({
-      where,
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            ownerName: true,
+    const pagination = getPagination(req);
+    const [payments, total] = await Promise.all([
+      prisma.maintenancePayment.findMany({
+        where,
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              ownerName: true,
+            },
+          },
+          bankAccount: {
+            select: {
+              bankName: true,
+            },
           },
         },
-        bankAccount: {
-          select: {
-            bankName: true,
-          },
-        },
-      },
-      orderBy: { paymentDate: "desc" },
-    });
+        orderBy: { paymentDate: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.maintenancePayment.count({ where }),
+    ]);
 
-    return res.json({ payments });
+    return res.json({
+      payments,
+      ...paginationMeta(total, payments.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
@@ -231,57 +242,84 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
     const currentMonth = currentDate.getMonth() + 1;
     const currentYear = currentDate.getFullYear();
 
-    // Current month stats
-    const currentMonthBills = await prisma.maintenance.findMany({
-      where: {
-        societyId,
-        month: currentMonth,
-        year: currentYear,
-      },
-    });
+    // Pull the canonical money snapshot once for both fund and per-month
+    // numbers. Reads both ledgers (MaintenancePayment + UserCyclePayment),
+    // so the dashboard agrees with the residents page even when the two
+    // ledgers diverged historically.
+    const money = await computeSocietyMoneySnapshot(prisma, societyId);
 
-    const totalExpected = currentMonthBills.reduce((sum, bill) => sum + Number(bill.amount), 0);
-    const paidBills = currentMonthBills.filter(b => b.status === "PAID");
-    const pendingBills = currentMonthBills.filter(b => b.status === "PENDING");
-    const overdueBills = currentMonthBills.filter(b => b.status === "OVERDUE");
+    /**
+     * Cycle-progress view per month: caps each villa's contribution at its
+     * expected bill so the rate / pending figures stay sensible. Uses the
+     * `Maintenance` rows (the legacy bill ledger) for the cap basis.
+     */
+    const collectedForMonth = async (month: number, year: number) => {
+      const [bills, payments] = await Promise.all([
+        prisma.maintenance.findMany({
+          where: { societyId, month, year },
+          select: { villaId: true, amount: true, status: true },
+        }),
+        prisma.maintenancePayment.findMany({
+          where: { societyId, month, year },
+          select: { villaId: true, amount: true },
+        }),
+      ]);
+      const expectedByVilla = new Map<string, number>();
+      for (const b of bills) {
+        expectedByVilla.set(b.villaId, Number(b.amount));
+      }
+      const paidByVilla = new Map<string, number>();
+      for (const p of payments) {
+        paidByVilla.set(p.villaId, (paidByVilla.get(p.villaId) ?? 0) + Number(p.amount));
+      }
+      let cappedCollected = 0;
+      for (const [villaId, paid] of paidByVilla) {
+        const expected = expectedByVilla.get(villaId);
+        cappedCollected += expected != null ? Math.min(paid, expected) : paid;
+      }
+      const expected = bills.reduce((sum, b) => sum + Number(b.amount), 0);
+      // Canonical cash for the calendar month comes from the snapshot
+      // service, which reconciles MaintenancePayment + UserCyclePayment.
+      const cashReceived = money.maintenanceCashForMonth(month, year);
+      return { expected, cappedCollected, cashReceived, bills };
+    };
 
-    const totalCollected = await prisma.maintenancePayment.aggregate({
-      where: {
-        societyId,
-        month: currentMonth,
-        year: currentYear,
-      },
-      _sum: { amount: true },
-    });
+    const currentSummary = await collectedForMonth(currentMonth, currentYear);
+    const currentMonthBills = currentSummary.bills;
+    const totalExpected = currentSummary.expected;
+    const paidBills = currentMonthBills.filter((b) => b.status === "PAID");
+    const pendingBills = currentMonthBills.filter((b) => b.status === "PENDING");
+    const overdueBills = currentMonthBills.filter((b) => b.status === "OVERDUE");
 
-    const collectionRate = totalExpected > 0 ? (Number(totalCollected._sum.amount || 0) / totalExpected) * 100 : 0;
+    const totalCollected = currentSummary.cappedCollected;
+    const totalCashReceived = currentSummary.cashReceived;
 
-    // Month-wise collection (last 6 months)
+    const collectionRate = totalExpected > 0 ? (totalCollected / totalExpected) * 100 : 0;
+
+    // Month-wise collection (last 6 months) — cycle-progress view: each
+    // villa's payment is capped at its expected bill so an overpayment
+    // doesn't show >100% on the trend chart.
     const monthWiseData = [];
     for (let i = 0; i < 6; i++) {
       const date = new Date(currentYear, currentMonth - 1 - i, 1);
       const m = date.getMonth() + 1;
       const y = date.getFullYear();
-
-      const collected = await prisma.maintenancePayment.aggregate({
-        where: { societyId, month: m, year: y },
-        _sum: { amount: true },
-      });
-
-      const bills = await prisma.maintenance.findMany({
-        where: { societyId, month: m, year: y },
-      });
-
-      const expected = bills.reduce((sum, bill) => sum + Number(bill.amount), 0);
-      const pending = expected - Number(collected._sum.amount || 0);
-
+      const s = await collectedForMonth(m, y);
       monthWiseData.push({
         month: m,
         year: y,
-        monthName: date.toLocaleString('default', { month: 'short' }),
-        collected: Number(collected._sum.amount || 0),
-        expected,
-        pending,
+        monthName: date.toLocaleString("default", { month: "short" }),
+        collected: s.cappedCollected,
+        cashReceived: s.cashReceived,
+        expected: s.expected,
+        pending: Math.max(0, s.expected - s.cappedCollected),
+        // Net inflow this month (cash received + additional funds − expenses)
+        // so a 6-month trend chart based on this endpoint doesn't have to
+        // re-aggregate.
+        net:
+          s.cashReceived +
+          money.additionalFundsForMonth(m, y) -
+          money.expensesForMonth(m, y),
       });
     }
 
@@ -332,15 +370,32 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
         month: currentMonth,
         year: currentYear,
         totalExpected,
-        totalCollected: Number(totalCollected._sum.amount || 0),
-        totalPending: totalExpected - Number(totalCollected._sum.amount || 0),
+        // Cycle-progress (per-villa capped) — what the rate / pending UI
+        // needs to stay sensible (max 100%).
+        totalCollected,
+        totalPending: Math.max(0, totalExpected - totalCollected),
         collectionRate: Math.round(collectionRate),
+        // Actual cash received this month (uncapped) — used by the fund
+        // panel so advance credits / overpayments are visible.
+        totalCashReceived,
         paidVillas: paidBills.length,
         pendingVillas: pendingBills.length,
         overdueVillas: overdueBills.length,
       },
+      // Canonical society fund snapshot — same numbers as
+      // /maintenance-management/financial-dashboard so the dashboard cards
+      // never disagree.
+      fund: {
+        currentFundBalance: money.currentFundBalance,
+        allTimeCollected:
+          money.maintenanceCashAllTime + money.additionalFundsAllTime,
+        allTimeSpent: money.expensesAllTime,
+        maintenanceCashAllTime: money.maintenanceCashAllTime,
+        additionalFundsAllTime: money.additionalFundsAllTime,
+        totalAdvanceCredit: money.totalAdvanceCredit,
+      },
       monthWise: monthWiseData,
-      villaWise: villaWise.filter(v => v.pendingMonths > 0),
+      villaWise: villaWise.filter((v) => v.pendingMonths > 0),
     });
   } catch (error) {
     next(error);
@@ -352,25 +407,32 @@ router.get("/pending", requireAuth, requireRole(UserRole.ADMIN), async (req, res
   try {
     const { societyId } = req.auth!;
 
-    const pendingBills = await prisma.maintenance.findMany({
-      where: {
-        societyId,
-        status: "PENDING",
-      },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            ownerName: true,
-            ownerPhone: true,
-            ownerEmail: true,
+    const pagination = getPagination(req);
+    const where = { societyId, status: "PENDING" as const };
+    const [pendingBills, total] = await Promise.all([
+      prisma.maintenance.findMany({
+        where,
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              ownerName: true,
+              ownerPhone: true,
+              ownerEmail: true,
+            },
           },
         },
-      },
-      orderBy: { dueDate: "asc" },
-    });
+        orderBy: { dueDate: "asc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.maintenance.count({ where }),
+    ]);
 
-    return res.json({ pending: pendingBills });
+    return res.json({
+      pending: pendingBills,
+      ...paginationMeta(total, pendingBills.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
@@ -381,25 +443,32 @@ router.get("/overdue", requireAuth, requireRole(UserRole.ADMIN), async (req, res
   try {
     const { societyId } = req.auth!;
 
-    const overdueBills = await prisma.maintenance.findMany({
-      where: {
-        societyId,
-        status: "OVERDUE",
-      },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            ownerName: true,
-            ownerPhone: true,
-            ownerEmail: true,
+    const pagination = getPagination(req);
+    const where = { societyId, status: "OVERDUE" as const };
+    const [overdueBills, total] = await Promise.all([
+      prisma.maintenance.findMany({
+        where,
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              ownerName: true,
+              ownerPhone: true,
+              ownerEmail: true,
+            },
           },
         },
-      },
-      orderBy: { dueDate: "asc" },
-    });
+        orderBy: { dueDate: "asc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.maintenance.count({ where }),
+    ]);
 
-    return res.json({ overdue: overdueBills });
+    return res.json({
+      overdue: overdueBills,
+      ...paginationMeta(total, overdueBills.length, pagination),
+    });
   } catch (error) {
     next(error);
   }

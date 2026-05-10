@@ -10,6 +10,7 @@ declare global {
         /** Real society id for tenants; empty string for SUPER_ADMIN (path-blocked from tenant APIs). */
         societyId: string;
         villaId: string | null;
+        unitId: string | null;
       };
     }
   }

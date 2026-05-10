@@ -1,6 +1,8 @@
 import { UserRole, VisitorType } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
+import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -24,7 +26,7 @@ const checkOutSchema = z.object({
 router.use(requireAuth);
 
 // List all visitors with their villa visits
-router.get("/", async (req, res, next) => {
+router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const visitors = await prisma.visitor.findMany({
       where: { societyId: req.auth!.societyId },
@@ -57,7 +59,7 @@ router.get("/", async (req, res, next) => {
 });
 
 // Get visitor details
-router.get("/:id", async (req, res, next) => {
+router.get("/:id", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const { id } = req.params;
     
@@ -118,6 +120,15 @@ router.post(
         return res.status(404).json({ message: "One or more villas not found" });
       }
 
+      const villaVisitsCreate: { villaId: string; unitId: string; notifiedAt: Date }[] = [];
+      for (const villaId of body.villaIds) {
+        const unitId = await getOrCreateDefaultUnitIdForVilla({
+          societyId: req.auth!.societyId,
+          villaId,
+        });
+        villaVisitsCreate.push({ villaId, unitId, notifiedAt: new Date() });
+      }
+
       if (body.gateId) {
         const gate = await prisma.gate.findFirst({
           where: { id: body.gateId, societyId: req.auth!.societyId },
@@ -140,11 +151,8 @@ router.post(
           visitorType: body.visitorType || VisitorType.GUEST,
           createdBy: req.auth!.userId,
           villaVisits: {
-            create: body.villaIds.map((villaId) => ({
-              villaId,
-              notifiedAt: new Date(), // Mark as notified
-            }))
-          }
+            create: villaVisitsCreate,
+          },
         },
         include: {
           villaVisits: {
@@ -178,7 +186,15 @@ router.post(
 router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { id } = req.params;
-    const { villaId, notes } = req.body;
+    const { villaId, notes, unitId: bodyUnitId } = req.body as {
+      villaId?: string;
+      notes?: string;
+      unitId?: string;
+    };
+
+    if (!villaId || typeof villaId !== "string") {
+      return res.status(400).json({ message: "villaId is required" });
+    }
 
     // Verify visitor exists and is currently checked in
     const visitor = await prisma.visitor.findFirst({
@@ -205,18 +221,33 @@ router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async
       return res.status(404).json({ message: "Villa not found" });
     }
 
-    // Check if already visiting this villa
-    const existingVisit = await prisma.visitorVilla.findUnique({
-      where: {
-        visitorId_villaId: {
-          visitorId: id,
-          villaId
-        }
+    let resolvedUnitId: string;
+    if (bodyUnitId?.trim()) {
+      const unitRow = await prisma.unit.findFirst({
+        where: { id: bodyUnitId.trim(), villaId, societyId: req.auth!.societyId },
+        select: { id: true },
+      });
+      if (!unitRow) {
+        return res.status(400).json({ message: "Invalid unit for this property" });
       }
+      resolvedUnitId = unitRow.id;
+    } else {
+      resolvedUnitId = await getOrCreateDefaultUnitIdForVilla({
+        societyId: req.auth!.societyId,
+        villaId,
+      });
+    }
+
+    const existingVisit = await prisma.visitorVilla.findFirst({
+      where: {
+        visitorId: id,
+        villaId,
+        unitId: resolvedUnitId,
+      },
     });
 
     if (existingVisit) {
-      return res.status(400).json({ message: "Visitor already registered for this villa" });
+      return res.status(400).json({ message: "Visitor already registered for this property/unit" });
     }
 
     // Add villa visit
@@ -224,6 +255,7 @@ router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async
       data: {
         visitorId: id,
         villaId,
+        unitId: resolvedUnitId,
         notes,
         notifiedAt: new Date()
       },
@@ -259,7 +291,7 @@ router.patch(
           societyId: req.auth!.societyId,
           checkOutAt: null
         },
-        data: { checkOutAt: new Date(checkOutAt) }
+        data: { checkOutAt: new Date(checkOutAt), checkOutTime: new Date(checkOutAt) }
       });
 
       if (visitor.count === 0) {
@@ -274,41 +306,51 @@ router.patch(
 );
 
 // Get active visitors (currently in society)
-router.get("/active/list", async (req, res, next) => {
+router.get("/active/list", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
-    const activeVisitors = await prisma.visitor.findMany({
-      where: {
-        societyId: req.auth!.societyId,
-        checkOutAt: null
-      },
-      include: {
-        villaVisits: {
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                block: true
-              }
-            }
-          }
+    const pagination = getPagination(req);
+    const where = {
+      societyId: req.auth!.societyId,
+      checkOutAt: null,
+    };
+    const [activeVisitors, total] = await Promise.all([
+      prisma.visitor.findMany({
+        where,
+        include: {
+          villaVisits: {
+            include: {
+              villa: {
+                select: {
+                  villaNumber: true,
+                  block: true,
+                },
+              },
+            },
+          },
+          gate: {
+            select: {
+              name: true,
+            },
+          },
         },
-        gate: {
-          select: {
-            name: true
-          }
-        }
-      },
-      orderBy: { checkInAt: "desc" }
-    });
+        orderBy: { checkInAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.visitor.count({ where }),
+    ]);
 
-    return res.json({ visitors: activeVisitors });
+    return res.json({
+      visitors: activeVisitors,
+      ...paginationMeta(total, activeVisitors.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
 });
 
 // Get visitors by villa
-router.get("/villa/:villaId", async (req, res, next) => {
+router.get("/villa/:villaId", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const { villaId } = req.params;
 

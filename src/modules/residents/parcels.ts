@@ -66,6 +66,8 @@ router.get("/parcels-pending", requireRole(UserRole.RESIDENT), async (req, res, 
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
+    // Cap pending-parcel reads. Mobile clients show this as a small list,
+    // not an unbounded export, so 100 is generous.
     const pendingParcels = await prisma.parcel.findMany({
       where: {
         villaId: user.villaId,
@@ -73,6 +75,7 @@ router.get("/parcels-pending", requireRole(UserRole.RESIDENT), async (req, res, 
         status: ParcelStatus.RECEIVED,
       },
       orderBy: { receivedAt: "desc" },
+      take: 100,
     });
 
     return res.json({

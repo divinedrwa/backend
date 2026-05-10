@@ -4,10 +4,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
+import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
-import { UserRole, SOSStatus } from "@prisma/client";
+import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
 
 const updateProfileSchema = z.object({
   name: z.string().min(2).optional(),
@@ -32,8 +33,10 @@ const userMeResponseSelect = {
   moveInDate: true,
   moveOutDate: true,
   isActive: true,
+  maintenanceBillingRole: true,
   createdAt: true,
   photoUrl: true,
+  unitId: true,
   villa: {
     select: {
       id: true,
@@ -45,6 +48,14 @@ const userMeResponseSelect = {
       monthlyMaintenance: true,
     },
   },
+  unit: {
+    select: {
+      id: true,
+      unitCode: true,
+      label: true,
+      isDefault: true,
+    },
+  },
   society: {
     select: {
       id: true,
@@ -52,6 +63,32 @@ const userMeResponseSelect = {
     },
   },
 };
+
+const RESIDENT_TYPE_LABEL: Record<string, string> = {
+  OWNER: "Owner",
+  TENANT: "Tenant",
+  FAMILY_MEMBER: "Family member",
+};
+
+function formatResidentMeResponse(user: Record<string, unknown>) {
+  const villa = user.villa as
+    | { villaNumber?: string | null; block?: string | null }
+    | null
+    | undefined;
+  const unit = user.unit as { label?: string | null } | null | undefined;
+  const parts = [villa?.block, villa?.villaNumber].filter(
+    (x): x is string => typeof x === "string" && x.trim().length > 0,
+  );
+  const rt = typeof user.residentType === "string" ? user.residentType : "";
+  return {
+    ...user,
+    linkedPropertyId: user.villaId,
+    linkedUnitId: user.unitId,
+    propertyDisplayName: parts.length ? parts.join(" · ") : null,
+    unitDisplayName: unit?.label ?? null,
+    occupantRoleLabel: RESIDENT_TYPE_LABEL[rt] ?? rt,
+  };
+}
 
 function emptyToUndef(v: unknown): string | undefined {
   if (v === undefined || v === null) return undefined;
@@ -120,12 +157,16 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
       },
     });
 
-    // Get pending maintenance count
-    const pendingMaintenance = villaId
-      ? await prisma.maintenance.count({
-          where: { villaId, status: "PENDING" },
-        })
-      : 0;
+    const maintenanceBillingExcluded =
+      user?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
+
+    // Get pending maintenance count (billing contact only; others see 0)
+    const pendingMaintenance =
+      maintenanceBillingExcluded || !villaId
+        ? 0
+        : await prisma.maintenance.count({
+            where: { villaId, status: "PENDING" },
+          });
 
     // Total complaints filed by this resident (all statuses). Same rows as GET /my-complaints without ?status=
     const complaintCount = await prisma.complaint.count({
@@ -158,41 +199,19 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
       },
     });
 
-    const [allTimeCollections, allTimeExpenses, monthCollections, monthExpenses, allTimeAdditionalMerged, monthAdditionalMerged] =
-      await Promise.all([
-        prisma.maintenancePayment.aggregate({
-          where: { societyId },
-          _sum: { amount: true },
-        }),
-        prisma.expense.aggregate({
-          where: { societyId },
-          _sum: { amount: true },
-        }),
-        prisma.maintenancePayment.aggregate({
-          where: { societyId, month, year },
-          _sum: { amount: true },
-        }),
-        prisma.expense.aggregate({
-          where: { societyId, month, year },
-          _sum: { amount: true },
-        }),
-        prisma.additionalFund.aggregate({
-          where: { societyId, destination: "MERGE_WITH_MAINTENANCE" },
-          _sum: { amount: true },
-        }),
-        prisma.additionalFund.aggregate({
-          where: { societyId, month, year, destination: "MERGE_WITH_MAINTENANCE" },
-          _sum: { amount: true },
-        }),
-      ]);
+    // Canonical society money snapshot — same source of truth the admin
+    // dashboard uses, so admin and resident views can never disagree on
+    // the society's bank-account balance.
+    const money = await computeSocietyMoneySnapshot(prisma, societyId);
 
-    const mergedAllTimeInflow = Number(allTimeAdditionalMerged._sum.amount || 0);
-    const mergedMonthInflow = Number(monthAdditionalMerged._sum.amount || 0);
-    const allTimeCollected = Number(allTimeCollections._sum.amount || 0) + mergedAllTimeInflow;
-    const allTimeSpent = Number(allTimeExpenses._sum.amount || 0);
-    const currentBalance = allTimeCollected - allTimeSpent;
-    const monthCollected = Number(monthCollections._sum.amount || 0) + mergedMonthInflow;
-    const monthSpent = Number(monthExpenses._sum.amount || 0);
+    const mergedAllTimeInflow = money.additionalFundsAllTime;
+    const mergedMonthInflow = money.additionalFundsForMonth(month, year);
+    const allTimeCollected = money.maintenanceCashAllTime + mergedAllTimeInflow;
+    const allTimeSpent = money.expensesAllTime;
+    const currentBalance = money.currentFundBalance;
+    const monthCashReceived = money.maintenanceCashForMonth(month, year);
+    const monthCollected = monthCashReceived + mergedMonthInflow;
+    const monthSpent = money.expensesForMonth(month, year);
     const monthNet = monthCollected - monthSpent;
 
     return res.json({
@@ -218,9 +237,10 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
         monthCollected,
         monthSpent,
         monthNet,
-        maintenanceCollected: Number(monthCollections._sum.amount || 0),
+        maintenanceCollected: monthCashReceived,
         additionalMergedInflowMonth: mergedMonthInflow,
         additionalMergedInflowAllTime: mergedAllTimeInflow,
+        totalAdvanceCredit: money.totalAdvanceCredit,
       },
       timestamp: new Date(),
     });
@@ -315,7 +335,10 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
       select: userMeResponseSelect,
     });
 
-    return res.json({ message: "Profile updated successfully", user });
+    return res.json({
+      message: "Profile updated successfully",
+      user: formatResidentMeResponse(user as Record<string, unknown>),
+    });
   } catch (error) {
     next(error);
   }
@@ -335,7 +358,7 @@ router.get("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    return res.json({ user });
+    return res.json({ user: formatResidentMeResponse(user as Record<string, unknown>) });
   } catch (error) {
     next(error);
   }
