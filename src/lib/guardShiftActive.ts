@@ -1,7 +1,16 @@
 import type { GuardShift, Prisma, PrismaClient } from "@prisma/client";
 
+/** IST is UTC+5:30 = 330 minutes ahead. */
+const IST_OFFSET_MINUTES = 330;
+
+/** Convert a Date to IST minute-of-day (0-1439). */
+function toIstMinuteOfDay(d: Date): number {
+  const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60;
+  return (utcMin + IST_OFFSET_MINUTES) % 1440;
+}
+
 /**
- * Half-open window [startM, endM) in minutes from midnight (local server time).
+ * Half-open window [startM, endM) in minutes from midnight (IST).
  * Overnight: startM > endM means e.g. 22:00–06:00.
  */
 export function isMinuteWithinRecurringWindow(
@@ -22,8 +31,8 @@ function recurringMinutesFromStored(s: GuardShift): { sm: number; em: number } |
   if (s.recurringStartMinutes != null && s.recurringEndMinutes != null) {
     return { sm: s.recurringStartMinutes, em: s.recurringEndMinutes };
   }
-  const sm = s.startTime.getHours() * 60 + s.startTime.getMinutes();
-  const em = s.endTime.getHours() * 60 + s.endTime.getMinutes();
+  const sm = toIstMinuteOfDay(s.startTime);
+  const em = toIstMinuteOfDay(s.endTime);
   return { sm, em };
 }
 
@@ -67,8 +76,7 @@ export async function findActiveGuardShift(
     orderBy: { createdAt: "desc" },
   });
 
-  const nm =
-    now.getHours() * 60 + now.getMinutes() + now.getSeconds() / 60;
+  const nm = toIstMinuteOfDay(now);
 
   for (const s of recurringRows) {
     const pair = recurringMinutesFromStored(s);
