@@ -1,4 +1,5 @@
 import { ComplaintStatus, NotificationCategory, UserRole } from "@prisma/client";
+import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 import { NotificationService } from "./notification.service";
 
@@ -67,7 +68,7 @@ export async function notifyResidentsComplaintStatusChanged(params: {
     }
 
     if (userIds.length === 0) {
-      console.log("[complaint-notify] no recipients", { complaintId: params.complaintId });
+      logger.info({ complaintId: params.complaintId }, "Complaint status notification skipped; no recipients");
       return;
     }
 
@@ -77,14 +78,14 @@ export async function notifyResidentsComplaintStatusChanged(params: {
           category: NotificationCategory.COMPLAINT,
         });
       } catch (e) {
-        console.error("[complaint-notify] send failed", {
+        logger.error({
           userId,
           complaintId: params.complaintId,
-          error: e,
-        });
+          err: e,
+        }, "Complaint status notification send failed");
       }
     }
   } catch (e) {
-    console.error("[complaint-notify] failed", e);
+    logger.error({ err: e }, "Complaint status notification failed");
   }
 }

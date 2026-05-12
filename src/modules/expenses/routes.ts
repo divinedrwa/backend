@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import { ExpenseType, PaymentMode, UserRole } from '@prisma/client';
+import { ExpenseStatus, ExpenseType, PaymentMode, Prisma, UserRole } from '@prisma/client';
 import { z } from 'zod';
 import { getPagination, paginationMeta } from '../../lib/pagination';
 import { prisma } from '../../lib/prisma';
@@ -192,19 +192,23 @@ router.get('/', async (req, res, next) => {
       endDate,
       search
     } = req.query;
+    const categoryIdParam = typeof categoryId === "string" ? categoryId : undefined;
+    const statusParam = typeof status === "string" ? status : undefined;
+    const paymentModeParam = typeof paymentMode === "string" ? paymentMode : undefined;
     
-    const where: any = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId };
     
-    if (categoryId) where.categoryId = categoryId;
+    if (categoryIdParam) where.categoryId = categoryIdParam;
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
-    if (status) where.status = status;
-    if (paymentMode) where.paymentMode = paymentMode;
+    if (statusParam) where.status = statusParam as ExpenseStatus;
+    if (paymentModeParam) where.paymentMode = paymentModeParam as PaymentMode;
     
     if (startDate || endDate) {
-      where.paymentDate = {};
-      if (startDate) where.paymentDate.gte = new Date(startDate as string);
-      if (endDate) where.paymentDate.lte = new Date(endDate as string);
+      const paymentDate: Prisma.DateTimeFilter = {};
+      if (startDate) paymentDate.gte = new Date(startDate as string);
+      if (endDate) paymentDate.lte = new Date(endDate as string);
+      where.paymentDate = paymentDate;
     }
     
     if (search) {
@@ -535,7 +539,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { month, year } = req.query;
 
-    const where: any = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId };
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
 
@@ -632,7 +636,7 @@ router.get('/analytics/top-categories', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { year, limit = 10 } = req.query;
     
-    const where: any = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId };
     if (year) where.year = parseInt(year as string);
     
     const expenses = await prisma.expense.groupBy({

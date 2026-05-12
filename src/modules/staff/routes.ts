@@ -1,4 +1,4 @@
-import { StaffType, UserRole } from "@prisma/client";
+import { Prisma, StaffType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -39,7 +39,7 @@ router.get("/", async (req, res, next) => {
   try {
     const { societyId, villaId, role } = req.auth!;
 
-    const whereClause: any = {
+    const whereClause: Prisma.StaffWhereInput = {
       societyId,
     };
 

@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { NotificationCategory, PushPlatform, UserRole } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -61,11 +62,11 @@ router.post("/devices", validateBody(registerDeviceSchema), async (req, res, nex
     // Don't log device ids or token previews — they're persistent identifiers
     // that should not appear in operational logs. Only retain enough to
     // confirm the registration path is being exercised.
-    console.log("[DivineFCM-API] mobile_fcm_registered", {
+    logger.info({
       userId,
       platform: body.platform,
       firebaseAdminReady: isFirebaseConfigured(),
-    });
+    }, "Mobile FCM device registered");
     return res.status(201).json({ ok: true });
   } catch (error) {
     next(error);
@@ -219,7 +220,7 @@ router.get("/diagnostics", requireRole(UserRole.ADMIN), async (req, res, next) =
 /** POST /api/notifications/send-test — Send to yourself only (admin QA). */
 router.post("/send-test", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
-    const { userId, societyId } = req.auth!;
+    const { userId } = req.auth!;
     await notifyUserIds([userId], {
       title: "Test notification",
       body: "If you see this on your phone, push delivery is working.",

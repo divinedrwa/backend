@@ -1,4 +1,4 @@
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -7,6 +7,24 @@ import { validateBody } from "../../middlewares/validate";
 import { notifyResidentsComplaintStatusChanged } from "../../services/complaintStatusNotification.service";
 
 const router = Router();
+
+type ComplaintCategoryStats = {
+  category: string;
+  totalCount: number;
+  resolvedCount: number;
+  pendingCount: number;
+  inProgressCount: number;
+  totalResolutionTime: number;
+  resolvedWithTimeCount: number;
+};
+
+type ComplaintTrendStats = {
+  month: string;
+  totalComplaints: number;
+  resolvedComplaints: number;
+  totalResolutionTime: number;
+  resolvedWithTimeCount: number;
+};
 
 router.use(requireAuth);
 router.use(requireRole(UserRole.ADMIN));
@@ -17,21 +35,27 @@ router.get("/summary", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { startDate, endDate, days = "30" } = req.query;
+    let periodStart: Date | null = null;
+    let periodEnd: Date | null = null;
 
     // Calculate date range
-    let dateFilter: any = {};
+    let dateFilter: Prisma.ComplaintWhereInput = {};
     if (startDate && endDate) {
+      periodStart = new Date(startDate as string);
+      periodEnd = new Date(endDate as string);
       dateFilter = {
         createdAt: {
-          gte: new Date(startDate as string),
-          lte: new Date(endDate as string),
+          gte: periodStart,
+          lte: periodEnd,
         },
       };
     } else {
       const daysAgo = parseInt(days as string) || 30;
+      periodStart = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
+      periodEnd = new Date();
       dateFilter = {
         createdAt: {
-          gte: new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000),
+          gte: periodStart,
         },
       };
     }
@@ -80,8 +104,8 @@ router.get("/summary", async (req, res, next) => {
 
     return res.json({
       period: {
-        startDate: dateFilter.createdAt?.gte || null,
-        endDate: dateFilter.createdAt?.lte || new Date(),
+        startDate: periodStart,
+        endDate: periodEnd,
         days: parseInt(days as string) || 30,
       },
       summary: {
@@ -127,7 +151,7 @@ router.get("/by-category", async (req, res, next) => {
     });
 
     // Group by category
-    const categoryMap = new Map<string, any>();
+    const categoryMap = new Map<string, ComplaintCategoryStats>();
 
     complaints.forEach((complaint) => {
       const category = complaint.category || "Other";
@@ -282,7 +306,7 @@ router.get("/trend", async (req, res, next) => {
     });
 
     // Group by month
-    const monthMap = new Map<string, any>();
+    const monthMap = new Map<string, ComplaintTrendStats>();
 
     complaints.forEach((complaint) => {
       const date = new Date(complaint.createdAt);
@@ -383,7 +407,7 @@ router.patch(
       const previousStatus = complaint.status;
 
       // Update complaint
-      const updateData: any = {
+      const updateData: Prisma.ComplaintUpdateInput = {
         status,
       };
 

@@ -1,4 +1,4 @@
-import { ShiftType, UserRole } from "@prisma/client";
+import { Prisma, ShiftType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -235,7 +235,7 @@ router.patch(
       const body = req.body as z.infer<typeof updateShiftSchema>;
       const { id } = req.params;
 
-      const updateData: any = {};
+      const updateData: Prisma.GuardShiftUncheckedUpdateManyInput = {};
       if (body.guardId) updateData.guardId = body.guardId;
       if (body.gateId) updateData.gateId = body.gateId;
       if (body.shiftType) updateData.shiftType = body.shiftType;

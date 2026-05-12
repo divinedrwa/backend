@@ -1,4 +1,5 @@
 import { prisma } from "../lib/prisma";
+import { logger } from "../lib/logger";
 import admin from "firebase-admin";
 import { NotificationCategory, UserRole } from "@prisma/client";
 
@@ -13,12 +14,14 @@ if (!admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.cert(parsed as admin.ServiceAccount),
       });
-      console.log("✅ Firebase Admin initialized (FIREBASE_SERVICE_ACCOUNT_JSON)");
+      logger.info("Firebase Admin initialized from FIREBASE_SERVICE_ACCOUNT_JSON");
     } catch (error) {
-      console.error("❌ Error initializing Firebase Admin from FIREBASE_SERVICE_ACCOUNT_JSON:", error);
-      console.error(
-        "[DivineFCM-API] FCM push disabled: invalid FIREBASE_SERVICE_ACCOUNT_JSON or wrong project. " +
-          "Use a service account JSON for the **same** Firebase project as divine_app (society-e1a2e).",
+      logger.error(
+        { err: error },
+        "Error initializing Firebase Admin from FIREBASE_SERVICE_ACCOUNT_JSON",
+      );
+      logger.error(
+        "FCM push disabled: invalid FIREBASE_SERVICE_ACCOUNT_JSON or wrong project. Use a service account JSON for the same Firebase project as divine_app (society-e1a2e).",
       );
     }
   } else {
@@ -26,13 +29,11 @@ if (!admin.apps.length) {
       admin.initializeApp({
         credential: admin.credential.applicationDefault(),
       });
-      console.log("✅ Firebase Admin initialized");
+      logger.info("Firebase Admin initialized from application default credentials");
     } catch (error) {
-      console.error("❌ Error initializing Firebase Admin:", error);
-      console.error(
-        "[DivineFCM-API] FCM push disabled: fix Firebase Admin credentials. " +
-          "Set FIREBASE_SERVICE_ACCOUNT_JSON in .env, or export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json " +
-          "for the **same** Firebase project as android/app/google-services.json (society-e1a2e).",
+      logger.error({ err: error }, "Error initializing Firebase Admin");
+      logger.error(
+        "FCM push disabled: fix Firebase Admin credentials. Set FIREBASE_SERVICE_ACCOUNT_JSON in .env, or export GOOGLE_APPLICATION_CREDENTIALS=/path/to/sa.json for the same Firebase project as android/app/google-services.json (society-e1a2e).",
       );
     }
   }
@@ -73,13 +74,13 @@ export class NotificationService {
     options?: SendToUserOptions,
   ): Promise<void> {
     try {
-      console.log("[DivineFCM-API] sendToUser_target", {
+      logger.debug({
         targetUserId: userId,
         category: options?.category ?? "SYSTEM",
         titlePreview: payload.title?.slice(0, 72),
         dataKeys: payload.data ? Object.keys(payload.data) : [],
         hasImageUrl: Boolean(payload.imageUrl),
-      });
+      }, "sendToUser target");
 
       // Get all active devices for this user
       const devices = await prisma.pushDevice.findMany({
@@ -90,19 +91,23 @@ export class NotificationService {
       });
 
       if (devices.length === 0) {
-        console.log(
-          `[DivineFCM-API] sendToUser_skip_push userId=${userId} reason=no_active_push_devices (login app & open once to register FCM)`,
+        logger.debug(
+          { userId },
+          "Skipping push for user because there are no active push devices",
         );
       } else {
-        console.log(
-          `[DivineFCM-API] sendToUser_devices userId=${userId} activeDeviceCount=${devices.length}`,
+        logger.debug(
+          { userId, activeDeviceCount: devices.length },
+          "Found active push devices for user",
         );
         const tokens = devices.map((d) => d.token);
         try {
           await this.sendToTokens(tokens, payload);
         } catch (fcmErr) {
-          // eslint-disable-next-line no-console
-          console.error(`❌ FCM failed for user ${userId} (in-app notification will still be stored):`, fcmErr);
+          logger.warn(
+            { err: fcmErr, userId },
+            "FCM failed for user; in-app notification will still be stored",
+          );
         }
       }
 
@@ -128,7 +133,7 @@ export class NotificationService {
         },
       });
     } catch (error) {
-      console.error(`❌ Error sending notification to user ${userId}:`, error);
+      logger.error({ err: error, userId }, "Error sending notification to user");
       throw error;
     }
   }
@@ -141,13 +146,13 @@ export class NotificationService {
     payload: NotificationPayload,
     options?: SendToUserOptions,
   ): Promise<void> {
-    console.log(`📤 Sending notification to ${userIds.length} users`);
+    logger.info({ userCount: userIds.length }, "Sending notification to users");
 
     for (const userId of userIds) {
       try {
         await this.sendToUser(userId, payload, options);
       } catch (error) {
-        console.error(`❌ Error sending to user ${userId}:`, error);
+        logger.error({ err: error, userId }, "Error sending notification to user in batch");
         // Continue with other users
       }
     }
@@ -163,11 +168,11 @@ export class NotificationService {
     options?: SendToUserOptions,
   ): Promise<void> {
     try {
-      console.log("[DivineFCM-API] sendToSociety_target", {
+      logger.debug({
         societyId,
         roleFilter: role ?? "ALL_ACTIVE_USERS",
         titlePreview: payload.title?.slice(0, 72),
-      });
+      }, "sendToSociety target");
 
       // Get all users in society (optionally filtered by role).
       // Use explicit undefined check — `role && { role }` would wrongly skip filtering if ADMIN were ever numeric 0.
@@ -183,13 +188,14 @@ export class NotificationService {
       });
 
       const userIds = users.map((u) => u.id);
-      console.log(
-        `[DivineFCM-API] sendToSociety_recipients societyId=${societyId} userCount=${userIds.length}`,
+      logger.info(
+        { societyId, userCount: userIds.length, roleFilter: role ?? "ALL_ACTIVE_USERS" },
+        "Resolved society notification recipients",
       );
 
       await this.sendToUsers(userIds, payload, options);
     } catch (error) {
-      console.error(`❌ Error sending to society ${societyId}:`, error);
+      logger.error({ err: error, societyId }, "Error sending notification to society");
       throw error;
     }
   }
@@ -202,14 +208,17 @@ export class NotificationService {
     payload: NotificationPayload
   ): Promise<void> {
     if (tokens.length === 0) {
-      console.log("⚠️ No tokens provided");
+      logger.warn("No push tokens provided");
       return;
     }
 
     /** Firebase `sendEachForMulticast` allows at most 500 registration tokens per call. */
     const FCM_MULTICAST_MAX = 500;
 
-    console.log(`📤 Sending to ${tokens.length} device token(s) (chunked ≤${FCM_MULTICAST_MAX})`);
+    logger.info(
+      { tokenCount: tokens.length, maxChunkSize: FCM_MULTICAST_MAX },
+      "Sending notification to device tokens",
+    );
 
     for (let offset = 0; offset < tokens.length; offset += FCM_MULTICAST_MAX) {
       const chunk = tokens.slice(offset, offset + FCM_MULTICAST_MAX);
@@ -217,14 +226,14 @@ export class NotificationService {
         const tokenPreview =
           chunk[0]?.length > 18 ? `${chunk[0].substring(0, 18)}…` : chunk[0];
 
-        console.log("[DivineFCM-API] sendMulticast", {
+        logger.debug({
           chunkOffset: offset,
           tokenCount: chunk.length,
           firstTokenPreview: tokenPreview ?? "(none)",
           titlePreview: payload.title?.slice(0, 80),
           bodyLen: payload.body?.length ?? 0,
           dataKeys: payload.data ? Object.keys(payload.data) : [],
-        });
+        }, "Sending notification multicast chunk");
 
         const dataPayload: Record<string, string> = {};
         for (const [k, v] of Object.entries(payload.data || {})) {
@@ -267,36 +276,36 @@ export class NotificationService {
 
         const response = await admin.messaging().sendEachForMulticast(message);
 
-        console.log(`✅ Successfully sent: ${response.successCount}`);
-        console.log(`❌ Failed to send: ${response.failureCount}`);
-        console.log("[DivineFCM-API] multicast result", {
+        logger.info({
           successCount: response.successCount,
           failureCount: response.failureCount,
-        });
+          chunkOffset: offset,
+        }, "Notification multicast result");
 
         if (response.failureCount > 0) {
           response.responses.forEach((resp, idx) => {
             if (!resp.success) {
               const tk = chunk[idx];
-              console.error("[DivineFCM-API] token failure detail", {
+              logger.error({
                 index: offset + idx,
                 code: resp.error?.code,
                 message: resp.error?.message,
                 tokenPreview: tk && tk.length > 14 ? `${tk.substring(0, 14)}…` : tk,
-              });
-              console.error(`❌ Failed for token ${offset + idx}:`, resp.error);
+              }, "Notification token failure detail");
 
               if (
                 resp.error?.code === "messaging/invalid-registration-token" ||
                 resp.error?.code === "messaging/registration-token-not-registered"
               ) {
-                this.markDeviceInactive(chunk[idx]).catch(console.error);
+                this.markDeviceInactive(chunk[idx]).catch((err) => {
+                  logger.error({ err, tokenPreview: tk && tk.length > 14 ? `${tk.substring(0, 14)}…` : tk }, "Failed to mark device inactive");
+                });
               }
             }
           });
         }
       } catch (error) {
-        console.error(`❌ Error sending notification chunk (offset ${offset}):`, error);
+        logger.error({ err: error, chunkOffset: offset }, "Error sending notification chunk");
         throw error;
       }
     }
@@ -310,7 +319,7 @@ export class NotificationService {
     payload: NotificationPayload
   ): Promise<void> {
     try {
-      console.log(`📤 Sending notification to topic: ${topic}`);
+      logger.info({ topic }, "Sending notification to topic");
 
       const message: admin.messaging.Message = {
         topic,
@@ -333,9 +342,9 @@ export class NotificationService {
       };
 
       const response = await admin.messaging().send(message);
-      console.log(`✅ Successfully sent to topic ${topic}:`, response);
+      logger.info({ topic, response }, "Successfully sent notification to topic");
     } catch (error) {
-      console.error(`❌ Error sending to topic ${topic}:`, error);
+      logger.error({ err: error, topic }, "Error sending notification to topic");
       throw error;
     }
   }
@@ -349,9 +358,9 @@ export class NotificationService {
         where: { token },
         data: { isActive: false },
       });
-      console.log(`⚠️ Marked device as inactive: ${token.substring(0, 20)}...`);
+      logger.warn({ tokenPreview: `${token.substring(0, 20)}...` }, "Marked device as inactive");
     } catch (error) {
-      console.error("❌ Error marking device inactive:", error);
+      logger.error({ err: error }, "Error marking device inactive");
     }
   }
 
@@ -381,9 +390,9 @@ export class NotificationService {
           isActive: false,
         },
       });
-      console.log(`✅ Removed device ${deviceId} for user ${userId}`);
+      logger.info({ userId, deviceId }, "Removed push device for user");
     } catch (error) {
-      console.error("❌ Error removing device:", error);
+      logger.error({ err: error, userId, deviceId }, "Error removing push device");
       throw error;
     }
   }
@@ -405,9 +414,9 @@ export class NotificationService {
         },
       });
 
-      console.log(`🧹 Cleaned up ${result.count} inactive devices`);
+      logger.info({ removedCount: result.count }, "Cleaned up inactive devices");
     } catch (error) {
-      console.error("❌ Error cleaning up devices:", error);
+      logger.error({ err: error }, "Error cleaning up inactive devices");
     }
   }
 }
@@ -454,12 +463,12 @@ export async function notifySocietyRoles(params: {
   data?: Record<string, string>;
   imageUrl?: string;
 }) {
-  console.log("[DivineFCM-API] notifySocietyRoles_target", {
+  logger.info({
     societyId: params.societyId,
     roles: params.roles,
     category: params.category ?? "unspecified",
     titlePreview: params.title?.slice(0, 72),
-  });
+  }, "notifySocietyRoles target");
   const payload: NotificationPayload = {
     title: params.title,
     body: params.body,
@@ -493,7 +502,7 @@ export async function deliverNoticeNotificationsToResidents(params: {
   const userIds = [...new Set(params.userIds)];
 
   if (userIds.length === 0) {
-    console.log("[notice-delivery] no recipient user IDs");
+    logger.info("Notice delivery skipped because there were no recipient user IDs");
     return { residentCount: 0, deviceTokensSent: 0 };
   }
 
@@ -534,15 +543,15 @@ export async function deliverNoticeNotificationsToResidents(params: {
     try {
       await NotificationService.sendToTokens(tokens, payload);
     } catch (e) {
-      console.error("[notice-delivery] FCM failed after inbox rows were created:", e);
+      logger.error({ err: e, societyId: params.societyId }, "Notice delivery FCM failed after inbox rows were created");
     }
   }
 
-  console.log("[notice-delivery] completed", {
+  logger.info({
     societyId: params.societyId,
     residentAccounts: userIds.length,
     fcmTokenCount: tokens.length,
-  });
+  }, "Notice delivery completed");
 
   return { residentCount: userIds.length, deviceTokensSent: tokens.length };
 }
@@ -569,7 +578,7 @@ export async function broadcastNoticeToAllResidents(params: {
   const userIds = [...new Set(residents.map((r) => r.id))];
 
   if (userIds.length === 0) {
-    console.log("[notice-broadcast] no active residents", { societyId: params.societyId });
+    logger.info({ societyId: params.societyId }, "Notice broadcast skipped because there are no active residents");
     return { residentCount: 0, deviceTokensSent: 0 };
   }
 

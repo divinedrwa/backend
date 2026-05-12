@@ -14,28 +14,22 @@ router.get("/overview", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
 
-    const [vehicles, villas] = await Promise.all([
-      prisma.vehicle.findMany({
-        where: { societyId },
-        include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true,
-              ownerName: true,
-            },
+    const vehicles = await prisma.vehicle.findMany({
+      where: { societyId },
+      include: {
+        villa: {
+          select: {
+            villaNumber: true,
+            block: true,
+            ownerName: true,
           },
         },
-        orderBy: { createdAt: "desc" },
-      }),
-      prisma.villa.findMany({
-        where: { societyId },
-        select: { id: true, villaNumber: true },
-      }),
-    ]);
+      },
+      orderBy: { createdAt: "desc" },
+    });
 
     // Analyze parking slots
-    const slotMap: { [slot: string]: any[] } = {};
+    const slotMap: Record<string, typeof vehicles> = {};
     vehicles.forEach((v) => {
       if (v.parkingSlot) {
         if (!slotMap[v.parkingSlot]) slotMap[v.parkingSlot] = [];
@@ -131,8 +125,24 @@ router.get("/slot-analysis", async (req, res, next) => {
     });
 
     // Group by slot
-    const slotMap: { [slot: string]: any[] } = {};
-    const unassignedVehicles: any[] = [];
+    const slotMap: Record<string, Array<{
+      id: string;
+      type: string;
+      registrationNumber: string;
+      model: string | null;
+      color: string | null;
+      villa: (typeof vehicles)[number]["villa"];
+      villaId: string | null;
+    }>> = {};
+    const unassignedVehicles: Array<{
+      id: string;
+      type: string;
+      registrationNumber: string;
+      model: string | null;
+      color: string | null;
+      villa: (typeof vehicles)[number]["villa"];
+      villaId: string | null;
+    }> = [];
 
     vehicles.forEach((v) => {
       if (v.parkingSlot) {

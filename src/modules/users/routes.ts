@@ -1,4 +1,4 @@
-import { MaintenanceBillingRole, UserRole } from "@prisma/client";
+import { MaintenanceBillingRole, Prisma, UserRole } from "@prisma/client";
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
@@ -77,9 +77,10 @@ router.use(requireAuth);
 router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { role, isActive } = req.query;
+    const roleParam = typeof role === "string" ? role : undefined;
     
-    const where: any = { societyId: req.auth!.societyId };
-    if (role) where.role = role;
+    const where: Prisma.UserWhereInput = { societyId: req.auth!.societyId };
+    if (roleParam) where.role = roleParam as UserRole;
     if (isActive !== undefined) where.isActive = isActive === "true";
 
     const users = await prisma.user.findMany({

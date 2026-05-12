@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
-import { NotificationCategory, UserRole } from "@prisma/client";
+import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { notifySocietyRoles } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -61,7 +62,7 @@ router.post("/toggle", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(
           ? `Water supply is ON at ${event.gate?.name ?? "the gate"}.`
           : `Water supply is OFF at ${event.gate?.name ?? "the gate"}.`),
       data: { eventId: event.id, gateId, turnedOn: String(turnedOn) },
-    }).catch((err) => console.error("[notifications] water supply push failed:", err));
+    }).catch((err) => logger.error({ err }, "[notifications] water supply push failed"));
 
     return res.status(201).json({
       event,
@@ -77,9 +78,10 @@ router.get("/events", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { gateId, limit } = req.query;
+    const gateIdParam = typeof gateId === "string" ? gateId : undefined;
 
-    const where: any = { societyId };
-    if (gateId) where.gateId = gateId;
+    const where: Prisma.WaterSupplyEventWhereInput = { societyId };
+    if (gateIdParam) where.gateId = gateIdParam;
 
     const events = await prisma.waterSupplyEvent.findMany({
       where,
@@ -145,14 +147,16 @@ router.get("/history", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { startDate, endDate, gateId } = req.query;
+    const gateIdParam = typeof gateId === "string" ? gateId : undefined;
 
-    const where: any = { societyId };
-    if (gateId) where.gateId = gateId;
+    const where: Prisma.WaterSupplyEventWhereInput = { societyId };
+    if (gateIdParam) where.gateId = gateIdParam;
 
     if (startDate || endDate) {
-      where.createdAt = {};
-      if (startDate) where.createdAt.gte = new Date(startDate as string);
-      if (endDate) where.createdAt.lte = new Date(endDate as string);
+      const createdAt: Prisma.DateTimeFilter = {};
+      if (startDate) createdAt.gte = new Date(startDate as string);
+      if (endDate) createdAt.lte = new Date(endDate as string);
+      where.createdAt = createdAt;
     }
 
     const events = await prisma.waterSupplyEvent.findMany({
@@ -168,7 +172,7 @@ router.get("/history", requireAuth, async (req, res, next) => {
     });
 
     // Group by date
-    const groupedByDate = events.reduce((acc: any, event) => {
+    const groupedByDate = events.reduce<Record<string, typeof events>>((acc, event) => {
       const date = event.createdAt.toISOString().split("T")[0];
       if (!acc[date]) {
         acc[date] = [];

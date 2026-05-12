@@ -1,4 +1,4 @@
-import { ResidentType, UserRole } from "@prisma/client";
+import { Prisma, ResidentType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -28,10 +28,11 @@ router.use(requireRole(UserRole.ADMIN));
 router.get("/overview", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { status, type, villaId } = req.query;
+    const { status, villaId } = req.query;
+    const villaIdParam = typeof villaId === "string" ? villaId : undefined;
 
     // Build filter
-    const where: any = {
+    const where: Prisma.UserWhereInput = {
       societyId,
       role: UserRole.RESIDENT,
     };
@@ -42,8 +43,8 @@ router.get("/overview", async (req, res, next) => {
       where.isActive = false;
     }
 
-    if (villaId) {
-      where.villaId = villaId;
+    if (villaIdParam) {
+      where.villaId = villaIdParam;
     }
 
     // Get all residents
@@ -104,7 +105,7 @@ router.get("/overview", async (req, res, next) => {
 
       return {
         id: resident.id,
-        username: (resident as any).username || null,
+        username: resident.username ?? null,
         name: resident.name,
         email: resident.email,
         phone: resident.phone,
@@ -191,7 +192,7 @@ const moveOutSchema = z.object({
 router.post("/move-out", validateBody(moveOutSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { userId, moveOutDate, reason } = req.body as z.infer<
+    const { userId, moveOutDate, reason: _reason } = req.body as z.infer<
       typeof moveOutSchema
     >;
 

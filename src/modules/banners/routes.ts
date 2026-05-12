@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { BannerType, NotificationCategory } from "@prisma/client";
+import { BannerType, NotificationCategory, Prisma } from "@prisma/client";
 import { broadcastNoticeToAllResidents } from "../../services/notification.service";
 
 const router = Router();
@@ -296,7 +296,7 @@ router.put(
         return res.status(404).json({ message: "Banner not found" });
       }
 
-      const updateData: any = {};
+      const updateData: Prisma.BannerUpdateInput = {};
       if (data.title !== undefined) updateData.title = data.title;
       if (data.description !== undefined) updateData.description = data.description;
       if (data.imageUrl !== undefined) updateData.imageUrl = data.imageUrl;

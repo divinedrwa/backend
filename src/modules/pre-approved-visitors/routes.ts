@@ -1,4 +1,4 @@
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
@@ -41,7 +41,7 @@ const otpRateLimiter = rateLimit({
 // List pre-approved visitors (admin sees all, resident sees own)
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: any = {
+    const whereClause: Prisma.PreApprovedVisitorWhereInput = {
       societyId: req.auth!.societyId,
       validUntil: { gte: new Date() },
       isUsed: false

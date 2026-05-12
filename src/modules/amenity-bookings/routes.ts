@@ -24,7 +24,7 @@ router.use(requireAuth);
 // List bookings (all for admin, own for residents)
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: any = {
+    const whereClause: Prisma.AmenityBookingWhereInput = {
       societyId: req.auth!.societyId
     };
 

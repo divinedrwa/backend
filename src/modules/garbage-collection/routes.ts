@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { NotificationCategory, UserRole } from "@prisma/client";
+import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { notifySocietyRoles } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -116,9 +116,10 @@ router.get("/events", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { gateId, limit } = req.query;
+    const gateIdParam = typeof gateId === "string" ? gateId : undefined;
 
-    const where: any = { societyId };
-    if (gateId) where.gateId = gateId;
+    const where: Prisma.GarbageCollectionEventWhereInput = { societyId };
+    if (gateIdParam) where.gateId = gateIdParam;
 
     const events = await prisma.garbageCollectionEvent.findMany({
       where,
@@ -175,14 +176,16 @@ router.get("/history", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { startDate, endDate, gateId } = req.query;
+    const gateIdParam = typeof gateId === "string" ? gateId : undefined;
 
-    const where: any = { societyId };
-    if (gateId) where.gateId = gateId;
+    const where: Prisma.GarbageCollectionEventWhereInput = { societyId };
+    if (gateIdParam) where.gateId = gateIdParam;
 
     if (startDate || endDate) {
-      where.entryTime = {};
-      if (startDate) where.entryTime.gte = new Date(startDate as string);
-      if (endDate) where.entryTime.lte = new Date(endDate as string);
+      const entryTime: Prisma.DateTimeFilter = {};
+      if (startDate) entryTime.gte = new Date(startDate as string);
+      if (endDate) entryTime.lte = new Date(endDate as string);
+      where.entryTime = entryTime;
     }
 
     const events = await prisma.garbageCollectionEvent.findMany({

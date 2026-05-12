@@ -1,4 +1,4 @@
-import { PatrolStatus, UserRole } from "@prisma/client";
+import { PatrolStatus, Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -117,7 +117,7 @@ router.patch(
       const body = req.body as z.infer<typeof updatePatrolStatusSchema>;
       const { id } = req.params;
 
-      const updateData: any = {
+      const updateData: Prisma.GuardPatrolUpdateManyMutationInput = {
         status: body.status
       };
 

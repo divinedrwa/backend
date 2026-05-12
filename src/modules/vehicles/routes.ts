@@ -1,4 +1,4 @@
-import { UserRole, VehicleType } from "@prisma/client";
+import { Prisma, UserRole, VehicleType } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -31,7 +31,7 @@ router.use(requireAuth);
 // List vehicles
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: any = {
+    const whereClause: Prisma.VehicleWhereInput = {
       societyId: req.auth!.societyId
     };
 
@@ -87,15 +87,16 @@ router.post(
         }
       }
 
-      const vehicleData: any = {
+      const vehicleData: Prisma.VehicleUncheckedCreateInput = {
         societyId: req.auth!.societyId,
         villaId: body.villaId,
-        vehicleNumber: body.vehicleNumber.toUpperCase(),
-        vehicleType: body.vehicleType
+        registrationNumber: body.vehicleNumber.toUpperCase(),
+        type: body.vehicleType,
+        make: body.model?.trim() || "Unknown",
+        model: body.model?.trim() || "Unknown",
+        color: body.color?.trim() || "Unknown",
       };
 
-      if (body.model) vehicleData.model = body.model;
-      if (body.color) vehicleData.color = body.color;
       if (body.parkingSlot) vehicleData.parkingSlot = body.parkingSlot;
       if (body.rcCopy) vehicleData.rcCopy = body.rcCopy;
 
@@ -127,7 +128,7 @@ router.patch(
       const body = req.body as z.infer<typeof updateVehicleSchema>;
       const { id } = req.params;
 
-      const whereClause: any = {
+      const whereClause: Prisma.VehicleWhereInput = {
         id,
         societyId: req.auth!.societyId
       };
@@ -137,10 +138,18 @@ router.patch(
         whereClause.villaId = req.auth!.villaId;
       }
 
-      const updateData: any = { ...body };
+      const updateData: Prisma.VehicleUncheckedUpdateInput = {};
       if (body.vehicleNumber) {
-        updateData.vehicleNumber = body.vehicleNumber.toUpperCase();
+        updateData.registrationNumber = body.vehicleNumber.toUpperCase();
       }
+      if (body.vehicleType) updateData.type = body.vehicleType;
+      if (body.model) {
+        updateData.make = body.model.trim();
+        updateData.model = body.model.trim();
+      }
+      if (body.color) updateData.color = body.color;
+      if (body.parkingSlot !== undefined) updateData.parkingSlot = body.parkingSlot;
+      if (body.rcCopy !== undefined) updateData.rcCopy = body.rcCopy;
 
       const vehicle = await prisma.vehicle.updateMany({
         where: whereClause,
@@ -163,7 +172,7 @@ router.delete("/:id", async (req, res, next) => {
   try {
     const { id } = req.params;
 
-    const whereClause: any = {
+    const whereClause: Prisma.VehicleWhereInput = {
       id,
       societyId: req.auth!.societyId
     };
