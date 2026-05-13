@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import rateLimit from "express-rate-limit";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -8,6 +9,22 @@ import { validateBody } from "../../middlewares/validate";
 import { PaymentMode, UserRole } from "@prisma/client";
 
 const router = Router();
+
+// 🔥 Rate limiting for payment operations
+const paymentRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 10, // 10 requests per minute per IP
+  message: 'Too many payment requests, please try again later',
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (req, res) => {
+    res.status(429).json({
+      error: 'RATE_LIMIT_EXCEEDED',
+      message: 'Too many payment requests from this IP. Please try again in 1 minute.',
+      retryAfter: res.getHeader('Retry-After'),
+    });
+  },
+});
 
 // Validation schemas
 const recordPaymentSchema = z.object({
@@ -20,6 +37,7 @@ const recordPaymentSchema = z.object({
   transactionId: z.string().optional(),
   bankAccountId: z.string().optional(),
   remarks: z.string().optional(),
+  idempotencyKey: z.string().min(10).max(255).optional(), // Prevent duplicates
 });
 
 const generateBillsSchema = z.object({
@@ -31,14 +49,43 @@ const generateBillsSchema = z.object({
 // POST /api/maintenance/payments - Record payment
 router.post(
   "/payments",
+  paymentRateLimiter, // Apply rate limiting
   requireAuth,
   requireRole(UserRole.ADMIN, UserRole.RESIDENT),
   validateBody(recordPaymentSchema),
   async (req, res, next) => {
   try {
     const { societyId, userId } = req.auth!;
-    const { villaId, month, year, amount, paymentDate, paymentMode, transactionId, bankAccountId, remarks } = req.body;
+    const { villaId, month, year, amount, paymentDate, paymentMode, transactionId, bankAccountId, remarks, idempotencyKey } = req.body;
 
+    // Validate amount is positive
+    if (amount <= 0) {
+      return res.status(400).json({ 
+        error: "INVALID_AMOUNT",
+        message: "Payment amount must be positive" 
+      });
+    }
+
+    // 🔥 CRITICAL FIX: Check idempotency key to prevent duplicates
+    if (idempotencyKey) {
+      const existing = await prisma.maintenancePayment.findUnique({
+        where: { idempotencyKey },
+        include: {
+          villa: { select: { villaNumber: true, ownerName: true } },
+          bankAccount: { select: { bankName: true, accountNumber: true } },
+        },
+      });
+
+      if (existing) {
+        console.log(`[Idempotency] Returning existing payment for key: ${idempotencyKey}`);
+        return res.status(200).json({
+          payment: existing,
+          note: 'Payment already recorded (idempotent)',
+        });
+      }
+    }
+
+    // Validate villa exists
     const villa = await prisma.villa.findFirst({
       where: { id: villaId, societyId },
       select: { id: true },
@@ -47,7 +94,7 @@ router.post(
       return res.status(404).json({ message: "Villa not found" });
     }
 
-    // Residents can only pay for their own villa.
+    // Residents can only pay for their own villa
     if (req.auth?.role === UserRole.RESIDENT) {
       const resident = await prisma.user.findFirst({
         where: { id: userId, societyId },
@@ -58,101 +105,174 @@ router.post(
       }
     }
 
-    // Find/create maintenance row so payment stays linked for resident history/dashboard joins.
-    let maintenance = await prisma.maintenance.findFirst({
-      where: { societyId, villaId, month, year },
-    });
-    if (!maintenance) {
-      maintenance = await prisma.maintenance.create({
-        data: {
-          societyId,
-          villaId,
-          month,
-          year,
-          amount,
-          dueDate: new Date(year, month - 1, 5),
-          status: "PAID",
-        },
+    // 🔥 CRITICAL FIX: Wrap ALL operations in transaction
+    const result = await prisma.$transaction(async (tx) => {
+      // 1. Find or create maintenance record
+      let maintenance = await tx.maintenance.findFirst({
+        where: { societyId, villaId, month, year },
       });
-    } else if (maintenance.status !== "PAID") {
-      maintenance = await prisma.maintenance.update({
-        where: { id: maintenance.id },
-        data: { status: "PAID" },
-      });
-    }
-
-    const existingPayment = await prisma.maintenancePayment.findFirst({
-      where: { societyId, villaId, month, year },
-      orderBy: { paymentDate: "desc" },
-      select: { id: true, receiptNumber: true },
-    });
-
-    // Generate unique receipt number for first payment of the month.
-    const receiptNumber = existingPayment?.receiptNumber
-      ? existingPayment.receiptNumber
-      : `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
-
-    const payment = existingPayment
-      ? await prisma.maintenancePayment.update({
-          where: { id: existingPayment.id },
-          data: {
-            maintenanceId: maintenance.id,
-            amount,
-            paymentDate: new Date(paymentDate),
-            paymentMode: paymentMode as PaymentMode,
-            transactionId,
-            bankAccountId,
-            remarks,
-          },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                ownerName: true,
-              },
-            },
-            bankAccount: {
-              select: {
-                bankName: true,
-                accountNumber: true,
-              },
-            },
-          },
-        })
-      : await prisma.maintenancePayment.create({
+      
+      if (!maintenance) {
+        maintenance = await tx.maintenance.create({
           data: {
             societyId,
             villaId,
-            maintenanceId: maintenance.id,
             month,
             year,
             amount,
-            paymentDate: new Date(paymentDate),
-            paymentMode: paymentMode as PaymentMode,
-            transactionId,
-            receiptNumber,
-            bankAccountId,
-            remarks,
+            dueDate: new Date(year, month - 1, 5),
+            status: "PAID",
           },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                ownerName: true,
-              },
+        });
+      } else if (maintenance.status !== "PAID") {
+        maintenance = await tx.maintenance.update({
+          where: { id: maintenance.id },
+          data: { status: "PAID" },
+        });
+      }
+
+      // 2. Check for existing payment
+      const existingPayment = await tx.maintenancePayment.findFirst({
+        where: { societyId, villaId, month, year },
+        orderBy: { paymentDate: "desc" },
+        select: { id: true, receiptNumber: true },
+      });
+
+      // Generate unique receipt number
+      const receiptNumber = existingPayment?.receiptNumber
+        ? existingPayment.receiptNumber
+        : `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
+
+      // 3. Create or update payment
+      const payment = existingPayment
+        ? await tx.maintenancePayment.update({
+            where: { id: existingPayment.id },
+            data: {
+              maintenanceId: maintenance.id,
+              amount,
+              paymentDate: new Date(paymentDate),
+              paymentMode: paymentMode as PaymentMode,
+              transactionId,
+              bankAccountId,
+              remarks,
             },
-            bankAccount: {
-              select: {
-                bankName: true,
-                accountNumber: true,
-              },
+            include: {
+              villa: { select: { villaNumber: true, ownerName: true } },
+              bankAccount: { select: { bankName: true, accountNumber: true } },
+            },
+          })
+        : await tx.maintenancePayment.create({
+            data: {
+              societyId,
+              villaId,
+              maintenanceId: maintenance.id,
+              month,
+              year,
+              amount,
+              paymentDate: new Date(paymentDate),
+              paymentMode: paymentMode as PaymentMode,
+              transactionId,
+              receiptNumber,
+              bankAccountId,
+              remarks,
+              idempotencyKey, // Store idempotency key
+            },
+            include: {
+              villa: { select: { villaNumber: true, ownerName: true } },
+              bankAccount: { select: { bankName: true, accountNumber: true } },
+            },
+          });
+
+      // 4. Update snapshot if linked to a cycle
+      if (payment.maintenanceCollectionCycleId) {
+        const snapshot = await tx.villaMaintenanceSnapshot.findUnique({
+          where: {
+            cycleId_villaId: {
+              cycleId: payment.maintenanceCollectionCycleId,
+              villaId,
             },
           },
         });
 
-    return res.status(201).json({ payment });
-  } catch (error) {
-    next(error);
+        if (snapshot) {
+          // Use Decimal to avoid precision loss
+          const currentPaid = Number(snapshot.paidAmount);
+          const newPaidAmount = currentPaid + Number(amount);
+          const expectedAmount = Number(snapshot.expectedAmount);
+          
+          // Prevent negative balance
+          if (newPaidAmount < 0) {
+            throw new Error(`Cannot set negative balance: current=${currentPaid}, increment=${amount}`);
+          }
+
+          await tx.villaMaintenanceSnapshot.update({
+            where: {
+              cycleId_villaId: {
+                cycleId: payment.maintenanceCollectionCycleId,
+                villaId,
+              },
+            },
+            data: {
+              paidAmount: newPaidAmount,
+              status: newPaidAmount >= expectedAmount ? "PAID" : 
+                      newPaidAmount > 0 ? "PARTIAL" : "PENDING",
+            },
+          });
+        }
+      }
+
+      // 5. Create audit log
+      await tx.adminAuditLog.create({
+        data: {
+          adminId: userId,
+          societyId,
+          action: 'RECORD_PAYMENT',
+          entityType: 'MaintenancePayment',
+          entityId: payment.id,
+          metadata: {
+            villaId,
+            month,
+            year,
+            amount: amount.toString(),
+            paymentMode,
+            transactionId,
+            receiptNumber,
+            timestamp: new Date().toISOString(),
+          },
+        },
+      });
+
+      return { maintenance, payment };
+    }, {
+      maxWait: 5000,  // Max 5s wait for lock
+      timeout: 10000, // Max 10s total transaction
+      isolationLevel: 'Serializable', // Highest isolation
+    });
+
+    return res.status(201).json({ payment: result.payment });
+  } catch (error: unknown) {
+    console.error('[Payment] Recording failed:', error);
+    
+    // Sanitize errors for client
+    if (error instanceof Error) {
+      if (error.message.includes('Unique constraint') || error.message.includes('unique')) {
+        return res.status(409).json({
+          error: 'DUPLICATE_PAYMENT',
+          message: 'A payment for this period already exists',
+        });
+      }
+      if (error.message.includes('negative balance')) {
+        return res.status(400).json({
+          error: 'INVALID_BALANCE',
+          message: error.message,
+        });
+      }
+    }
+    
+    return res.status(500).json({
+      error: 'INTERNAL_ERROR',
+      message: 'Failed to record payment. Please try again.',
+    });
   }
   }
 );

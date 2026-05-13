@@ -42,6 +42,7 @@ import societySettingsRoutes from "../modules/society-settings/routes";
 import invitationRoutes from "../modules/invitations/routes";
 import importRoutes from "../modules/import/routes";
 import exportRoutes from "../modules/export/routes";
+import reconciliationRoutes from "../modules/reconciliation/routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -134,6 +135,9 @@ router.use("/invitations", invitationRoutes);
 
 /** Maintenance billing cycles (v1 API — server-side status + payments). */
 router.use("/v1", billingV1Routes);
+
+/** Financial reconciliation & monitoring (admin only). */
+router.use("/reconciliation", reconciliationRoutes);
 
 // ========================================
 // MOBILE APP APIs (NEW)

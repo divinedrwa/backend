@@ -5,6 +5,7 @@ import { AdvisoryLockKeys, withAdvisoryLock } from "./lib/advisoryLock";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { runBillingReminderJobs, syncAllBillingCycleStatuses } from "./modules/billing-cycle/services/cycle-service";
+import { reconcileAllSocieties } from "./lib/reconciliation";
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {
@@ -42,6 +43,17 @@ cron.schedule(
         async () => {
           await syncAllBillingCycleStatuses();
           await runBillingReminderJobs();
+          
+          // 🔥 NEW: Run financial reconciliation
+          logger.info("[billing-cron] Running ledger reconciliation");
+          const reconResult = await reconcileAllSocieties();
+          logger.info({
+            total: reconResult.total,
+            successful: reconResult.successful,
+            failed: reconResult.failed,
+            alertsCreated: reconResult.totalAlerts,
+          }, "[billing-cron] Reconciliation complete");
+          
           return true;
         },
       );
