@@ -1,5 +1,6 @@
 import type { NextFunction, Request, Response } from "express";
 import bcrypt from "bcryptjs";
+import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
@@ -382,20 +383,91 @@ router.put(
   updateResidentProfile
 );
 
-// DELETE /api/residents/me — resident soft-deletes own account (isActive=false; row retained)
+// DELETE /api/residents/me — two modes:
+//
+//   • Default (no query)                      → soft-deactivate (legacy)
+//     `isActive=false`, push devices off, row + PII retained so an admin can
+//     restore access if the resident changes their mind.
+//
+//   • `?confirmHardDelete=<full name>`        → real account deletion
+//     Required for Apple App Store guideline 5.1.1(v) and Google Play's User
+//     Data policy: users must be able to delete their account from inside
+//     the app. We anonymize-in-place rather than `prisma.user.delete()` so
+//     financial / audit history stays referentially valid; all personal
+//     identifiers (name, email, phone, photo, password, biometric tokens)
+//     are scrubbed and credentials randomised so the user can never sign in
+//     again. The typed-name guard mirrors the super-admin society hard-delete
+//     pattern and prevents accidental destructive taps.
 router.delete("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
     const existing = await prisma.user.findFirst({
       where: { id: userId, societyId, role: UserRole.RESIDENT },
-      select: { id: true, isActive: true },
+      select: { id: true, isActive: true, name: true },
     });
 
     if (!existing) {
       return res.status(404).json({ message: "Profile not found" });
     }
 
+    const confirmHardDelete = (
+      typeof req.query.confirmHardDelete === "string"
+        ? req.query.confirmHardDelete
+        : ""
+    ).trim();
+
+    if (confirmHardDelete) {
+      if (
+        confirmHardDelete.toLowerCase() !==
+        existing.name.trim().toLowerCase()
+      ) {
+        return res.status(400).json({
+          message:
+            "confirmHardDelete must equal your full name exactly (case-insensitive).",
+        });
+      }
+
+      const token = randomBytes(16).toString("hex");
+      const scrubbedEmail = `deleted+${token}@deleted.local`;
+      const scrubbedUsername = `deleted_${token}`;
+      const unguessableHash = await bcrypt.hash(
+        randomBytes(32).toString("hex"),
+        10
+      );
+
+      await prisma.$transaction([
+        prisma.familyMember.deleteMany({ where: { residentId: userId } }),
+        prisma.emergencyContact.deleteMany({ where: { residentId: userId } }),
+        prisma.pushDevice.updateMany({
+          where: { userId },
+          data: { isActive: false },
+        }),
+        prisma.user.update({
+          where: { id: userId },
+          data: {
+            isActive: false,
+            moveOutDate: new Date(),
+            name: "Deleted user",
+            email: scrubbedEmail,
+            username: scrubbedUsername,
+            phone: null,
+            photoUrl: null,
+            passwordHash: unguessableHash,
+            notifyEmail: false,
+          },
+        }),
+      ]);
+
+      return res.json({
+        ok: true,
+        mode: "hard_deleted",
+        message:
+          "Account deleted. Your personal information has been removed; financial and audit records are retained for the society's accounting requirements.",
+      });
+    }
+
+    // Default soft-deactivate path (backward compatible).
     if (!existing.isActive) {
       return res.status(400).json({ message: "Account is already deactivated" });
     }
@@ -415,6 +487,8 @@ router.delete("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
     ]);
 
     return res.json({
+      ok: true,
+      mode: "deactivated",
       message:
         "Your account has been deactivated. Data is retained for society records; contact admin to restore access.",
       deactivated: true,
