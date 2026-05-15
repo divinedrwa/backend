@@ -2,52 +2,35 @@ import type { Prisma } from "@prisma/client";
 import { BillingAccountScope } from "@prisma/client";
 import { prisma } from "./prisma";
 
+import { suggestedOccupantUnitDefinitions } from "./occupantUnitCodes";
+
+export type { SuggestedOccupantUnitDef } from "./occupantUnitCodes";
+export {
+  occupantUnitCodeStem,
+  occupantUnitCodeForFloorIndex,
+  occupantUnitLabelForFloorIndex,
+  suggestedOccupantUnitDefinitions,
+  suggestedUnitSuffixForFloorIndex,
+  SUGGESTED_UNIT_SUFFIX_GF,
+  SUGGESTED_UNIT_SUFFIX_FF,
+  SUGGESTED_UNIT_SUFFIX_SF,
+  inferCanonicalTierIndex,
+  nextFreeOccupantSlotIndex,
+  legacyOccupantUnitCodeForFloorIndex,
+} from "./occupantUnitCodes";
+
 type Db = Prisma.TransactionClient | typeof prisma;
 
 /**
- * Stable segment from `villaNumber` for auto-generated unit codes (e.g. V-12 → V12).
- * Used for suggested codes `V{prefix}_GF` / `V{prefix}_FF`.
- */
-export function unitCodePrefixFromVillaNumber(villaNumber: string): string {
-  const slug = villaNumber.trim().replace(/[^a-zA-Z0-9]/g, "").toUpperCase();
-  const base = slug.length > 0 ? slug : "VILLA";
-  return base.slice(0, 48);
-}
-
-/** Suggested occupant unit codes (admin UI + auto-provisioned shell/import villas). */
-export const SUGGESTED_UNIT_SUFFIX_GF = "_GF";
-export const SUGGESTED_UNIT_SUFFIX_FF = "_FF";
-
-/**
- * Creates Ground floor + First floor suggested units if missing (idempotent).
- * GF is marked default for billing / visitor fallback when no explicit unit is chosen.
+ * Creates suggested occupant units for this property up to `floors` (idempotent by unitCode).
  */
 export async function createSuggestedOccupantUnitsIfMissing(
   db: Db,
-  params: { societyId: string; villaId: string; villaNumber: string },
+  params: { societyId: string; villaId: string; villaNumber: string; floors: number },
 ): Promise<void> {
-  const prefix = unitCodePrefixFromVillaNumber(params.villaNumber);
-  const pairs: Array<{
-    unitCode: string;
-    label: string;
-    sortOrder: number;
-    isDefault: boolean;
-  }> = [
-    {
-      unitCode: `V${prefix}${SUGGESTED_UNIT_SUFFIX_GF}`,
-      label: "Ground floor",
-      sortOrder: 0,
-      isDefault: true,
-    },
-    {
-      unitCode: `V${prefix}${SUGGESTED_UNIT_SUFFIX_FF}`,
-      label: "First floor",
-      sortOrder: 1,
-      isDefault: false,
-    },
-  ];
+  const defs = suggestedOccupantUnitDefinitions(params.villaNumber, params.floors);
 
-  for (const p of pairs) {
+  for (const p of defs) {
     const exists = await db.unit.findFirst({
       where: { villaId: params.villaId, unitCode: p.unitCode },
       select: { id: true },
@@ -63,6 +46,105 @@ export async function createSuggestedOccupantUnitsIfMissing(
         isDefault: p.isDefault,
       },
     });
+  }
+
+  await normalizeDefaultUnitFlag(db, params.villaId);
+}
+
+/**
+ * Picks the unit at `floorIndex` (0 = ground) among this villa’s units by sortOrder.
+ * Clamps to an existing row when the index is out of range.
+ */
+export async function getUnitIdForVillaFloorIndex(
+  db: Db,
+  params: { societyId: string; villaId: string; floorIndex: number },
+): Promise<string | null> {
+  const units = await db.unit.findMany({
+    where: { villaId: params.villaId, societyId: params.societyId },
+    orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }],
+    select: { id: true },
+  });
+  if (units.length === 0) return null;
+  const idx = Math.max(0, Math.min(Math.floor(params.floorIndex), units.length - 1));
+  return units[idx]!.id;
+}
+
+export type VillaUnitPatchRow = {
+  unitCode: string;
+  label: string;
+  sortOrder?: number;
+};
+
+/**
+ * Upserts all rows in `units`, then removes any other units on this villa — reassigning
+ * `User.unitId` and `VisitorVilla.unitId` to the first kept unit (by sortOrder).
+ */
+export async function syncVillaOccupantUnits(
+  db: Db,
+  params: { societyId: string; villaId: string; units: VillaUnitPatchRow[] },
+): Promise<void> {
+  const incoming = params.units
+    .map((u) => ({
+      unitCode: u.unitCode.trim(),
+      label: u.label.trim(),
+      sortOrder: u.sortOrder,
+    }))
+    .filter((u) => u.unitCode.length > 0 && u.label.length > 0 && u.unitCode !== "_DEFAULT");
+
+  if (incoming.length === 0) {
+    throw new Error("At least one occupant unit is required");
+  }
+
+  const targetCodes = [...new Set(incoming.map((u) => u.unitCode))];
+
+  for (let i = 0; i < incoming.length; i++) {
+    const u = incoming[i]!;
+    await db.unit.upsert({
+      where: { villaId_unitCode: { villaId: params.villaId, unitCode: u.unitCode } },
+      create: {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        unitCode: u.unitCode,
+        label: u.label,
+        sortOrder: u.sortOrder ?? i * 10,
+        isDefault: i === 0,
+      },
+      update: {
+        label: u.label,
+        sortOrder: u.sortOrder ?? undefined,
+      },
+    });
+  }
+
+  const kept = await db.unit.findMany({
+    where: { villaId: params.villaId, societyId: params.societyId, unitCode: { in: targetCodes } },
+    orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }],
+    select: { id: true },
+  });
+  const fallbackId = kept[0]?.id;
+  if (!fallbackId) {
+    throw new Error("Could not resolve a fallback unit after sync");
+  }
+
+  const orphans = await db.unit.findMany({
+    where: {
+      villaId: params.villaId,
+      societyId: params.societyId,
+      unitCode: { notIn: targetCodes },
+    },
+    select: { id: true },
+  });
+
+  for (const o of orphans) {
+    await db.user.updateMany({
+      where: { societyId: params.societyId, unitId: o.id },
+      data: { unitId: fallbackId },
+    });
+    await db.visitorVilla.updateMany({
+      where: { villaId: params.villaId, unitId: o.id },
+      data: { unitId: fallbackId },
+    });
+    await db.unit.delete({ where: { id: o.id } });
   }
 
   await normalizeDefaultUnitFlag(db, params.villaId);

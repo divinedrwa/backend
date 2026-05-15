@@ -1,4 +1,4 @@
-import { UserRole } from "@prisma/client";
+import { ResidentType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { rowsToCsv } from "../../lib/csv";
 import { prisma } from "../../lib/prisma";
@@ -21,6 +21,38 @@ router.get("/villas-csv", async (req, res, next) => {
       where: { societyId },
       orderBy: { villaNumber: "asc" },
     });
+    const villaIds = villas.map((v) => v.id);
+
+    const owners = await prisma.user.findMany({
+      where: {
+        societyId,
+        villaId: { in: villaIds },
+        role: UserRole.RESIDENT,
+        residentType: ResidentType.OWNER,
+        isActive: true,
+      },
+      select: { villaId: true, unitId: true, createdAt: true },
+      orderBy: { createdAt: "asc" },
+    });
+    const ownerUnitByVilla = new Map<string, string | null>();
+    for (const o of owners) {
+      if (!o.villaId) continue;
+      if (!ownerUnitByVilla.has(o.villaId)) {
+        ownerUnitByVilla.set(o.villaId, o.unitId);
+      }
+    }
+
+    const allUnits = await prisma.unit.findMany({
+      where: { villaId: { in: villaIds }, societyId },
+      orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }],
+      select: { id: true, villaId: true },
+    });
+    const unitOrderByVilla = new Map<string, string[]>();
+    for (const u of allUnits) {
+      const arr = unitOrderByVilla.get(u.villaId) ?? [];
+      arr.push(u.id);
+      unitOrderByVilla.set(u.villaId, arr);
+    }
 
     const headers = [
       "villaNumber",
@@ -31,22 +63,33 @@ router.get("/villas-csv", async (req, res, next) => {
       "ownerEmail",
       "ownerPhone",
       "monthlyMaintenance",
+      "defaultFloor",
       "ownerUsername",
       "ownerPassword",
     ];
 
-    const rows = villas.map((v) => [
-      v.villaNumber,
-      v.floors,
-      v.area != null ? Number(v.area) : "",
-      v.block ?? "",
-      v.ownerName,
-      v.ownerEmail ?? "",
-      v.ownerPhone ?? "",
-      Number(v.monthlyMaintenance),
-      "",
-      "",
-    ]);
+    const rows = villas.map((v) => {
+      const orderedIds = unitOrderByVilla.get(v.id) ?? [];
+      const ownerUnitId = ownerUnitByVilla.get(v.id) ?? null;
+      let defaultFloor = 0;
+      if (ownerUnitId && orderedIds.length > 0) {
+        const idx = orderedIds.indexOf(ownerUnitId);
+        defaultFloor = idx >= 0 ? idx : 0;
+      }
+      return [
+        v.villaNumber,
+        v.floors,
+        v.area != null ? Number(v.area) : "",
+        v.block ?? "",
+        v.ownerName,
+        v.ownerEmail ?? "",
+        v.ownerPhone ?? "",
+        Number(v.monthlyMaintenance),
+        defaultFloor,
+        "",
+        "",
+      ];
+    });
 
     const csv = rowsToCsv(headers, rows);
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
@@ -64,7 +107,15 @@ router.get("/residents-csv", async (req, res, next) => {
     const users = await prisma.user.findMany({
       where: { societyId, role: UserRole.RESIDENT },
       include: {
-        villa: { select: { villaNumber: true } },
+        villa: {
+          select: {
+            villaNumber: true,
+            units: {
+              orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }],
+              select: { id: true },
+            },
+          },
+        },
       },
       orderBy: { username: "asc" },
     });
@@ -78,10 +129,17 @@ router.get("/residents-csv", async (req, res, next) => {
       "residentType",
       "villaNumber",
       "moveInDate",
+      "defaultFloor",
     ];
 
     const rows = users.map((u) => {
       const moveIn = u.moveInDate != null ? u.moveInDate.toISOString().slice(0, 10) : "";
+      const orderedIds = u.villa?.units?.map((x) => x.id) ?? [];
+      let defaultFloor = 0;
+      if (u.unitId && orderedIds.length > 0) {
+        const idx = orderedIds.indexOf(u.unitId);
+        defaultFloor = idx >= 0 ? idx : 0;
+      }
       return [
         u.username,
         u.name,
@@ -91,6 +149,7 @@ router.get("/residents-csv", async (req, res, next) => {
         u.residentType,
         u.villa?.villaNumber ?? "",
         moveIn,
+        defaultFloor,
       ];
     });
 

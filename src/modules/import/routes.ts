@@ -6,6 +6,7 @@ import {
   createSuggestedOccupantUnitsIfMissing,
   ensureBillingAccountForProperty,
   getOrCreateDefaultUnitIdForVilla,
+  getUnitIdForVillaFloorIndex,
 } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { parseCsvRows, csvRowsToRecords } from "../../lib/csv";
@@ -51,7 +52,7 @@ function parseMoney(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: ownerUsername,ownerPassword (otherwise username from email, password generated). With ownerEmail set, creates a RESIDENT owner account for this society linked to the villa. */
+/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: defaultFloor (0 = ground, 1 = first, …), ownerUsername, ownerPassword. Suggested occupant units are created from `floors` (1 → GF only, 2 → GF+FF, 3 → GF+FF+SF, etc.). */
 router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -112,6 +113,21 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
         continue;
       }
 
+      const defaultFloorRaw = (r.defaultFloor ?? "").trim();
+      let defaultFloorIndex = 0;
+      if (defaultFloorRaw !== "") {
+        const df = Number(defaultFloorRaw.replace(/,/g, ""));
+        if (!Number.isFinite(df) || df < 0 || df > 99) {
+          result.errors.push({
+            line,
+            message: "defaultFloor must be a non-negative integer (0 = ground floor, 1 = first floor, …)",
+          });
+          result.skipped++;
+          continue;
+        }
+        defaultFloorIndex = Math.floor(df);
+      }
+
       const areaVal = parseMoney(r.area ?? "");
       const maintenance = parseMoney(r.monthlyMaintenance ?? "");
       if (maintenance == null || maintenance <= 0) {
@@ -152,6 +168,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
             societyId,
             villaId: v.id,
             villaNumber,
+            floors,
           });
           return v;
         });
@@ -166,6 +183,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
           ownerPhone: r.ownerPhone,
           ownerUsernameRaw: r.ownerUsername,
           ownerPasswordRaw: r.ownerPassword,
+          defaultFloorIndex,
         });
         if (provision.kind === "created") {
           result.usersCreated = (result.usersCreated ?? 0) + provision.usersCreated;
@@ -198,7 +216,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   }
 });
 
-/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate — creates the villa under this society if villaNumber does not exist yet (placeholder ownerName = resident name, maintenance 0). */
+/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate — optional: defaultFloor (0 = ground by sort order, 1 = next tier, …). */
 router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -213,6 +231,7 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
     }
 
     const header = rows[0].map((h) => h.trim());
+    const hasDefaultFloorCol = header.includes("defaultFloor");
     const expected = [
       "username",
       "name",
@@ -310,7 +329,30 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
 
       try {
         const passwordHash = await bcrypt.hash(password, 10);
-        const unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+        let unitId: string | null = null;
+        if (!hasDefaultFloorCol) {
+          unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+        } else {
+          const rawDf = (r.defaultFloor ?? "").trim();
+          if (rawDf === "") {
+            unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+          } else {
+            const n = Number(rawDf.replace(/,/g, ""));
+            if (!Number.isFinite(n) || n < 0 || n > 99) {
+              result.errors.push({
+                line,
+                message: "defaultFloor must be a non-negative integer (0 = ground, 1 = first floor, …)",
+              });
+              result.skipped++;
+              continue;
+            }
+            unitId = await getUnitIdForVillaFloorIndex(prisma, {
+              societyId,
+              villaId,
+              floorIndex: Math.floor(n),
+            });
+          }
+        }
         if (!unitId) {
           result.errors.push({
             line,

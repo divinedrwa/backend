@@ -13,6 +13,7 @@ import {
   createSuggestedOccupantUnitsIfMissing,
   ensureBillingAccountForProperty,
   getOrCreateDefaultUnitIdForVilla,
+  getUnitIdForVillaFloorIndex,
 } from "../lib/propertyInfrastructure";
 import { prisma } from "../lib/prisma";
 
@@ -114,6 +115,7 @@ export async function findOrCreateShellVillaForResident(params: {
         societyId: params.societyId,
         villaId: created.id,
         villaNumber: trimmed,
+        floors: created.floors,
       });
       return created;
     });
@@ -161,6 +163,8 @@ export async function provisionImportedVillaOwnerAccount(params: {
   ownerPhone?: string;
   ownerUsernameRaw?: string;
   ownerPasswordRaw?: string;
+  /** 0 = ground (first unit by sortOrder), 1 = first floor, … Clamped to existing units. */
+  defaultFloorIndex?: number;
 }): Promise<ProvisionImportedVillaOwnerResult> {
   const ownerEmail = params.ownerEmail?.trim();
   if (!ownerEmail) {
@@ -181,16 +185,23 @@ export async function provisionImportedVillaOwnerAccount(params: {
 
   try {
     const passwordHash = await bcrypt.hash(passwordPlain, 10);
-    const unitId = await getOrCreateDefaultUnitIdForVilla({
-      societyId: params.societyId,
-      villaId: params.villaId,
-    });
+    const floorIdx = params.defaultFloorIndex ?? 0;
+    const unitId =
+      (await getUnitIdForVillaFloorIndex(prisma, {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        floorIndex: floorIdx,
+      })) ??
+      (await getOrCreateDefaultUnitIdForVilla({
+        societyId: params.societyId,
+        villaId: params.villaId,
+      }));
     if (!unitId) {
       return {
         kind: "error",
         line: params.line,
         message:
-          "Property has no occupant units. Add units on the villa (e.g. Ground floor / First floor) before creating the owner login.",
+          "Property has no occupant units. Add occupant units on the villa before creating the owner login.",
       };
     }
     await prisma.user.create({

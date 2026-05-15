@@ -61,7 +61,7 @@ const createUserSchema = z
     },
     {
       message:
-        "Residents require unitId — select an occupant unit (e.g. Ground floor or First floor) for this property.",
+        "Residents require unitId — select an occupant unit for this property.",
       path: ["unitId"],
     },
   );

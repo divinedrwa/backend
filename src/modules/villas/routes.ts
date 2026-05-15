@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   ensureBillingAccountForProperty,
   normalizeDefaultUnitFlag,
+  syncVillaOccupantUnits,
 } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -18,30 +19,68 @@ const unitInputSchema = z.object({
   sortOrder: z.number().int().min(0).max(999).optional(),
 });
 
-const createVillaSchema = z.object({
-  villaNumber: z.string().min(1),
-  floors: z.number().int().min(1).max(10),
-  area: z.number().positive().optional(),
-  block: z.string().optional(),
-  ownerName: z.string().min(1),
-  ownerEmail: z.string().email().optional(),
-  ownerPhone: z.string().optional(),
-  monthlyMaintenance: z.number().positive(),
-  /** At least one occupant unit (e.g. suggested GF/FF or custom). No implicit `_DEFAULT` row. */
-  units: z.array(unitInputSchema).min(1),
-});
+function assertUniqueUnitLabels(
+  units: Array<{ label: string }> | undefined,
+  ctx: z.RefinementCtx,
+  path: (string | number)[],
+): void {
+  if (!units?.length) return;
+  const seen = new Set<string>();
+  for (const u of units) {
+    const t = u.label.trim().toLowerCase();
+    if (!t) continue;
+    if (seen.has(t)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "Duplicate unit labels are not allowed (case-insensitive).",
+        path,
+      });
+      return;
+    }
+    seen.add(t);
+  }
+}
 
-const updateVillaSchema = z.object({
-  floors: z.number().int().min(1).max(10).optional(),
-  area: z.number().positive().optional(),
-  block: z.string().optional(),
-  ownerName: z.string().min(1).optional(),
-  ownerEmail: z.string().email().optional(),
-  ownerPhone: z.string().optional(),
-  monthlyMaintenance: z.number().positive().optional(),
-  /** Upsert units by `unitCode` (does not remove existing units). */
-  units: z.array(unitInputSchema).optional(),
-});
+const createVillaSchema = z
+  .object({
+    villaNumber: z.string().min(1),
+    floors: z.number().int().min(1).max(10),
+    area: z.number().positive().optional(),
+    block: z.string().optional(),
+    ownerName: z.string().min(1),
+    ownerEmail: z.string().email().optional(),
+    ownerPhone: z.string().optional(),
+    monthlyMaintenance: z.number().positive(),
+    /** At least one occupant unit (e.g. suggested GF/FF or custom). No implicit `_DEFAULT` row. */
+    units: z.array(unitInputSchema).min(1),
+  })
+  .superRefine((d, ctx) => assertUniqueUnitLabels(d.units, ctx, ["units"]));
+
+const updateVillaSchema = z
+  .object({
+    floors: z.number().int().min(1).max(10).optional(),
+    area: z.number().positive().optional(),
+    block: z.string().optional(),
+    ownerName: z.string().min(1).optional(),
+    ownerEmail: z.string().email().optional(),
+    ownerPhone: z.string().optional(),
+    monthlyMaintenance: z.number().positive().optional(),
+    /** Upsert units by `unitCode`. With `unitsSync`, removes units not listed and reassigns residents/visitors. */
+    units: z.array(unitInputSchema).optional(),
+    unitsSync: z.boolean().optional(),
+  })
+  .superRefine((d, ctx) => {
+    if (d.unitsSync === true && (!d.units || d.units.length < 1)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "When unitsSync is true, provide at least one unit in `units`.",
+        path: ["units"],
+      });
+    }
+  })
+  .superRefine((d, ctx) => {
+    if (d.units?.length) assertUniqueUnitLabels(d.units, ctx, ["units"]);
+  });
 
 const bulkMaintenanceAmountSchema = z.object({
   defaultAmount: z.number().positive().optional(),
@@ -221,7 +260,7 @@ router.patch(
     const { societyId } = req.auth!;
     const { id } = req.params;
     const body = req.body as z.infer<typeof updateVillaSchema>;
-    const { units: patchUnits, ...villaPatch } = body;
+    const { units: patchUnits, unitsSync, ...villaPatch } = body;
 
     const exists = await prisma.villa.findFirst({
       where: { id, societyId },
@@ -239,33 +278,49 @@ router.patch(
     }
 
     if (patchUnits?.length) {
-      await prisma.$transaction(async (tx) => {
-        for (const u of patchUnits) {
-          if (u.unitCode === "_DEFAULT") {
-            await tx.unit.updateMany({
-              where: { villaId: id, unitCode: "_DEFAULT" },
-              data: { label: u.label, sortOrder: u.sortOrder ?? 0 },
-            });
-            continue;
-          }
-          await tx.unit.upsert({
-            where: { villaId_unitCode: { villaId: id, unitCode: u.unitCode } },
-            create: {
+      try {
+        if (unitsSync) {
+          await prisma.$transaction(async (tx) => {
+            await syncVillaOccupantUnits(tx, {
               societyId,
               villaId: id,
-              unitCode: u.unitCode,
-              label: u.label,
-              sortOrder: u.sortOrder ?? 10,
-              isDefault: false,
-            },
-            update: {
-              label: u.label,
-              sortOrder: u.sortOrder ?? undefined,
-            },
+              units: patchUnits,
+            });
           });
+        } else {
+          await prisma.$transaction(async (tx) => {
+            for (const u of patchUnits) {
+              if (u.unitCode === "_DEFAULT") {
+                await tx.unit.updateMany({
+                  where: { villaId: id, unitCode: "_DEFAULT" },
+                  data: { label: u.label, sortOrder: u.sortOrder ?? 0 },
+                });
+                continue;
+              }
+              await tx.unit.upsert({
+                where: { villaId_unitCode: { villaId: id, unitCode: u.unitCode } },
+                create: {
+                  societyId,
+                  villaId: id,
+                  unitCode: u.unitCode,
+                  label: u.label,
+                  sortOrder: u.sortOrder ?? 10,
+                  isDefault: false,
+                },
+                update: {
+                  label: u.label,
+                  sortOrder: u.sortOrder ?? undefined,
+                },
+              });
+            }
+          });
+          await normalizeDefaultUnitFlag(prisma, id);
         }
-      });
-      await normalizeDefaultUnitFlag(prisma, id);
+      } catch (e) {
+        return res.status(400).json({
+          message: e instanceof Error ? e.message : "Could not update occupant units",
+        });
+      }
     }
 
     await ensureBillingAccountForProperty(prisma, { societyId, villaId: id });
