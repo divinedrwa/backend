@@ -66,6 +66,26 @@ export function csvRowsToRecords(header: string[], dataRows: string[][]): Record
   });
 }
 
+const normalizeCsvHeaderKey = (s: string) => s.replace(/\s+/g, "").replace(/_/g, "").toLowerCase();
+
+/**
+ * Read a CSV cell when the header may use spacing, case, or underscores differently
+ * (e.g. `defaultFloor`, `Default Floor`, `default_floor`). Returns trimmed value or "".
+ */
+export function getCsvFieldLoose(record: Record<string, string>, logicalKey: string): string {
+  const target = normalizeCsvHeaderKey(logicalKey);
+  const exact = (record[logicalKey] ?? "").trim();
+  if (exact !== "") return exact;
+
+  for (const [k, v] of Object.entries(record)) {
+    if (normalizeCsvHeaderKey(k) === target) {
+      const t = (v ?? "").trim();
+      if (t !== "") return t;
+    }
+  }
+  return "";
+}
+
 /** Escape one CSV cell (RFC-style quoting when needed). */
 export function escapeCsvField(value: string | number | boolean | null | undefined): string {
   if (value === null || value === undefined) return "";

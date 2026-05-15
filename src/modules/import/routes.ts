@@ -9,7 +9,7 @@ import {
   getUnitIdForVillaFloorIndex,
 } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
-import { parseCsvRows, csvRowsToRecords } from "../../lib/csv";
+import { parseCsvRows, csvRowsToRecords, getCsvFieldLoose } from "../../lib/csv";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import {
   formatUserUniqueConstraintError,
@@ -52,7 +52,7 @@ function parseMoney(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: defaultFloor (0 = ground, 1 = first, …), ownerUsername, ownerPassword. Suggested occupant units are created from `floors` (1 → GF only, 2 → GF+FF, 3 → GF+FF+SF, etc.). */
+/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: defaultFloor (0 = ground, 1 = first, …; header may be defaultFloor, default_floor, Default Floor, etc.), ownerUsername, ownerPassword. Suggested occupant units are created from `floors` (1 → GF only, 2 → GF+FF, 3 → GF+FF+SF, etc.). */
 router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -113,7 +113,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
         continue;
       }
 
-      const defaultFloorRaw = (r.defaultFloor ?? "").trim();
+      const defaultFloorRaw = getCsvFieldLoose(r, "defaultFloor");
       let defaultFloorIndex = 0;
       if (defaultFloorRaw !== "") {
         const df = Number(defaultFloorRaw.replace(/,/g, ""));
@@ -216,7 +216,7 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   }
 });
 
-/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate — optional: defaultFloor (0 = ground by sort order, 1 = next tier, …). */
+/** POST /api/import/residents-csv — username,name,email,password,phone,residentType,villaNumber,moveInDate — optional: defaultFloor per row (0 = ground by sort order, 1 = next tier, …; same flexible header names as villas import). */
 router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -231,7 +231,6 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
     }
 
     const header = rows[0].map((h) => h.trim());
-    const hasDefaultFloorCol = header.includes("defaultFloor");
     const expected = [
       "username",
       "name",
@@ -330,28 +329,24 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       try {
         const passwordHash = await bcrypt.hash(password, 10);
         let unitId: string | null = null;
-        if (!hasDefaultFloorCol) {
+        const rawDf = getCsvFieldLoose(r, "defaultFloor");
+        if (rawDf === "") {
           unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
         } else {
-          const rawDf = (r.defaultFloor ?? "").trim();
-          if (rawDf === "") {
-            unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
-          } else {
-            const n = Number(rawDf.replace(/,/g, ""));
-            if (!Number.isFinite(n) || n < 0 || n > 99) {
-              result.errors.push({
-                line,
-                message: "defaultFloor must be a non-negative integer (0 = ground, 1 = first floor, …)",
-              });
-              result.skipped++;
-              continue;
-            }
-            unitId = await getUnitIdForVillaFloorIndex(prisma, {
-              societyId,
-              villaId,
-              floorIndex: Math.floor(n),
+          const n = Number(rawDf.replace(/,/g, ""));
+          if (!Number.isFinite(n) || n < 0 || n > 99) {
+            result.errors.push({
+              line,
+              message: "defaultFloor must be a non-negative integer (0 = ground, 1 = first floor, …)",
             });
+            result.skipped++;
+            continue;
           }
+          unitId = await getUnitIdForVillaFloorIndex(prisma, {
+            societyId,
+            villaId,
+            floorIndex: Math.floor(n),
+          });
         }
         if (!unitId) {
           result.errors.push({
