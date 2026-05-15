@@ -27,7 +27,7 @@ const createUserSchema = z
     villaId: z.string().optional(),
     /** When set without villaId, matches CSV import: create shell villa in this society if needed */
     villaNumber: z.string().min(1).optional(),
-    /** Occupant unit within the property; if omitted, default unit is used. */
+    /** Required for residents: occupant unit (Ground floor, First floor, or custom). */
     unitId: z.string().optional(),
     moveInDate: z.string().datetime().optional(),
     maintenanceBillingRole: z.nativeEnum(MaintenanceBillingRole).optional(),
@@ -53,6 +53,17 @@ const createUserSchema = z
   .refine(
     (d) => d.role === UserRole.RESIDENT || d.maintenanceBillingRole === undefined,
     { message: "maintenanceBillingRole applies only to residents", path: ["maintenanceBillingRole"] },
+  )
+  .refine(
+    (d) => {
+      if (d.role !== UserRole.RESIDENT) return true;
+      return Boolean(d.unitId?.trim());
+    },
+    {
+      message:
+        "Residents require unitId — select an occupant unit (e.g. Ground floor or First floor) for this property.",
+      path: ["unitId"],
+    },
   );
 
 const updateUserSchema = z.object({

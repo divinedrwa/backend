@@ -1,6 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
-import { ensureDefaultUnitAndBillingAccount } from "../../lib/propertyInfrastructure";
+import {
+  ensureBillingAccountForProperty,
+  normalizeDefaultUnitFlag,
+} from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { UserRole } from "@prisma/client";
@@ -24,8 +27,8 @@ const createVillaSchema = z.object({
   ownerEmail: z.string().email().optional(),
   ownerPhone: z.string().optional(),
   monthlyMaintenance: z.number().positive(),
-  /** Extra occupant units (GF, F1, …). A default unit is always created automatically. */
-  units: z.array(unitInputSchema).optional(),
+  /** At least one occupant unit (e.g. suggested GF/FF or custom). No implicit `_DEFAULT` row. */
+  units: z.array(unitInputSchema).min(1),
 });
 
 const updateVillaSchema = z.object({
@@ -172,8 +175,12 @@ router.post(
           ...villaFields,
         },
       });
-      await ensureDefaultUnitAndBillingAccount(tx, { societyId, villaId: v.id });
-      for (const u of extraUnits ?? []) {
+      await ensureBillingAccountForProperty(tx, { societyId, villaId: v.id });
+      const ordered = [...(extraUnits ?? [])].sort(
+        (a, b) => (a.sortOrder ?? 0) - (b.sortOrder ?? 0),
+      );
+      for (let i = 0; i < ordered.length; i++) {
+        const u = ordered[i]!;
         if (u.unitCode === "_DEFAULT") continue;
         await tx.unit.create({
           data: {
@@ -181,11 +188,12 @@ router.post(
             villaId: v.id,
             unitCode: u.unitCode,
             label: u.label,
-            sortOrder: u.sortOrder ?? 10,
-            isDefault: false,
+            sortOrder: u.sortOrder ?? i * 10,
+            isDefault: i === 0,
           },
         });
       }
+      await normalizeDefaultUnitFlag(tx, v.id);
       return tx.villa.findUniqueOrThrow({
         where: { id: v.id },
         include: {
@@ -257,9 +265,10 @@ router.patch(
           });
         }
       });
+      await normalizeDefaultUnitFlag(prisma, id);
     }
 
-    await ensureDefaultUnitAndBillingAccount(prisma, { societyId, villaId: id });
+    await ensureBillingAccountForProperty(prisma, { societyId, villaId: id });
 
     const updatedVilla = await prisma.villa.findUnique({
       where: { id },

@@ -19,10 +19,8 @@ function mockDb(overrides: {
       findFirst: async () => preApproved,
     },
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
-      // The flow calls `ensureDefaultUnitAndBillingAccount(tx, ...)` after
-      // creating the visitor — that helper touches `unit.findFirst`,
-      // `unit.create`, and `billingAccount.upsert`. The mock reports a
-      // pre-existing default unit so the create branch never runs.
+      // Transaction uses `ensureBillingAccountForProperty` + `getPreferredUnitIdForVilla`.
+      // Mock `unit.findFirst` so a preferred unit id is always returned.
       const tx = {
         preApprovedVisitor: {
           updateMany: async () => ({ count: updateCount }),

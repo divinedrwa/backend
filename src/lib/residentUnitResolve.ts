@@ -11,7 +11,7 @@ export type ResolvedResidentDwelling = {
 
 /**
  * Resolves villa + unit for a resident. Prefers `unitId` when set (and checks consistency with `villaId`).
- * If only `villaId` is provided, uses the property default unit.
+ * If only `villaId` is provided, uses the property preferred unit (`isDefault`, else legacy `_DEFAULT`, else first by sort).
  */
 export async function resolveResidentDwelling(
   db: Db,
@@ -42,6 +42,7 @@ export async function resolveResidentDwelling(
       societyId: params.societyId,
       villaId,
     });
+    if (!unitId) return null;
     return { villaId, unitId };
   }
 

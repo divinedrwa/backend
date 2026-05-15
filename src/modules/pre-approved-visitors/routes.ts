@@ -189,6 +189,12 @@ router.post(
         societyId: req.auth!.societyId,
         villaId: visitor.villaId,
       });
+      if (!unitId) {
+        return res.status(400).json({
+          message:
+            "This property has no occupant units. Add at least one unit on the villa before verifying this visitor.",
+        });
+      }
 
       // Create visitor log entry
       await prisma.visitor.create({

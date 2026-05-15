@@ -138,10 +138,17 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
           }
           unitId = unitRow.id;
         } else {
-          unitId = await getOrCreateDefaultUnitIdForVilla({
+          const resolved = await getOrCreateDefaultUnitIdForVilla({
             societyId,
             villaId: t.villaId,
           });
+          if (!resolved) {
+            return res.status(400).json({
+              message:
+                "This property has no occupant units. Add units on the villa (e.g. Ground floor / First floor) before check-in.",
+            });
+          }
+          unitId = resolved;
         }
         visitRows.push({
           villaId: t.villaId,
@@ -161,8 +168,14 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         });
       }
       for (const villaId of uniqueVillaIds) {
-        const unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
-        visitRows.push({ villaId, unitId, residentUserId: null });
+        const resolved = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+        if (!resolved) {
+          return res.status(400).json({
+            message:
+              "One or more properties have no occupant units. Add at least one unit per villa before check-in.",
+          });
+        }
+        visitRows.push({ villaId, unitId: resolved, residentUserId: null });
       }
     }
 

@@ -1,8 +1,12 @@
 import type { PrismaClient } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
-import { ensureDefaultUnitAndBillingAccount } from "../../lib/propertyInfrastructure";
+import {
+  ensureBillingAccountForProperty,
+  getPreferredUnitIdForVilla,
+} from "../../lib/propertyInfrastructure";
 
 export const OTP_ALREADY_CONSUMED = "OTP_ALREADY_CONSUMED";
+export const NO_OCCUPANT_UNIT = "NO_OCCUPANT_UNIT";
 
 export type VisitorApproveEntryParams = {
   userId: string;
@@ -107,10 +111,17 @@ export async function runVisitorApproveEntry(
         },
       });
 
-      const { defaultUnitId } = await ensureDefaultUnitAndBillingAccount(tx, {
+      await ensureBillingAccountForProperty(tx, {
         societyId: p.societyId,
         villaId: p.villaId,
       });
+      const defaultUnitId = await getPreferredUnitIdForVilla(tx, {
+        societyId: p.societyId,
+        villaId: p.villaId,
+      });
+      if (!defaultUnitId) {
+        throw new Error(NO_OCCUPANT_UNIT);
+      }
       await tx.visitorVilla.create({
         data: {
           visitorId: visitor.id,
@@ -153,6 +164,17 @@ export async function runVisitorApproveEntry(
           admitted: false,
           verified: false,
           message: "OTP already used",
+        },
+      };
+    }
+    if (error instanceof Error && error.message === NO_OCCUPANT_UNIT) {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message:
+            "This property has no occupant units. Ask the admin to add at least one unit (e.g. Ground floor / First floor) on the villa.",
         },
       };
     }
@@ -252,10 +274,17 @@ export async function runVisitorAdmitPreApprovedById(
         },
       });
 
-      const { defaultUnitId } = await ensureDefaultUnitAndBillingAccount(tx, {
+      await ensureBillingAccountForProperty(tx, {
         societyId: p.societyId,
         villaId,
       });
+      const defaultUnitId = await getPreferredUnitIdForVilla(tx, {
+        societyId: p.societyId,
+        villaId,
+      });
+      if (!defaultUnitId) {
+        throw new Error(NO_OCCUPANT_UNIT);
+      }
       await tx.visitorVilla.create({
         data: {
           visitorId: visitor.id,
@@ -298,6 +327,17 @@ export async function runVisitorAdmitPreApprovedById(
           admitted: false,
           verified: false,
           message: "This visitor was already admitted",
+        },
+      };
+    }
+    if (error instanceof Error && error.message === NO_OCCUPANT_UNIT) {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message:
+            "This property has no occupant units. Ask the admin to add at least one unit on the villa.",
         },
       };
     }

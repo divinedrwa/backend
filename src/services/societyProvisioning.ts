@@ -10,7 +10,8 @@ import { randomBytes } from "crypto";
 import bcrypt from "bcryptjs";
 import { Prisma, UserRole, ResidentType } from "@prisma/client";
 import {
-  ensureDefaultUnitAndBillingAccount,
+  createSuggestedOccupantUnitsIfMissing,
+  ensureBillingAccountForProperty,
   getOrCreateDefaultUnitIdForVilla,
 } from "../lib/propertyInfrastructure";
 import { prisma } from "../lib/prisma";
@@ -105,9 +106,14 @@ export async function findOrCreateShellVillaForResident(params: {
           monthlyMaintenance: 0,
         },
       });
-      await ensureDefaultUnitAndBillingAccount(tx, {
+      await ensureBillingAccountForProperty(tx, {
         societyId: params.societyId,
         villaId: created.id,
+      });
+      await createSuggestedOccupantUnitsIfMissing(tx, {
+        societyId: params.societyId,
+        villaId: created.id,
+        villaNumber: trimmed,
       });
       return created;
     });
@@ -179,6 +185,14 @@ export async function provisionImportedVillaOwnerAccount(params: {
       societyId: params.societyId,
       villaId: params.villaId,
     });
+    if (!unitId) {
+      return {
+        kind: "error",
+        line: params.line,
+        message:
+          "Property has no occupant units. Add units on the villa (e.g. Ground floor / First floor) before creating the owner login.",
+      };
+    }
     await prisma.user.create({
       data: {
         societyId: params.societyId,

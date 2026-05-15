@@ -126,6 +126,12 @@ router.post(
           societyId: req.auth!.societyId,
           villaId,
         });
+        if (!unitId) {
+          return res.status(400).json({
+            message:
+              "One or more properties have no occupant units. Add at least one unit per villa (e.g. Ground floor / First floor) before checking in visitors.",
+          });
+        }
         villaVisitsCreate.push({ villaId, unitId, notifiedAt: new Date() });
       }
 
@@ -232,10 +238,17 @@ router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async
       }
       resolvedUnitId = unitRow.id;
     } else {
-      resolvedUnitId = await getOrCreateDefaultUnitIdForVilla({
+      const fallback = await getOrCreateDefaultUnitIdForVilla({
         societyId: req.auth!.societyId,
         villaId,
       });
+      if (!fallback) {
+        return res.status(400).json({
+          message:
+            "This property has no occupant units. Add at least one unit on the villa before linking this visitor.",
+        });
+      }
+      resolvedUnitId = fallback;
     }
 
     const existingVisit = await prisma.visitorVilla.findFirst({

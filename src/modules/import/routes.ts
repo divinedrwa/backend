@@ -3,7 +3,8 @@ import { UserRole, ResidentType } from "@prisma/client";
 import { Router } from "express";
 import multer from "multer";
 import {
-  ensureDefaultUnitAndBillingAccount,
+  createSuggestedOccupantUnitsIfMissing,
+  ensureBillingAccountForProperty,
   getOrCreateDefaultUnitIdForVilla,
 } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
@@ -146,7 +147,12 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
               monthlyMaintenance: maintenance,
             },
           });
-          await ensureDefaultUnitAndBillingAccount(tx, { societyId, villaId: v.id });
+          await ensureBillingAccountForProperty(tx, { societyId, villaId: v.id });
+          await createSuggestedOccupantUnitsIfMissing(tx, {
+            societyId,
+            villaId: v.id,
+            villaNumber,
+          });
           return v;
         });
         result.created++;
@@ -305,6 +311,15 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
       try {
         const passwordHash = await bcrypt.hash(password, 10);
         const unitId = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
+        if (!unitId) {
+          result.errors.push({
+            line,
+            message:
+              "Property has no occupant units. Add units to this villa (Villas page) before importing residents.",
+          });
+          result.skipped++;
+          continue;
+        }
         await prisma.user.create({
           data: {
             societyId,
