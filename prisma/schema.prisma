@@ -680,6 +680,8 @@ model Visitor {
   @@index([checkInAt])
   @@index([phone])
   @@index([status])
+  @@index([societyId, checkOutAt])
+  @@index([societyId, status])
 }
 
 model VisitorVilla {

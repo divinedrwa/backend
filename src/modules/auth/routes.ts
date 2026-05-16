@@ -417,7 +417,7 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
       return res.status(401).json({ message: "Account is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password, user.passwordHash);
+    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
     if (!passwordOk) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -469,7 +469,7 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
       return res.status(401).json({ message: "Account is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password, user.passwordHash);
+    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
     if (!passwordOk) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -525,7 +525,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
       return res.status(403).json({ message: "Society is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password, user.passwordHash);
+    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
     if (!passwordOk) {
       return res.status(401).json({ message: "Invalid credentials" });
     }

@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -65,7 +66,10 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT), async (req, res, next
         villaVisits: {
           some: visitMatch,
         },
-        ...(status && { status: status as any }),
+        ...(status &&
+          ["CHECKED_IN", "PENDING_APPROVAL", "APPROVED_FOR_ENTRY", "REJECTED", "CHECKED_OUT", "APPROVED"].includes(
+            status as string,
+          ) && { status: status as string }),
       },
       include: {
         gate: {
@@ -272,8 +276,7 @@ router.post("/pre-approve-visitor", requireRole(UserRole.RESIDENT), validateBody
         villa: preApproved.villa,
       });
     } catch (notifyErr) {
-      // eslint-disable-next-line no-console
-      console.error("[pre-approve-visitor] guard notify error:", notifyErr);
+      logger.error({ err: notifyErr }, "[pre-approve-visitor] guard notify error");
     }
 
     return res.status(201).json({
@@ -584,14 +587,22 @@ async function applyResidentVisitorDecision(params: {
     };
   }
 
-  await prisma.visitorVilla.update({
-    where: { id: row.id },
+  // Atomic check+update: only succeed if the row is still PENDING (prevents race conditions)
+  const updated = await prisma.visitorVilla.updateMany({
+    where: {
+      id: row.id,
+      approvalStatus: VisitorVillaApprovalStatus.PENDING,
+    },
     data: {
       approvalStatus: target,
       respondedAt: new Date(),
       respondedByUserId: params.userId,
     },
   });
+
+  if (updated.count === 0) {
+    return { status: 409 as const, body: { message: "Already responded" } };
+  }
 
   const { visitor: hydrated, transitioned } = await recomputeVisitorAggregateApproval(
     prisma,

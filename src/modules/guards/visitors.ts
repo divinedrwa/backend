@@ -13,6 +13,7 @@ import {
   notifyResidentsVisitorApprovalRequest,
 } from "./visitorResidentApproval.service";
 import { NotificationService } from "../../services/notification.service";
+import { logger } from "../../lib/logger";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import {
@@ -271,8 +272,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         });
         residentApprovalRecipientCount = notifyResult.recipientUserCount;
       } catch (notifyErr) {
-        // eslint-disable-next-line no-console
-        console.error("[visitor-checkin] notifyResidentsVisitorApprovalRequest failed:", notifyErr);
+        logger.error({ err: notifyErr }, "[visitor-checkin] notifyResidentsVisitorApprovalRequest failed");
       }
     }
 
@@ -617,6 +617,74 @@ router.post(
         vehicleNumber,
       });
 
+      // Notify residents when pre-approved visitor is admitted via QR/OTP
+      if (result.status === 201 && result.body.admitted === true) {
+        try {
+          const visitor = result.body.visitor as
+            | {
+                id?: string;
+                name?: string;
+                villaVisits?: Array<{
+                  villaId?: string;
+                  villa?: { block?: string | null; villaNumber?: string | null } | null;
+                }>;
+              }
+            | undefined;
+          const villaVisit = visitor?.villaVisits?.[0];
+          const resolvedVillaId = villaVisit?.villaId ?? villaId;
+
+          const [residents, guard] = await Promise.all([
+            prisma.user.findMany({
+              where: {
+                societyId,
+                villaId: resolvedVillaId,
+                role: UserRole.RESIDENT,
+                isActive: true,
+              },
+              select: { id: true },
+            }),
+            prisma.user.findUnique({
+              where: { id: userId },
+              select: { name: true },
+            }),
+          ]);
+
+          if (residents.length > 0) {
+            const flatParts = [villaVisit?.villa?.block, villaVisit?.villa?.villaNumber].filter(
+              (x): x is string => typeof x === "string" && x.trim().length > 0,
+            );
+            const flatLabel = flatParts.length > 0 ? ` (${flatParts.join(" · ")})` : "";
+            const guardName = guard?.name?.trim() || "Security";
+            const vName = visitor?.name?.trim() || "Your pre-approved visitor";
+            const title = "Visitor arrived";
+            const body = `${vName}${flatLabel} has arrived at the gate. Checked in by ${guardName}.`;
+            const data: Record<string, string> = {
+              type: "VISITOR_PRE_APPROVED_ARRIVED",
+              visitorId: visitor?.id?.toString() ?? "",
+              visitorName: vName,
+              villaId: resolvedVillaId,
+            };
+
+            const notifyResults = await Promise.allSettled(
+              residents.map((u) =>
+                NotificationService.sendToUser(
+                  u.id,
+                  { title, body, data },
+                  { category: NotificationCategory.VISITOR },
+                ),
+              ),
+            );
+            for (const r of notifyResults) {
+              if (r.status === "rejected") {
+                logger.error({ err: r.reason }, "[visitor-approve-entry] resident arrival notify failed");
+              }
+            }
+          }
+        } catch (notifyErr) {
+          logger.error({ err: notifyErr }, "[visitor-approve-entry] resident arrival notify error");
+        }
+      }
+
       return res.status(result.status).json(result.body);
     } catch (error) {
       next(error);
@@ -642,8 +710,7 @@ router.get("/pre-approved-entries", requireRole(UserRole.GUARD), async (req, res
       },
       orderBy: [{ validFrom: "desc" }, { createdAt: "desc" }],
     });
-    // eslint-disable-next-line no-console
-    console.log("[guards] pre-approved-entries", { societyId, count: rows.length });
+    logger.info({ societyId, count: rows.length }, "[guards] pre-approved-entries");
     return res.json({ preApproved: rows, count: rows.length });
   } catch (error) {
     next(error);
@@ -724,14 +791,12 @@ router.post(
             );
             for (const r of notifyResults) {
               if (r.status === "rejected") {
-                // eslint-disable-next-line no-console
-                console.error("[pre-approved-admit] resident arrival notify failed:", r.reason);
+                logger.error({ err: r.reason }, "[pre-approved-admit] resident arrival notify failed");
               }
             }
           }
         } catch (notifyErr) {
-          // eslint-disable-next-line no-console
-          console.error("[pre-approved-admit] resident arrival notify error:", notifyErr);
+          logger.error({ err: notifyErr }, "[pre-approved-admit] resident arrival notify error");
         }
       }
 
@@ -789,8 +854,7 @@ router.post("/visitor-entry-notify", requireRole(UserRole.GUARD), validateBody(v
       );
       for (const r of results) {
         if (r.status === "rejected") {
-          // eslint-disable-next-line no-console
-          console.error("[visitor-entry-notify] send failed:", r.reason);
+          logger.error({ err: r.reason }, "[visitor-entry-notify] send failed");
         }
       }
     }

@@ -220,6 +220,8 @@ export class NotificationService {
       "Sending notification to device tokens",
     );
 
+    const chunkErrors: Array<{ offset: number; error: unknown }> = [];
+
     for (let offset = 0; offset < tokens.length; offset += FCM_MULTICAST_MAX) {
       const chunk = tokens.slice(offset, offset + FCM_MULTICAST_MAX);
       try {
@@ -306,8 +308,13 @@ export class NotificationService {
         }
       } catch (error) {
         logger.error({ err: error, chunkOffset: offset }, "Error sending notification chunk");
-        throw error;
+        chunkErrors.push({ offset, error });
+        // Continue with remaining chunks — don't break the loop
       }
+    }
+
+    if (chunkErrors.length > 0) {
+      logger.warn({ failedChunks: chunkErrors.length, totalChunks: Math.ceil(tokens.length / FCM_MULTICAST_MAX) }, "Some notification chunks failed to send");
     }
   }
 

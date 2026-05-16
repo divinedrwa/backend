@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { NotificationService } from "../../services/notification.service";
+import { logger } from "../../lib/logger";
 
 /** Waiting at gate for resident decision(s). */
 export const VISITOR_PENDING_APPROVAL = "PENDING_APPROVAL";
@@ -177,13 +178,12 @@ export async function notifyResidentsVisitorApprovalRequest(params: {
     ...(imageUrl ? { imageUrl } : {}),
   };
 
-  // eslint-disable-next-line no-console
-  console.log("[DivineFCM-API] notifyResidentsVisitorApprovalRequest", {
+  logger.info({
     visitorId: params.visitorId,
     villaCount: params.villaIds.length,
     residentUserCount: residents.length,
     type: data.type,
-  });
+  }, "notifyResidentsVisitorApprovalRequest");
 
   const results = await Promise.allSettled(
     residents.map((r) =>
@@ -192,8 +192,7 @@ export async function notifyResidentsVisitorApprovalRequest(params: {
   );
   for (const r of results) {
     if (r.status === "rejected") {
-      // eslint-disable-next-line no-console
-      console.error("[notifyResidentsVisitorApprovalRequest] send failed:", r.reason);
+      logger.error({ err: r.reason }, "notifyResidentsVisitorApprovalRequest send failed");
     }
   }
   return { recipientUserCount: residents.length };
@@ -248,13 +247,12 @@ export async function notifyGuardsVisitorApprovalOutcome(params: {
 
   const uniqueGuardIds = [...new Set(guardIds)];
 
-  // eslint-disable-next-line no-console
-  console.log("[DivineFCM-API] notifyGuardsVisitorApprovalOutcome", {
+  logger.info({
     visitorId: params.visitorId,
     outcome: params.outcome,
     createdByGuardId: params.createdByGuardId ?? null,
     guardUserCount: uniqueGuardIds.length,
-  });
+  }, "notifyGuardsVisitorApprovalOutcome");
 
   const guardResults = await Promise.allSettled(
     uniqueGuardIds.map((id) =>
@@ -263,8 +261,7 @@ export async function notifyGuardsVisitorApprovalOutcome(params: {
   );
   for (const r of guardResults) {
     if (r.status === "rejected") {
-      // eslint-disable-next-line no-console
-      console.error("[notifyGuardsVisitorApprovalOutcome] send failed:", r.reason);
+      logger.error({ err: r.reason }, "notifyGuardsVisitorApprovalOutcome send failed");
     }
   }
 }
@@ -313,8 +310,7 @@ export async function notifyCreatingGuardVisitorVillaProgress(params: {
       { category: NotificationCategory.VISITOR },
     );
   } catch (e) {
-    // eslint-disable-next-line no-console
-    console.error("[notifyCreatingGuardVisitorVillaProgress] failed:", e);
+    logger.error({ err: e }, "notifyCreatingGuardVisitorVillaProgress failed");
   }
 }
 
@@ -349,12 +345,11 @@ export async function notifyGuardsPreApprovedCreated(params: {
     phone: params.visitorPhone,
   };
 
-  // eslint-disable-next-line no-console
-  console.log("[DivineFCM-API] notifyGuardsPreApprovedCreated", {
+  logger.info({
     societyId: params.societyId,
     preApprovedId: params.preApprovedId,
     guardUserCount: guards.length,
-  });
+  }, "notifyGuardsPreApprovedCreated");
 
   const guardResults = await Promise.allSettled(
     guards.map((g) =>
@@ -363,8 +358,7 @@ export async function notifyGuardsPreApprovedCreated(params: {
   );
   for (const r of guardResults) {
     if (r.status === "rejected") {
-      // eslint-disable-next-line no-console
-      console.error("[notifyGuardsPreApprovedCreated] send failed:", r.reason);
+      logger.error({ err: r.reason }, "notifyGuardsPreApprovedCreated send failed");
     }
   }
 }

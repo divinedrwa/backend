@@ -6,6 +6,7 @@ import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { runBillingReminderJobs, syncAllBillingCycleStatuses } from "./modules/billing-cycle/services/cycle-service";
 import { reconcileAllSocieties } from "./lib/reconciliation";
+import { NotificationService } from "./services/notification.service";
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {
@@ -53,7 +54,10 @@ cron.schedule(
             failed: reconResult.failed,
             alertsCreated: reconResult.totalAlerts,
           }, "[billing-cron] Reconciliation complete");
-          
+
+          // Clean up stale inactive push devices (>90 days)
+          await NotificationService.cleanupInactiveDevices();
+
           return true;
         },
       );
