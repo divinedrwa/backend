@@ -742,7 +742,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
     }
     const useCycleResidents = cycleCore != null && !("error" in cycleCore);
     const residents = useCycleResidents
-      ? cycleCore.residents.map((resident) => ({
+      ? cycleCore.residents
+          .filter((r) => !(r as any).isExcluded)
+          .map((resident) => ({
           residentId: resident.villaId,
           name: resident.ownerName ?? "Unknown",
           flatNumber: resident.villaNumber ?? "-",
