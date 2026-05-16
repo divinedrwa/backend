@@ -1064,4 +1064,125 @@ router.get("/maintenance-dashboard/report-pdf", requireRole(UserRole.RESIDENT), 
   }
 });
 
+// GET /api/residents/outstanding-dues
+// All villas with any pending maintenance payment across all cycles (society-wide).
+// Available to both RESIDENT and ADMIN roles.
+router.get(
+  "/outstanding-dues",
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!societyId) {
+        return res.status(403).json({ message: "Tenant context required" });
+      }
+
+      const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
+        where: {
+          cycle: { societyId },
+          status: { notIn: ["PAID", "WAIVED"] },
+        },
+        include: {
+          cycle: {
+            select: {
+              id: true,
+              title: true,
+              periodMonth: true,
+              periodYear: true,
+              dueDate: true,
+            },
+          },
+          villa: {
+            select: {
+              id: true,
+              villaNumber: true,
+              ownerName: true,
+            },
+          },
+        },
+        orderBy: { cycle: { dueDate: "asc" } },
+      });
+
+      const villaMap = new Map<
+        string,
+        {
+          villaId: string;
+          villaNumber: string;
+          ownerName: string;
+          totalOutstanding: number;
+          pendingCycles: {
+            cycleId: string;
+            cycleTitle: string;
+            month: number;
+            year: number;
+            expectedAmount: number;
+            paidAmount: number;
+            remainingDue: number;
+            dueDate: string;
+            status: string;
+            isOverdue: boolean;
+          }[];
+        }
+      >();
+
+      const now = new Date();
+      let totalOutstanding = 0;
+      let totalPendingCycles = 0;
+
+      for (const snap of snapshots) {
+        const expected = Number(snap.expectedAmount);
+        const paid = Number(snap.paidAmount);
+        const remaining = expected - paid;
+        if (remaining <= 0) continue;
+
+        totalOutstanding += remaining;
+        totalPendingCycles += 1;
+
+        const vid = snap.villa.id;
+        let entry = villaMap.get(vid);
+        if (!entry) {
+          entry = {
+            villaId: vid,
+            villaNumber: snap.villa.villaNumber,
+            ownerName: snap.villa.ownerName ?? "",
+            totalOutstanding: 0,
+            pendingCycles: [],
+          };
+          villaMap.set(vid, entry);
+        }
+        entry.totalOutstanding += remaining;
+
+        const isOverdue =
+          snap.status === "OVERDUE" || new Date(snap.cycle.dueDate) < now;
+
+        entry.pendingCycles.push({
+          cycleId: snap.cycle.id,
+          cycleTitle: snap.cycle.title,
+          month: snap.cycle.periodMonth,
+          year: snap.cycle.periodYear,
+          expectedAmount: expected,
+          paidAmount: paid,
+          remainingDue: remaining,
+          dueDate: snap.cycle.dueDate.toISOString(),
+          status: isOverdue ? "OVERDUE" : snap.status,
+          isOverdue,
+        });
+      }
+
+      const villas = Array.from(villaMap.values()).sort(
+        (a, b) => b.totalOutstanding - a.totalOutstanding
+      );
+
+      return res.json({
+        villas,
+        totalOutstanding,
+        villasWithDuesCount: villas.length,
+        totalPendingCycles,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 export default router;
