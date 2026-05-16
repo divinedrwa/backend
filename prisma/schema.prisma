@@ -321,6 +321,7 @@ model User {
   visitorVillaAsTarget  VisitorVilla[] @relation("VisitorVillaResidentTarget")
   amenityBookings       AmenityBooking[]
   unit                  Unit?          @relation(fields: [unitId], references: [id], onDelete: Restrict)
+  cycleVillaExclusions  CycleVillaExclusion[] @relation("CycleVillaExclusions")
 
   @@index([societyId])
   @@index([villaId])
@@ -361,6 +362,7 @@ model Villa {
   maintenanceSnapshots  VillaMaintenanceSnapshot[]
   units                 Unit[]
   billingAccount        BillingAccount?
+  cycleExclusions       CycleVillaExclusion[]
 
   @@unique([societyId, villaNumber])
   @@index([societyId])
@@ -507,6 +509,7 @@ model MaintenanceCollectionCycle {
   snapshots VillaMaintenanceSnapshot[]
   payments  MaintenancePayment[]
   reconciliationAlerts ReconciliationAlert[]
+  exclusions           CycleVillaExclusion[]
 
   @@unique([financialYearId, periodKey])
   @@index([societyId])
@@ -543,6 +546,21 @@ model VillaMaintenanceSnapshot {
 
   @@unique([cycleId, villaId])
   @@index([villaId])
+}
+
+model CycleVillaExclusion {
+  id             String                    @id @default(cuid())
+  cycleId        String
+  cycle          MaintenanceCollectionCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
+  villaId        String
+  villa          Villa                     @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  reason         String?
+  excludedBy     String
+  excludedByUser User                      @relation("CycleVillaExclusions", fields: [excludedBy], references: [id])
+  createdAt      DateTime                  @default(now())
+
+  @@unique([cycleId, villaId])
+  @@index([cycleId])
 }
 
 enum ComplaintStatus {

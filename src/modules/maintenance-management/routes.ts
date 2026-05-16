@@ -20,6 +20,7 @@ import {
   buildCycleFinancialDashboardCore,
   pickMaintenanceCollectionCycleId,
 } from "./financial-dashboard-cycle";
+import { notifyUsers } from "../../services/notification.service";
 
 const router = Router();
 
@@ -295,16 +296,25 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       }
 
       // Validate snapshot exists (lightweight check outside transaction)
-      const snapshotCheck = await prisma.villaMaintenanceSnapshot.findUnique({
-        where: {
-          cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId },
-        },
-        select: { id: true },
-      });
+      const [snapshotCheck, markPaidExclusion] = await Promise.all([
+        prisma.villaMaintenanceSnapshot.findUnique({
+          where: {
+            cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId },
+          },
+          select: { id: true },
+        }),
+        prisma.cycleVillaExclusion.findUnique({
+          where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+          select: { id: true },
+        }),
+      ]);
       if (!snapshotCheck) {
         return res
           .status(400)
           .json({ message: "No billing snapshot for this villa. Generate snapshots for the cycle first." });
+      }
+      if (markPaidExclusion) {
+        return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
       }
 
       const receiptNumber = `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
@@ -603,11 +613,20 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       return res.status(400).json({ message: "This billing cycle is locked" });
     }
 
-    const snapshot = await prisma.villaMaintenanceSnapshot.findUnique({
-      where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
-    });
+    const [snapshot, applyCreditExclusion] = await Promise.all([
+      prisma.villaMaintenanceSnapshot.findUnique({
+        where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+      }),
+      prisma.cycleVillaExclusion.findUnique({
+        where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+        select: { id: true },
+      }),
+    ]);
     if (!snapshot) {
       return res.status(400).json({ message: "No billing snapshot for this villa." });
+    }
+    if (applyCreditExclusion) {
+      return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
     }
 
     const expectedAmt = Number(snapshot.expectedAmount);
@@ -768,10 +787,19 @@ router.post(
       // The cycle is used only to identify the financial year and validate
       // the request context — the payment itself is NOT linked to any cycle
       // so the credit walker won't auto-consume it against expected amounts.
-      const cycle = await prisma.maintenanceCollectionCycle.findFirst({
-        where: { id: body.maintenanceCollectionCycleId, societyId },
-      });
+      const [cycle, adjExclusion] = await Promise.all([
+        prisma.maintenanceCollectionCycle.findFirst({
+          where: { id: body.maintenanceCollectionCycleId, societyId },
+        }),
+        prisma.cycleVillaExclusion.findUnique({
+          where: { cycleId_villaId: { cycleId: body.maintenanceCollectionCycleId, villaId: body.villaId } },
+          select: { id: true },
+        }),
+      ]);
       if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
+      if (adjExclusion) {
+        return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
+      }
       if (cycle.status === "LOCKED") {
         return res.status(400).json({ message: "This billing cycle is locked" });
       }
@@ -1693,6 +1721,214 @@ router.post("/send-dues-reminders", async (req, res, next) => {
     next(error);
   }
 });
+
+// GET /api/maintenance-management/outstanding-dues
+// All villas with any pending maintenance payment across all cycles.
+router.get("/outstanding-dues", async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+
+    const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
+      where: {
+        cycle: { societyId },
+        status: { notIn: ["PAID", "WAIVED"] },
+      },
+      include: {
+        cycle: {
+          select: {
+            id: true,
+            title: true,
+            periodMonth: true,
+            periodYear: true,
+            dueDate: true,
+          },
+        },
+        villa: {
+          select: {
+            id: true,
+            villaNumber: true,
+            ownerName: true,
+          },
+        },
+      },
+      orderBy: { cycle: { dueDate: "asc" } },
+    });
+
+    // Group by villa
+    const villaMap = new Map<
+      string,
+      {
+        villaId: string;
+        villaNumber: string;
+        ownerName: string;
+        totalOutstanding: number;
+        pendingCycles: {
+          cycleId: string;
+          cycleTitle: string;
+          month: number;
+          year: number;
+          expectedAmount: number;
+          paidAmount: number;
+          remainingDue: number;
+          dueDate: string;
+          status: string;
+          isOverdue: boolean;
+        }[];
+      }
+    >();
+
+    const now = new Date();
+    let totalOutstanding = 0;
+    let totalPendingCycles = 0;
+
+    for (const snap of snapshots) {
+      const expected = Number(snap.expectedAmount);
+      const paid = Number(snap.paidAmount);
+      const remaining = expected - paid;
+      if (remaining <= 0) continue;
+
+      totalOutstanding += remaining;
+      totalPendingCycles += 1;
+
+      const vid = snap.villa.id;
+      let entry = villaMap.get(vid);
+      if (!entry) {
+        entry = {
+          villaId: vid,
+          villaNumber: snap.villa.villaNumber,
+          ownerName: snap.villa.ownerName ?? "",
+          totalOutstanding: 0,
+          pendingCycles: [],
+        };
+        villaMap.set(vid, entry);
+      }
+      entry.totalOutstanding += remaining;
+
+      const isOverdue =
+        snap.status === "OVERDUE" || new Date(snap.cycle.dueDate) < now;
+
+      entry.pendingCycles.push({
+        cycleId: snap.cycle.id,
+        cycleTitle: snap.cycle.title,
+        month: snap.cycle.periodMonth,
+        year: snap.cycle.periodYear,
+        expectedAmount: expected,
+        paidAmount: paid,
+        remainingDue: remaining,
+        dueDate: snap.cycle.dueDate.toISOString(),
+        status: isOverdue ? "OVERDUE" : snap.status,
+        isOverdue,
+      });
+    }
+
+    // Sort villas by highest total outstanding desc
+    const villas = Array.from(villaMap.values()).sort(
+      (a, b) => b.totalOutstanding - a.totalOutstanding
+    );
+
+    return res.json({
+      villas,
+      totalOutstanding,
+      villasWithDuesCount: villas.length,
+      totalPendingCycles,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/maintenance-management/send-villa-reminder
+// Send a push notification reminder to all residents of a specific villa about their outstanding dues.
+const sendVillaReminderSchema = z.object({
+  villaId: z.string().min(1),
+});
+router.post(
+  "/send-villa-reminder",
+  validateBody(sendVillaReminderSchema),
+  async (req, res, next) => {
+    try {
+      const societyId = tenantSocietyId(req);
+      if (!societyId) {
+        return res.status(403).json({ message: "Tenant context required" });
+      }
+
+      const { villaId } = req.body as z.infer<typeof sendVillaReminderSchema>;
+
+      // Verify villa belongs to this society
+      const villa = await prisma.villa.findFirst({
+        where: { id: villaId, societyId },
+        select: { id: true, villaNumber: true, ownerName: true },
+      });
+      if (!villa) {
+        return res.status(404).json({ message: "Villa not found" });
+      }
+
+      // Compute outstanding for this villa
+      const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
+        where: {
+          villaId,
+          cycle: { societyId },
+          status: { notIn: ["PAID", "WAIVED"] },
+        },
+        include: {
+          cycle: { select: { title: true, dueDate: true } },
+        },
+      });
+
+      const totalOutstanding = snapshots.reduce((sum, s) => {
+        const remaining = Number(s.expectedAmount) - Number(s.paidAmount);
+        return sum + (remaining > 0 ? remaining : 0);
+      }, 0);
+
+      const pendingMonths = snapshots.length;
+      if (pendingMonths === 0) {
+        return res.json({ message: "No outstanding dues for this villa", sent: 0 });
+      }
+
+      // Find all resident users for this villa
+      const recipients = await prisma.user.findMany({
+        where: {
+          societyId,
+          role: UserRole.RESIDENT,
+          villaId,
+        },
+        select: { id: true },
+      });
+
+      if (recipients.length === 0) {
+        return res.json({ message: "No residents found for this villa", sent: 0 });
+      }
+
+      const userIds = recipients.map((r) => r.id);
+      await notifyUsers(
+        userIds,
+        {
+          title: "Maintenance due reminder",
+          body: `You have ${pendingMonths} pending maintenance ${pendingMonths === 1 ? "payment" : "payments"} totalling Rs. ${Math.round(totalOutstanding)}. Please clear your dues at the earliest.`,
+          data: {
+            type: "MAINTENANCE_REMINDER",
+            villaId,
+            villaNumber: villa.villaNumber,
+          },
+        },
+        { category: "MAINTENANCE" as any },
+      );
+
+      return res.json({
+        message: "Reminder sent",
+        sent: recipients.length,
+        villaNumber: villa.villaNumber,
+        totalOutstanding,
+        pendingMonths,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // GET /api/maintenance-management/financial-dashboard/report-pdf
 // Query: optional `cycleId` or `maintenanceCollectionCycleId`.

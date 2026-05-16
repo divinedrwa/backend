@@ -26,6 +26,7 @@ export type CycleFinancialDashboardCore =
         paymentMode: string | null;
         advanceCredit?: number;
         cashPaidThisCycle?: number;
+        isExcluded?: boolean;
       }>;
       paymentHistory: Array<{
         id: string;
@@ -45,6 +46,7 @@ export type CycleFinancialDashboardCore =
         unpaidCount: number;
         overdueCount: number;
         partialCount: number;
+        excludedCount: number;
         totalExpected: number;
         collected: number;
         pendingAmount: number;
@@ -75,7 +77,7 @@ export async function buildCycleFinancialDashboardCore(
     return { error: "Billing period not found" };
   }
 
-  const [villas, snapshots, payments] = await Promise.all([
+  const [villas, snapshots, payments, dashExclusions] = await Promise.all([
     prisma.villa.findMany({
       where: { societyId },
       select: { id: true, villaNumber: true, ownerName: true },
@@ -89,7 +91,13 @@ export async function buildCycleFinancialDashboardCore(
       include: { villa: { select: { villaNumber: true, ownerName: true } } },
       orderBy: { paymentDate: "desc" },
     }),
+    prisma.cycleVillaExclusion.findMany({
+      where: { cycleId },
+      select: { villaId: true },
+    }),
   ]);
+
+  const dashExcludedIds = new Set(dashExclusions.map((e) => e.villaId));
 
   if (snapshots.length === 0) {
     return {
@@ -121,6 +129,7 @@ export async function buildCycleFinancialDashboardCore(
     const p = lastPayByVilla.get(villa.id);
     const credit = creditBalances.get(villa.id) ?? 0;
     const cashPaid = cashByVilla.get(villa.id) ?? 0;
+    const isExcluded = dashExcludedIds.has(villa.id);
     if (!s) {
       return {
         villaId: villa.id,
@@ -133,6 +142,7 @@ export async function buildCycleFinancialDashboardCore(
         receiptNumber: null,
         paymentMode: null,
         ...(credit > 0 ? { advanceCredit: credit } : {}),
+        ...(isExcluded ? { isExcluded: true } : {}),
       };
     }
     let status: "PENDING" | "PAID" | "OVERDUE" | "PARTIAL" = "PENDING";
@@ -153,15 +163,18 @@ export async function buildCycleFinancialDashboardCore(
       paymentMode: p?.paymentMode ?? null,
       ...(credit > 0 ? { advanceCredit: credit } : {}),
       ...(cashPaid > 0 ? { cashPaidThisCycle: cashPaid } : {}),
+      ...(isExcluded ? { isExcluded: true } : {}),
     };
   });
 
-  const totalExpected = snapshots.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
-  const collected = snapshots.reduce((sum, s) => sum + Number(s.paidAmount), 0);
-  const paidCount = snapshots.filter((s) => s.status === "PAID").length;
-  const overdueCount = snapshots.filter((s) => s.status === "OVERDUE").length;
-  const partialCount = snapshots.filter((s) => s.status === "PARTIAL").length;
-  const unpaidCount = snapshots.length - paidCount;
+  const activeSnaps = snapshots.filter((s) => !dashExcludedIds.has(s.villaId));
+  const excludedCount = snapshots.filter((s) => dashExcludedIds.has(s.villaId)).length;
+  const totalExpected = activeSnaps.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
+  const collected = activeSnaps.reduce((sum, s) => sum + Number(s.paidAmount), 0);
+  const paidCount = activeSnaps.filter((s) => s.status === "PAID").length;
+  const overdueCount = activeSnaps.filter((s) => s.status === "OVERDUE").length;
+  const partialCount = activeSnaps.filter((s) => s.status === "PARTIAL").length;
+  const unpaidCount = activeSnaps.length - paidCount;
   const pendingAmount = Math.max(0, totalExpected - collected);
   const collectionRate =
     totalExpected > 0 ? Math.round((collected / totalExpected) * 100) : 0;
@@ -198,6 +211,7 @@ export async function buildCycleFinancialDashboardCore(
       unpaidCount,
       overdueCount,
       partialCount,
+      excludedCount,
       totalExpected,
       collected,
       pendingAmount,

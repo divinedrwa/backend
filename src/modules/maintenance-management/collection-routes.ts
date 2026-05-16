@@ -513,7 +513,7 @@ router.put(
         return res.status(400).json({ message: "Only OPEN cycles can be edited" });
       }
 
-      const [snapshot, villa] = await Promise.all([
+      const [snapshot, villa, villaExclusion] = await Promise.all([
         prisma.villaMaintenanceSnapshot.findUnique({
           where: { cycleId_villaId: { cycleId, villaId: body.villaId } },
         }),
@@ -521,11 +521,18 @@ router.put(
           where: { id: body.villaId, societyId },
           select: { id: true, area: true, monthlyMaintenance: true },
         }),
+        prisma.cycleVillaExclusion.findUnique({
+          where: { cycleId_villaId: { cycleId, villaId: body.villaId } },
+          select: { id: true },
+        }),
       ]);
       if (!snapshot) {
         return res.status(400).json({ message: "No billing snapshot for this villa." });
       }
       if (!villa) return res.status(404).json({ message: "Villa not found" });
+      if (villaExclusion) {
+        return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
+      }
 
       const e0 = Number(snapshot.expectedAmount);
       const p0 = Number(snapshot.paidAmount);
@@ -727,11 +734,18 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
     ]);
 
     if (paymentCount === 0) {
-      const villas = await prisma.villa.findMany({
-        where: { societyId },
-        select: { id: true, area: true, monthlyMaintenance: true },
-      });
+      const [villas, syncExclusions] = await Promise.all([
+        prisma.villa.findMany({
+          where: { societyId },
+          select: { id: true, area: true, monthlyMaintenance: true },
+        }),
+        prisma.cycleVillaExclusion.findMany({
+          where: { cycleId: maintenanceCycle.id },
+          select: { villaId: true },
+        }),
+      ]);
       const villaIds = new Set(villas.map((v) => v.id));
+      const syncExcludedIds = new Set(syncExclusions.map((e) => e.villaId));
 
       let existingCustomOverrides =
         existingRule?.ruleType === "CUSTOM" &&
@@ -779,6 +793,16 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
         where: { cycleId: maintenanceCycle.id },
       });
       const rows = villas.map((v) => {
+        if (syncExcludedIds.has(v.id)) {
+          return {
+            cycleId: maintenanceCycle.id,
+            villaId: v.id,
+            expectedAmount: new Prisma.Decimal(0),
+            paidAmount: new Prisma.Decimal(0),
+            status: "WAIVED" as const,
+            breakdown: { excluded: true } as Prisma.InputJsonValue,
+          };
+        }
         const { expected, breakdown } = computeExpectedForVilla(rule, v);
         const status = refreshSnapshotStatus(expected, 0, maintenanceCycle.dueDate);
         return {
@@ -831,14 +855,31 @@ router.post("/cycles/:cycleId/generate-snapshots", async (req, res, next) => {
       return res.status(409).json({ message: "Cannot regenerate: payments already recorded for this cycle" });
     }
 
-    const villas = await prisma.villa.findMany({
-      where: { societyId },
-      select: { id: true, area: true, monthlyMaintenance: true },
-    });
+    const [villas, genExclusions] = await Promise.all([
+      prisma.villa.findMany({
+        where: { societyId },
+        select: { id: true, area: true, monthlyMaintenance: true },
+      }),
+      prisma.cycleVillaExclusion.findMany({
+        where: { cycleId },
+        select: { villaId: true },
+      }),
+    ]);
+    const genExcludedIds = new Set(genExclusions.map((e) => e.villaId));
 
     await prisma.$transaction(async (tx) => {
       await tx.villaMaintenanceSnapshot.deleteMany({ where: { cycleId } });
       const rows = villas.map((v) => {
+        if (genExcludedIds.has(v.id)) {
+          return {
+            cycleId,
+            villaId: v.id,
+            expectedAmount: new Prisma.Decimal(0),
+            paidAmount: new Prisma.Decimal(0),
+            status: "WAIVED" as const,
+            breakdown: { excluded: true } as Prisma.InputJsonValue,
+          };
+        }
         const { expected, breakdown } = computeExpectedForVilla(cycle.rule!, v);
         const status = refreshSnapshotStatus(expected, 0, cycle.dueDate);
         return {
@@ -873,7 +914,7 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
     });
     if (!cycle) return res.status(404).json({ message: "Cycle not found" });
 
-    const [villas, snapshots, payments, existingRule] = await Promise.all([
+    const [villas, snapshots, payments, existingRule, exclusions] = await Promise.all([
       prisma.villa.findMany({
         where: { societyId },
         select: {
@@ -897,7 +938,13 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       prisma.maintenanceCycleRule.findUnique({
         where: { cycleId },
       }),
+      prisma.cycleVillaExclusion.findMany({
+        where: { cycleId },
+        select: { villaId: true },
+      }),
     ]);
+
+    const excludedVillaIds = new Set(exclusions.map((e) => e.villaId));
 
     let snapshotsRows = snapshots;
     if (snapshotsRows.length === 0) {
@@ -921,6 +968,16 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
 
       await prisma.$transaction(async (tx) => {
         const rows = villas.map((v) => {
+          if (excludedVillaIds.has(v.id)) {
+            return {
+              cycleId,
+              villaId: v.id,
+              expectedAmount: new Prisma.Decimal(0),
+              paidAmount: new Prisma.Decimal(0),
+              status: "WAIVED" as const,
+              breakdown: { excluded: true } as Prisma.InputJsonValue,
+            };
+          }
           const { expected, breakdown } = computeExpectedForVilla(bootstrapRule, v);
           const status = refreshSnapshotStatus(expected, 0, cycle.dueDate);
           return {
@@ -999,15 +1056,18 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
         snapshotId: s.id,
         advanceCredit: creditBalances.get(villa.id) ?? 0,
         cashPaidThisCycle: cashByVilla.get(villa.id) ?? 0,
+        isExcluded: excludedVillaIds.has(villa.id),
       };
     });
 
-    const totalAmount = snapshotsRows.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
-    const collectedAmount = snapshotsRows.reduce((sum, s) => sum + Number(s.paidAmount), 0);
-    const paidCount = snapshotsRows.filter((s) => s.status === "PAID").length;
-    const overdueCount = snapshotsRows.filter((s) => s.status === "OVERDUE").length;
-    const partialCount = snapshotsRows.filter((s) => s.status === "PARTIAL").length;
-    const unpaidCount = snapshotsRows.length - paidCount;
+    const activeSnapshots = snapshotsRows.filter((s) => !excludedVillaIds.has(s.villaId));
+    const excludedCount = snapshotsRows.filter((s) => excludedVillaIds.has(s.villaId)).length;
+    const totalAmount = activeSnapshots.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
+    const collectedAmount = activeSnapshots.reduce((sum, s) => sum + Number(s.paidAmount), 0);
+    const paidCount = activeSnapshots.filter((s) => s.status === "PAID").length;
+    const overdueCount = activeSnapshots.filter((s) => s.status === "OVERDUE").length;
+    const partialCount = activeSnapshots.filter((s) => s.status === "PARTIAL").length;
+    const unpaidCount = activeSnapshots.length - paidCount;
 
     const pendingAmount = Math.max(0, totalAmount - collectedAmount);
     const collectionRate =
@@ -1030,6 +1090,7 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
         unpaidCount,
         overdueCount,
         partialCount,
+        excludedCount,
         totalAmount,
         collectedAmount,
         pendingAmount,
@@ -1114,5 +1175,172 @@ router.get("/financial-years/:fyId/year-report", async (req, res, next) => {
     next(e);
   }
 });
+
+// ── Villa exclusion from cycle ──
+
+const excludeVillaSchema = z.object({
+  villaId: z.string().min(1),
+  reason: z.string().max(500).optional(),
+});
+
+// POST /api/maintenance-management/collection/cycles/:cycleId/exclude-villa
+router.post(
+  "/cycles/:cycleId/exclude-villa",
+  validateBody(excludeVillaSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId, userId: adminId } = req.auth!;
+      const { cycleId } = req.params;
+      const body = req.body as z.infer<typeof excludeVillaSchema>;
+
+      const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: cycleId, societyId },
+      });
+      if (!cycle) return res.status(404).json({ message: "Cycle not found" });
+      if (cycle.status !== "OPEN") {
+        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
+      }
+
+      const villa = await prisma.villa.findFirst({
+        where: { id: body.villaId, societyId },
+        select: { id: true },
+      });
+      if (!villa) return res.status(404).json({ message: "Villa not found" });
+
+      const existing = await prisma.cycleVillaExclusion.findUnique({
+        where: { cycleId_villaId: { cycleId, villaId: body.villaId } },
+      });
+      if (existing) {
+        return res.status(409).json({ message: "Villa is already excluded from this cycle" });
+      }
+
+      const paymentCount = await prisma.maintenancePayment.count({
+        where: { maintenanceCollectionCycleId: cycleId, villaId: body.villaId },
+      });
+      if (paymentCount > 0) {
+        return res.status(400).json({ message: "Cannot exclude: payments already recorded for this villa in this cycle" });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cycleVillaExclusion.create({
+          data: {
+            cycleId,
+            villaId: body.villaId,
+            reason: body.reason ?? null,
+            excludedBy: adminId,
+          },
+        });
+
+        await tx.villaMaintenanceSnapshot.upsert({
+          where: { cycleId_villaId: { cycleId, villaId: body.villaId } },
+          create: {
+            cycleId,
+            villaId: body.villaId,
+            expectedAmount: new Prisma.Decimal(0),
+            paidAmount: new Prisma.Decimal(0),
+            status: "WAIVED",
+            breakdown: { excluded: true } as Prisma.InputJsonValue,
+          },
+          update: {
+            expectedAmount: new Prisma.Decimal(0),
+            paidAmount: new Prisma.Decimal(0),
+            status: "WAIVED",
+            breakdown: { excluded: true } as Prisma.InputJsonValue,
+          },
+        });
+
+        await syncUserCyclePaymentsFromSnapshot(tx, {
+          societyId,
+          adminId,
+          villaId: body.villaId,
+          cycle: { financialYearId: cycle.financialYearId, periodKey: cycle.periodKey },
+          newPaid: 0,
+          snapStatus: "WAIVED",
+        });
+      });
+
+      return res.json({ message: "Villa excluded from this cycle" });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+// DELETE /api/maintenance-management/collection/cycles/:cycleId/exclude-villa/:villaId
+router.delete(
+  "/cycles/:cycleId/exclude-villa/:villaId",
+  async (req, res, next) => {
+    try {
+      const { societyId, userId: adminId } = req.auth!;
+      const { cycleId, villaId } = req.params;
+
+      const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: cycleId, societyId },
+      });
+      if (!cycle) return res.status(404).json({ message: "Cycle not found" });
+      if (cycle.status !== "OPEN") {
+        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
+      }
+
+      const exclusion = await prisma.cycleVillaExclusion.findUnique({
+        where: { cycleId_villaId: { cycleId, villaId } },
+      });
+      if (!exclusion) {
+        return res.status(404).json({ message: "No exclusion found for this villa in this cycle" });
+      }
+
+      const villa = await prisma.villa.findFirst({
+        where: { id: villaId, societyId },
+        select: { id: true, area: true, monthlyMaintenance: true },
+      });
+      if (!villa) return res.status(404).json({ message: "Villa not found" });
+
+      const rule = await prisma.maintenanceCycleRule.findUnique({ where: { cycleId } });
+      if (!rule) {
+        return res.status(400).json({ message: "No rule configured for this cycle" });
+      }
+
+      const { expected, breakdown } = computeExpectedForVilla(rule, villa);
+      const snapStatus = refreshSnapshotStatus(expected, 0, cycle.dueDate);
+
+      await prisma.$transaction(async (tx) => {
+        await tx.cycleVillaExclusion.delete({
+          where: { cycleId_villaId: { cycleId, villaId } },
+        });
+
+        await tx.villaMaintenanceSnapshot.upsert({
+          where: { cycleId_villaId: { cycleId, villaId } },
+          create: {
+            cycleId,
+            villaId,
+            expectedAmount: new Prisma.Decimal(expected),
+            paidAmount: new Prisma.Decimal(0),
+            status: snapStatus,
+            breakdown: breakdown as Prisma.InputJsonValue,
+          },
+          update: {
+            expectedAmount: new Prisma.Decimal(expected),
+            paidAmount: new Prisma.Decimal(0),
+            status: snapStatus,
+            breakdown: breakdown as Prisma.InputJsonValue,
+          },
+        });
+
+        await syncUserCyclePaymentsFromSnapshot(tx, {
+          societyId,
+          adminId,
+          villaId,
+          cycle: { financialYearId: cycle.financialYearId, periodKey: cycle.periodKey },
+          newPaid: 0,
+          snapStatus,
+        });
+      });
+
+      return res.json({ message: "Villa re-included in this cycle", expectedAmount: expected, status: snapStatus });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
 
 export default router;
