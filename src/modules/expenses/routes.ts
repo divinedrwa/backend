@@ -57,6 +57,7 @@ const createExpenseSchema = z.object({
   invoiceNumber: z.string().max(100).optional(),
   month: z.number().int().min(1).max(12).optional(),
   year: z.number().int().min(2000).max(2100).optional(),
+  financialYearId: z.string().optional(),
   gstAmount: z.number().nonnegative().optional(),
   gstPercentage: z.number().nonnegative().optional(),
   tdsAmount: z.number().nonnegative().optional(),
@@ -182,10 +183,11 @@ router.delete('/categories/:id', async (req, res, next) => {
 router.get('/', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
-    const { 
-      categoryId, 
-      month, 
-      year, 
+    const {
+      categoryId,
+      month,
+      year,
+      financialYearId,
       status,
       paymentMode,
       startDate,
@@ -193,12 +195,14 @@ router.get('/', async (req, res, next) => {
       search
     } = req.query;
     const categoryIdParam = typeof categoryId === "string" ? categoryId : undefined;
+    const financialYearIdParam = typeof financialYearId === "string" ? financialYearId : undefined;
     const statusParam = typeof status === "string" ? status : undefined;
     const paymentModeParam = typeof paymentMode === "string" ? paymentMode : undefined;
-    
+
     const where: Prisma.ExpenseWhereInput = { societyId };
-    
+
     if (categoryIdParam) where.categoryId = categoryIdParam;
+    if (financialYearIdParam) where.financialYearId = financialYearIdParam;
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
     if (statusParam) where.status = statusParam as ExpenseStatus;
@@ -226,6 +230,7 @@ router.get('/', async (req, res, next) => {
         include: {
           category: true,
           attachments: true,
+          financialYear: { select: { id: true, label: true } },
         },
         orderBy: { paymentDate: 'desc' },
         take: pagination.take,
@@ -259,6 +264,7 @@ router.get('/:id', async (req, res, next) => {
       include: {
         category: true,
         attachments: true,
+        financialYear: { select: { id: true, label: true } },
       },
     });
 
@@ -287,6 +293,24 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
       return res.status(404).json({ error: 'Category not found' });
     }
 
+    const payDate = new Date(body.paymentDate);
+    const expMonth = body.month ?? (payDate.getMonth() + 1);
+    const expYear = body.year ?? payDate.getFullYear();
+
+    // Resolve FY: use explicit selection, or find matching FY by date range.
+    let financialYearId = body.financialYearId ?? null;
+    if (!financialYearId) {
+      const fy = await prisma.financialYear.findFirst({
+        where: {
+          societyId,
+          startDate: { lte: payDate },
+          endDate: { gte: payDate },
+        },
+        select: { id: true },
+      });
+      financialYearId = fy?.id ?? null;
+    }
+
     const gstAmount = body.gstAmount ?? 0;
     const tdsAmount = body.tdsAmount ?? 0;
     const netAmount = body.amount + gstAmount - tdsAmount;
@@ -298,7 +322,7 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
         title: body.title,
         description: body.description,
         amount: body.amount,
-        paymentDate: new Date(body.paymentDate),
+        paymentDate: payDate,
         paymentMode: body.paymentMode,
         paymentRef: body.paymentRef,
         paidTo: body.paidTo,
@@ -306,8 +330,9 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
         receiptUrl: body.receiptUrl,
         receiptNumber: body.receiptNumber,
         invoiceNumber: body.invoiceNumber,
-        month: body.month,
-        year: body.year,
+        month: expMonth,
+        year: expYear,
+        financialYearId,
         gstAmount,
         gstPercentage: body.gstPercentage ?? 0,
         tdsAmount,
@@ -332,12 +357,11 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
       include: {
         category: true,
         attachments: true,
+        financialYear: { select: { id: true, label: true } },
       },
     });
 
-    if (body.month && body.year) {
-      await updateMonthlySummary(societyId, body.month, body.year);
-    }
+    await updateMonthlySummary(societyId, expMonth, expYear);
 
     res.json(expense);
   } catch (error) {
@@ -372,6 +396,27 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       }
     }
 
+    // Derive month/year from paymentDate when not explicitly provided
+    const effectivePayDate = body.paymentDate ? new Date(body.paymentDate) : existing.paymentDate;
+    const expMonth = body.month ?? (body.paymentDate ? (effectivePayDate.getMonth() + 1) : undefined);
+    const expYear = body.year ?? (body.paymentDate ? effectivePayDate.getFullYear() : undefined);
+
+    // Resolve FY: use explicit selection, or find matching FY by date range when paymentDate changes.
+    let financialYearId: string | null | undefined = undefined;
+    if (body.financialYearId !== undefined) {
+      financialYearId = body.financialYearId || null;
+    } else if (body.paymentDate) {
+      const fy = await prisma.financialYear.findFirst({
+        where: {
+          societyId,
+          startDate: { lte: effectivePayDate },
+          endDate: { gte: effectivePayDate },
+        },
+        select: { id: true },
+      });
+      financialYearId = fy?.id ?? null;
+    }
+
     const amount = body.amount ?? existing.amount;
     const gstAmount = body.gstAmount ?? existing.gstAmount ?? 0;
     const tdsAmount = body.tdsAmount ?? existing.tdsAmount ?? 0;
@@ -397,14 +442,16 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
         tdsAmount,
         tdsPercentage: body.tdsPercentage ?? 0,
         netAmount,
-        ...(body.month !== undefined ? { month: body.month } : {}),
-        ...(body.year !== undefined ? { year: body.year } : {}),
+        ...(expMonth !== undefined ? { month: expMonth } : {}),
+        ...(expYear !== undefined ? { year: expYear } : {}),
+        ...(financialYearId !== undefined ? { financialYearId } : {}),
         notes: body.notes,
         ...(body.tags !== undefined ? { tags: body.tags } : {}),
       },
       include: {
         category: true,
         attachments: true,
+        financialYear: { select: { id: true, label: true } },
       },
     });
 
@@ -488,33 +535,53 @@ router.get('/summary/monthly', async (req, res) => {
   }
 });
 
-// Get yearly summary
+// Get yearly summary (supports financialYearId or calendar year)
 router.get('/summary/yearly', async (req, res) => {
   try {
     const societyId = req.auth!.societyId;
-    const { year } = req.query;
-    
-    if (!year) {
-      return res.status(400).json({ error: 'Year required' });
+    const { year, financialYearId } = req.query;
+
+    // Build list of (month, year) pairs to query
+    let monthPairs: { month: number; year: number }[] = [];
+    let fyLabel: string | null = null;
+
+    if (financialYearId) {
+      const fy = await prisma.financialYear.findFirst({
+        where: { id: financialYearId as string, societyId },
+      });
+      if (!fy) return res.status(404).json({ error: 'Financial year not found' });
+      fyLabel = fy.label;
+      const cursor = new Date(fy.startDate.getFullYear(), fy.startDate.getMonth(), 1);
+      const end = fy.endDate;
+      while (cursor <= end) {
+        monthPairs.push({ month: cursor.getMonth() + 1, year: cursor.getFullYear() });
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+    } else if (year) {
+      const y = parseInt(year as string);
+      monthPairs = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, year: y }));
+    } else {
+      return res.status(400).json({ error: 'Year or financialYearId required' });
     }
-    
-    const summaries = await prisma.monthlyExpenseSummary.findMany({
-      where: {
-        societyId,
-        year: parseInt(year as string)
-      },
-      orderBy: { month: 'asc' }
-    });
-    
-    // Calculate yearly total
+
+    const summaries = await Promise.all(
+      monthPairs.map(async ({ month, year: y }) => {
+        const s = await prisma.monthlyExpenseSummary.findUnique({
+          where: { societyId_month_year: { societyId, month, year: y } },
+        });
+        return s ?? { month, year: y, totalExpenses: 0, totalGST: 0, totalTDS: 0, netAmount: 0, expenseCount: 0 };
+      })
+    );
+
     const yearlyTotal = summaries.reduce((sum, s) => sum + s.totalExpenses, 0);
     const yearlyGST = summaries.reduce((sum, s) => sum + s.totalGST, 0);
     const yearlyTDS = summaries.reduce((sum, s) => sum + s.totalTDS, 0);
     const yearlyNet = summaries.reduce((sum, s) => sum + s.netAmount, 0);
     const yearlyCount = summaries.reduce((sum, s) => sum + s.expenseCount, 0);
-    
+
     res.json({
-      year: parseInt(year as string),
+      year: year ? parseInt(year as string) : null,
+      financialYearLabel: fyLabel,
       monthlySummaries: summaries,
       yearlyTotal: {
         totalExpenses: yearlyTotal,
@@ -537,9 +604,12 @@ router.get('/summary/yearly', async (req, res) => {
 router.get('/summary/category-breakdown', async (req, res) => {
   try {
     const societyId = req.auth!.societyId;
-    const { month, year } = req.query;
+    const { month, year, financialYearId } = req.query;
 
     const where: Prisma.ExpenseWhereInput = { societyId };
+    if (financialYearId) {
+      where.financialYearId = financialYearId as string;
+    }
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
 
@@ -586,31 +656,45 @@ router.get('/summary/category-breakdown', async (req, res) => {
 // ANALYTICS
 // ==========================================
 
-// Get expense trends (last 12 months)
+// Get expense trends (FY months or last 12 months fallback)
 router.get('/analytics/trends', async (req, res) => {
   try {
     const societyId = req.auth!.societyId;
-    
-    const currentDate = new Date();
-    const last12Months = [];
-    
-    for (let i = 11; i >= 0; i--) {
-      const date = new Date(currentDate);
-      date.setMonth(date.getMonth() - i);
-      last12Months.push({
-        month: date.getMonth() + 1,
-        year: date.getFullYear()
+    const { financialYearId } = req.query;
+
+    const monthPairs: { month: number; year: number }[] = [];
+
+    if (financialYearId) {
+      const fy = await prisma.financialYear.findFirst({
+        where: { id: financialYearId as string, societyId },
       });
+      if (!fy) return res.status(404).json({ error: 'Financial year not found' });
+      const cursor = new Date(fy.startDate.getFullYear(), fy.startDate.getMonth(), 1);
+      const end = fy.endDate;
+      while (cursor <= end) {
+        monthPairs.push({ month: cursor.getMonth() + 1, year: cursor.getFullYear() });
+        cursor.setMonth(cursor.getMonth() + 1);
+      }
+    } else {
+      const currentDate = new Date();
+      for (let i = 11; i >= 0; i--) {
+        const date = new Date(currentDate);
+        date.setMonth(date.getMonth() - i);
+        monthPairs.push({
+          month: date.getMonth() + 1,
+          year: date.getFullYear()
+        });
+      }
     }
-    
+
     const trends = await Promise.all(
-      last12Months.map(async ({ month, year }) => {
+      monthPairs.map(async ({ month, year }) => {
         const summary = await prisma.monthlyExpenseSummary.findUnique({
           where: {
             societyId_month_year: { societyId, month, year }
           }
         });
-        
+
         return {
           month,
           year,
@@ -619,7 +703,7 @@ router.get('/analytics/trends', async (req, res) => {
         };
       })
     );
-    
+
     res.json(trends);
   } catch (error) {
     console.error('[expenses] GET /analytics/trends', error);
@@ -634,10 +718,14 @@ router.get('/analytics/trends', async (req, res) => {
 router.get('/analytics/top-categories', async (req, res) => {
   try {
     const societyId = req.auth!.societyId;
-    const { year, limit = 10 } = req.query;
-    
+    const { year, financialYearId, limit = 10 } = req.query;
+
     const where: Prisma.ExpenseWhereInput = { societyId };
-    if (year) where.year = parseInt(year as string);
+    if (financialYearId) {
+      where.financialYearId = financialYearId as string;
+    } else if (year) {
+      where.year = parseInt(year as string);
+    }
     
     const expenses = await prisma.expense.groupBy({
       by: ['categoryId'],

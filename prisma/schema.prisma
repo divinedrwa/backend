@@ -485,6 +485,7 @@ model FinancialYear {
 
   cycles MaintenanceCollectionCycle[]
   billingCycles BillingCycle[]
+  expenses Expense[]
 
   @@index([societyId])
   @@index([societyId, status])
@@ -1460,6 +1461,8 @@ model Expense {
   invoiceNumber   String?
   month           Int?
   year            Int?
+  financialYearId String?
+  financialYear   FinancialYear? @relation(fields: [financialYearId], references: [id])
   gstAmount       Float?    @default(0)
   gstPercentage   Float?    @default(0)
   tdsAmount       Float?    @default(0)
@@ -1483,6 +1486,7 @@ model Expense {
   @@index([paymentDate])
   @@index([month, year])
   @@index([status])
+  @@index([financialYearId])
 }
 
 // Multiple attachments per expense
