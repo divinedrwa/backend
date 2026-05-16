@@ -1952,6 +1952,7 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
       const rate = core.summary.collectionRate;
 
       const pendingRows = core.residents
+        .filter((r: any) => !r.isExcluded)
         .map((r) => {
           const paid = r.paidTowardCycle ?? (r.status === "PAID" ? r.amount : 0);
           const remaining = Math.max(0, Math.round((r.amount - paid) * 100) / 100);
