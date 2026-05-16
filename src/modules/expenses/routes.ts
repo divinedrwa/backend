@@ -5,6 +5,11 @@ import { getPagination, paginationMeta } from '../../lib/pagination';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, requireRole } from '../../middlewares/auth';
 import { validateBody } from '../../middlewares/validate';
+import { expenseAttachmentMemory } from '../../lib/expenseAttachmentUpload';
+import {
+  isCloudinaryConfigured,
+  uploadExpenseAttachmentBuffer,
+} from '../../services/cloudinaryExpenseAttachment';
 
 const router = Router();
 
@@ -170,6 +175,139 @@ router.delete('/categories/:id', async (req, res, next) => {
     await prisma.expenseCategory.delete({ where: { id } });
 
     res.json({ message: 'Category deleted' });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ==========================================
+// EXPENSE ATTACHMENTS
+// ==========================================
+
+const addAttachmentsSchema = z.object({
+  attachments: z.array(expenseAttachmentSchema).min(1).max(20),
+});
+
+// Upload 1-5 files to Cloudinary, return metadata array.
+// Registered BEFORE /:id to avoid path collision.
+router.post(
+  '/upload-attachment',
+  expenseAttachmentMemory.array('files', 5),
+  async (req, res, next) => {
+    try {
+      const files = req.files as Express.Multer.File[] | undefined;
+      if (!files || files.length === 0) {
+        return res.status(400).json({ error: 'No files provided' });
+      }
+      if (!isCloudinaryConfigured()) {
+        return res.status(503).json({ error: 'File storage is not configured' });
+      }
+
+      const societyId = req.auth!.societyId;
+      const results: { fileName: string; fileUrl: string; fileType: string; fileSize: number }[] = [];
+
+      for (const file of files) {
+        const suffix = `${Date.now()}_${file.originalname.replace(/\s+/g, '_')}`;
+        try {
+          const uploaded = await uploadExpenseAttachmentBuffer(
+            file.buffer,
+            societyId,
+            suffix
+          );
+          results.push({
+            fileName: file.originalname,
+            fileUrl: uploaded.secureUrl,
+            fileType: file.mimetype,
+            fileSize: uploaded.bytes,
+          });
+        } catch {
+          return res.status(502).json({ error: 'File upload failed' });
+        }
+      }
+
+      res.json({ attachments: results });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Add pre-uploaded attachment metadata to an existing expense.
+router.post(
+  '/:id/attachments',
+  validateBody(addAttachmentsSchema),
+  async (req, res, next) => {
+    try {
+      const societyId = req.auth!.societyId;
+      const { id } = req.params;
+      const body = req.body as z.infer<typeof addAttachmentsSchema>;
+
+      const expense = await prisma.expense.findFirst({
+        where: { id, societyId },
+        include: { attachments: { select: { id: true } } },
+      });
+      if (!expense) {
+        return res.status(404).json({ error: 'Expense not found' });
+      }
+
+      const totalAfter = expense.attachments.length + body.attachments.length;
+      if (totalAfter > 20) {
+        return res.status(400).json({
+          error: `Too many attachments. Current: ${expense.attachments.length}, adding: ${body.attachments.length}, max: 20.`,
+        });
+      }
+
+      await prisma.expenseAttachment.createMany({
+        data: body.attachments.map((a) => ({
+          expenseId: id,
+          fileName: a.fileName,
+          fileUrl: a.fileUrl,
+          fileType: a.fileType,
+          fileSize: a.fileSize,
+          uploadedBy: req.auth!.userId,
+        })),
+      });
+
+      const updated = await prisma.expense.findUnique({
+        where: { id },
+        include: {
+          category: true,
+          attachments: true,
+          financialYear: { select: { id: true, label: true } },
+        },
+      });
+      res.json(updated);
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Delete a single attachment from an expense.
+router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
+  try {
+    const societyId = req.auth!.societyId;
+    const { id, attachmentId } = req.params;
+
+    const expense = await prisma.expense.findFirst({
+      where: { id, societyId },
+      select: { id: true },
+    });
+    if (!expense) {
+      return res.status(404).json({ error: 'Expense not found' });
+    }
+
+    const attachment = await prisma.expenseAttachment.findFirst({
+      where: { id: attachmentId, expenseId: id },
+      select: { id: true },
+    });
+    if (!attachment) {
+      return res.status(404).json({ error: 'Attachment not found' });
+    }
+
+    await prisma.expenseAttachment.delete({ where: { id: attachmentId } });
+
+    res.json({ message: 'Attachment deleted' });
   } catch (error) {
     next(error);
   }

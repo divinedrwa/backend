@@ -53,6 +53,7 @@ import residentComplaintRoutes from "../modules/residents/complaints";
 import residentAmenityRoutes from "../modules/residents/amenities";
 import residentVehicleRoutes from "../modules/residents/vehicles";
 import residentStaffRoutes from "../modules/residents/staff";
+import residentExpenseRoutes from "../modules/residents/expenses";
 
 // NEW: Guard Mobile APIs
 import guardRoutes from "../modules/guards/routes";
@@ -152,6 +153,7 @@ router.use("/residents", residentComplaintRoutes); // Complaints
 router.use("/residents", residentAmenityRoutes); // Amenity bookings
 router.use("/residents", residentVehicleRoutes); // Vehicles
 router.use("/residents", residentStaffRoutes); // Domestic staff
+router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
 
 // Guard Mobile APIs
 router.use("/guards", guardRoutes); // Dashboard, shift, SOS

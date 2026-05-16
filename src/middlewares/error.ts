@@ -20,7 +20,11 @@ export function errorHandler(
 
   if (err instanceof multer.MulterError) {
     if (err.code === "LIMIT_FILE_SIZE") {
-      res.status(400).json({ message: "Image must be 5 MB or smaller" });
+      res.status(400).json({ message: "File exceeds the size limit" });
+      return;
+    }
+    if (err.code === "LIMIT_FILE_COUNT") {
+      res.status(400).json({ message: "Too many files. Maximum 5 per upload." });
       return;
     }
     res.status(400).json({ message: err.message });
@@ -29,6 +33,11 @@ export function errorHandler(
 
   if (err instanceof Error && err.message === "INVALID_IMAGE_TYPE") {
     res.status(400).json({ message: "Please upload a JPEG, PNG, GIF, or WebP image" });
+    return;
+  }
+
+  if (err instanceof Error && err.message === "INVALID_ATTACHMENT_TYPE") {
+    res.status(400).json({ message: "Please upload a JPEG, PNG, GIF, WebP, or PDF file" });
     return;
   }
 
