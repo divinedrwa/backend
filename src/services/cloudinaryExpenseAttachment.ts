@@ -70,6 +70,7 @@ export async function uploadExpenseAttachmentBuffer(
         folder: `divine-app/expenses/${safeSociety}`,
         public_id: safeId,
         resource_type: resourceType,
+        access_mode: "public",
         overwrite: false,
       },
       (err, result) => {
