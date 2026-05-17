@@ -212,7 +212,8 @@ router.post(
           const uploaded = await uploadExpenseAttachmentBuffer(
             file.buffer,
             societyId,
-            suffix
+            suffix,
+            file.mimetype
           );
           results.push({
             fileName: file.originalname,
