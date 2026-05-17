@@ -313,14 +313,13 @@ export async function computeSocietyMoneySnapshot(
   for (const e of expenses) {
     const v = Number(e.amount);
     expensesAllTime += v;
-    // Prefer paymentDate (calendar) for fund flow; fall back to month/year
-    // attribution if paymentDate is missing.
-    const date = e.paymentDate ?? null;
-    if (date) {
-      const k = ymKeyFromDate(date);
-      expensesByMonth.set(k, (expensesByMonth.get(k) ?? 0) + v);
-    } else if (e.month && e.year) {
+    // Prefer explicit month/year attribution (admin's intent); fall back to
+    // paymentDate calendar month when month/year are not set.
+    if (e.month && e.year) {
       const k = ymKey(e.month, e.year);
+      expensesByMonth.set(k, (expensesByMonth.get(k) ?? 0) + v);
+    } else if (e.paymentDate) {
+      const k = ymKeyFromDate(e.paymentDate);
       expensesByMonth.set(k, (expensesByMonth.get(k) ?? 0) + v);
     }
   }
