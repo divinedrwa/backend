@@ -594,8 +594,17 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       },
     });
 
+    // Recalculate new month's summary
     if (expense.month && expense.year) {
       await updateMonthlySummary(expense.societyId, expense.month, expense.year);
+    }
+
+    // If month/year changed, also recalculate the OLD month's summary so stale
+    // totals don't linger (e.g. expense moved from Feb → Jan).
+    const oldMonth = existing.month;
+    const oldYear = existing.year;
+    if (oldMonth && oldYear && (oldMonth !== expense.month || oldYear !== expense.year)) {
+      await updateMonthlySummary(expense.societyId, oldMonth, oldYear);
     }
 
     res.json(expense);
