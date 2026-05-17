@@ -176,6 +176,10 @@ export async function buildCurrentCycleResponse(input: {
     cycle = await findDisplayCycle(input.societyId, nowUtc);
   }
   if (!cycle) {
+    // Even without an active cycle, compute the user's rolling ledger so the
+    // app can show accumulated advance credit.
+    const ledger = await computeUserBillingLedger(input.societyId, input.userId);
+    const availableCredit = Math.max(0, ledger.currentBalance);
     return {
       cycleId: null,
       title: null,
@@ -188,6 +192,7 @@ export async function buildCurrentCycleResponse(input: {
       lateFee: null,
       totalDue: null,
       effectiveLateFeeComponent: null,
+      availableCredit,
       pendingDues,
       maintenanceBillingRole: billingSubject?.maintenanceBillingRole ?? null,
       maintenanceBillingExcluded,
