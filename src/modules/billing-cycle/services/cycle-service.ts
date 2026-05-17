@@ -11,6 +11,7 @@ import { deriveCycleStatusUtc } from "../domain/cycleStatus";
 import { computeAmountDueForCycle } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
 import { notifySociety, notifyUser } from "../../../services/notification.service";
+import { getVillaCreditBalance } from "../../maintenance-management/credit-walker";
 
 export type BillingLedgerCycleRow = {
   cycleId: string;
@@ -123,7 +124,7 @@ export async function buildCurrentCycleResponse(input: {
   const nowUtc = input.nowUtc ?? new Date();
   const billingSubject = await prisma.user.findFirst({
     where: { id: input.userId, societyId: input.societyId },
-    select: { maintenanceBillingRole: true },
+    select: { maintenanceBillingRole: true, villaId: true },
   });
   const maintenanceBillingExcluded =
     billingSubject?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
@@ -176,10 +177,29 @@ export async function buildCurrentCycleResponse(input: {
     cycle = await findDisplayCycle(input.societyId, nowUtc);
   }
   if (!cycle) {
-    // Even without an active cycle, compute the user's rolling ledger so the
-    // app can show accumulated advance credit.
+    // Even without an active cycle, compute available credit from the
+    // credit-walker (admin-added credit) and the billing ledger (gateway
+    // overpayment). Use the larger of the two — they track different sources.
     const ledger = await computeUserBillingLedger(input.societyId, input.userId);
-    const availableCredit = Math.max(0, ledger.currentBalance);
+    const ledgerCredit = Math.max(0, ledger.currentBalance);
+
+    let walkerCredit = 0;
+    if (billingSubject?.villaId) {
+      const activeFY = await prisma.financialYear.findFirst({
+        where: { societyId: input.societyId, status: "ACTIVE" },
+        select: { id: true },
+      });
+      if (activeFY) {
+        const result = await getVillaCreditBalance(prisma, {
+          societyId: input.societyId,
+          villaId: billingSubject.villaId,
+          financialYearId: activeFY.id,
+        });
+        walkerCredit = result.creditPool;
+      }
+    }
+    const availableCredit = Math.max(ledgerCredit, walkerCredit);
+
     return {
       cycleId: null,
       title: null,
@@ -233,10 +253,23 @@ export async function buildCurrentCycleResponse(input: {
       paymentStatus: payment?.paymentStatus ?? "NONE",
       paidAt: payment?.paidAt?.toISOString() ?? null,
     } as BillingLedgerCycleRow);
-  const availableCredit = Math.max(0, currentLedger.balanceBefore);
+  const ledgerCredit = Math.max(0, currentLedger.balanceBefore);
   const previousDue = Math.max(0, -currentLedger.balanceBefore);
   const remainingDue = Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount);
   const isPaid = remainingDue <= 0.005;
+
+  // Also fetch admin-added credit from the credit-walker so it's visible to
+  // the resident even when the billing ledger doesn't capture it.
+  let walkerCredit = 0;
+  if (billingSubject?.villaId && cycle.financialYearId) {
+    const result = await getVillaCreditBalance(prisma, {
+      societyId: input.societyId,
+      villaId: billingSubject.villaId,
+      financialYearId: cycle.financialYearId,
+    });
+    walkerCredit = result.creditPool;
+  }
+  const availableCredit = Math.max(ledgerCredit, walkerCredit);
 
   const serverStatus = deriveCycleStatusUtc(nowUtc, cycle.paymentStartDate, cycle.paymentEndDate);
 
@@ -254,7 +287,7 @@ export async function buildCurrentCycleResponse(input: {
     effectiveLateFeeComponent: maintenanceBillingExcluded ? 0 : due.lateFeeAmount,
     cycleKey: cycle.cycleKey,
     expectedAmount: currentLedger.expectedAmount,
-      cashPaidAmount: currentLedger.cashPaidAmount,
+    cashPaidAmount: currentLedger.cashPaidAmount,
     paidAmount: currentLedger.paidAmount,
     deltaAmount: currentLedger.deltaAmount,
     availableCredit,
