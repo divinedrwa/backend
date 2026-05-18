@@ -207,7 +207,11 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
 
     const mergedAllTimeInflow = money.additionalFundsAllTime;
     const mergedMonthInflow = money.additionalFundsForMonth(month, year);
-    const allTimeCollected = money.maintenanceCashAllTime + mergedAllTimeInflow;
+    // Collection excludes advance credit (overpayments belong to individual
+    // residents, not to the society's collection pool).  Advance credit only
+    // surfaces in the "Balance in Bank" breakdown on the app.
+    const allTimeCollected =
+      money.maintenanceCashAllTime + mergedAllTimeInflow - money.totalAdvanceCredit;
     const allTimeSpent = money.expensesAllTime;
     const currentBalance = money.currentFundBalance;
     const monthCashReceived = money.maintenanceCashForMonth(month, year);
