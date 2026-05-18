@@ -677,7 +677,6 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
             villa: { select: { villaNumber: true, ownerName: true } },
             cycle: { select: { periodMonth: true, periodYear: true, dueDate: true } },
           },
-          take: 100,
         }),
         prisma.monthlyExpenseSummary.findUnique({
           where: {
@@ -872,11 +871,15 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
     }
     for (const [monthNo, snaps] of snapshotsByMonth) {
       if (monthNo < 1 || monthNo > 12 || snaps.length === 0) continue;
+      // Exclude WAIVED — society chose not to collect; they shouldn't inflate
+      // expected or count as unpaid.  Matches computeSocietyMoneySnapshot().
+      const active = snaps.filter((s) => s.status !== "WAIVED");
+      if (active.length === 0) continue;
       const entry = yearlyBreakdown[monthNo - 1];
-      entry.totalExpected = snaps.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
-      entry.totalCollected = snaps.reduce((sum, s) => sum + Number(s.paidAmount), 0);
-      entry.paidCount = snaps.filter((s) => s.status === "PAID").length;
-      entry.unpaidCount = Math.max(0, snaps.length - entry.paidCount);
+      entry.totalExpected = active.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
+      entry.totalCollected = active.reduce((sum, s) => sum + Number(s.paidAmount), 0);
+      entry.paidCount = active.filter((s) => s.status === "PAID").length;
+      entry.unpaidCount = Math.max(0, active.length - entry.paidCount);
     }
 
     // Phase 2: Fallback — enrich with BillingCycle data for months that have

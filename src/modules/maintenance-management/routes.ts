@@ -1001,15 +1001,17 @@ router.get("/year-report/:year", async (req, res, next) => {
     const collectedFromSnapshots = new Map<number, number>();
     const paidCountFromSnapshots = new Map<number, number>();
     for (const c of snapshotCycleTotals) {
-      const snapExpected = c.snapshots.reduce(
+      // Exclude WAIVED — matches computeSocietyMoneySnapshot() behavior.
+      const active = c.snapshots.filter((s) => s.status !== "WAIVED");
+      const snapExpected = active.reduce(
         (sum, s) => sum + Number(s.expectedAmount),
         0
       );
-      const snapCollected = c.snapshots.reduce(
+      const snapCollected = active.reduce(
         (sum, s) => sum + Number(s.paidAmount),
         0
       );
-      const snapPaidCount = c.snapshots.filter((s) => s.status === "PAID").length;
+      const snapPaidCount = active.filter((s) => s.status === "PAID").length;
       if (snapExpected > 0 || snapCollected > 0) {
         expectedFromSnapshots.set(
           c.periodMonth,
