@@ -3,7 +3,8 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole, ParcelStatus } from "@prisma/client";
+import { NotificationCategory, UserRole, ParcelStatus } from "@prisma/client";
+import { notifyUsers } from "../../services/notification.service";
 import { resolveGuardLogRange } from "./guardLogRange";
 
 const router = Router();
@@ -53,6 +54,29 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
         },
       },
     });
+
+    // Notify villa residents about new parcel
+    void (async () => {
+      try {
+        const residents = await prisma.user.findMany({
+          where: { villaId, societyId, role: UserRole.RESIDENT, isActive: true },
+          select: { id: true },
+        });
+        if (residents.length > 0) {
+          await notifyUsers(
+            residents.map((r) => r.id),
+            {
+              title: "New parcel received",
+              body: `A parcel has been received for villa ${villa.villaNumber}.${description ? ` (${description})` : ""}`,
+              data: { type: "PARCEL_RECEIVED", parcelId: parcel.id, villaId },
+            },
+            { category: NotificationCategory.SYSTEM },
+          );
+        }
+      } catch {
+        // Fire-and-forget — don't fail the main request
+      }
+    })();
 
     return res.status(201).json({
       message: "Parcel logged successfully",

@@ -1,9 +1,10 @@
-import { ParcelStatus, UserRole } from "@prisma/client";
+import { NotificationCategory, ParcelStatus, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { notifyUsers } from "../../services/notification.service";
 
 const router = Router();
 
@@ -20,21 +21,27 @@ router.use(requireAuth);
 
 router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
-    const parcels = await prisma.parcel.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
-            ownerName: true
+    const societyId = req.auth!.societyId;
+    const [parcels, pendingCount] = await Promise.all([
+      prisma.parcel.findMany({
+        where: { societyId },
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              block: true,
+              ownerName: true
+            }
           }
-        }
-      },
-      orderBy: { receivedAt: "desc" },
-      take: 100
-    });
-    return res.json({ parcels });
+        },
+        orderBy: { receivedAt: "desc" },
+        take: 100
+      }),
+      prisma.parcel.count({
+        where: { societyId, status: { notIn: ["DELIVERED", "COLLECTED"] } },
+      }),
+    ]);
+    return res.json({ parcels, pendingCount });
   } catch (error) {
     next(error);
   }
@@ -75,7 +82,62 @@ router.post(
           }
         }
       });
+      // Notify villa residents about new parcel
+      void (async () => {
+        try {
+          const residents = await prisma.user.findMany({
+            where: { villaId: body.villaId, societyId: req.auth!.societyId, role: UserRole.RESIDENT, isActive: true },
+            select: { id: true },
+          });
+          if (residents.length > 0) {
+            await notifyUsers(
+              residents.map((r) => r.id),
+              {
+                title: "New parcel received",
+                body: `A parcel has been received for villa ${villa.villaNumber}.${body.description ? ` (${body.description})` : ""}`,
+                data: { type: "PARCEL_RECEIVED", parcelId: parcel.id, villaId: body.villaId },
+              },
+              { category: NotificationCategory.SYSTEM },
+            );
+          }
+        } catch {
+          // Fire-and-forget
+        }
+      })();
+
       return res.status(201).json({ parcel });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+const updateParcelSchema = z.object({
+  description: z.string().min(3).max(200),
+});
+
+router.put(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  validateBody(updateParcelSchema),
+  async (req, res, next) => {
+    try {
+      const { description } = req.body as z.infer<typeof updateParcelSchema>;
+      const { id } = req.params;
+
+      const parcel = await prisma.parcel.updateMany({
+        where: {
+          id,
+          societyId: req.auth!.societyId,
+        },
+        data: { description },
+      });
+
+      if (parcel.count === 0) {
+        return res.status(404).json({ message: "Parcel not found" });
+      }
+
+      return res.json({ message: "Parcel updated" });
     } catch (error) {
       next(error);
     }

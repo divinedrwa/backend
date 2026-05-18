@@ -754,7 +754,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { month, year, financialYearId } = req.query;
 
-    const where: Prisma.ExpenseWhereInput = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED' };
     if (financialYearId) {
       where.financialYearId = financialYearId as string;
     }
@@ -868,13 +868,13 @@ router.get('/analytics/top-categories', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { year, financialYearId, limit = 10 } = req.query;
 
-    const where: Prisma.ExpenseWhereInput = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED' };
     if (financialYearId) {
       where.financialYearId = financialYearId as string;
     } else if (year) {
       where.year = parseInt(year as string);
     }
-    
+
     const expenses = await prisma.expense.groupBy({
       by: ['categoryId'],
       where,

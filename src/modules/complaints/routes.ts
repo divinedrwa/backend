@@ -25,7 +25,7 @@ router.get("/", async (req, res, next) => {
   try {
     const pagination = getPagination(req);
     const where = { societyId: req.auth!.societyId };
-    const [complaints, total] = await Promise.all([
+    const [complaints, total, openCount] = await Promise.all([
       prisma.complaint.findMany({
         where,
         include: {
@@ -42,11 +42,13 @@ router.get("/", async (req, res, next) => {
         skip: pagination.skip,
       }),
       prisma.complaint.count({ where }),
+      prisma.complaint.count({ where: { ...where, status: { not: "CLOSED" } } }),
     ]);
     // Domain key kept for backwards compatibility with existing UI; new
     // pagination metadata lives alongside it.
     return res.json({
       complaints,
+      openCount,
       ...paginationMeta(total, complaints.length, pagination),
     });
   } catch (error) {

@@ -28,31 +28,39 @@ router.use(requireAuth);
 // List all visitors with their villa visits
 router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
-    const visitors = await prisma.visitor.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        villaVisits: {
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                block: true,
-                ownerName: true
+    const societyId = req.auth!.societyId;
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    const [visitors, todayCount] = await Promise.all([
+      prisma.visitor.findMany({
+        where: { societyId },
+        include: {
+          villaVisits: {
+            include: {
+              villa: {
+                select: {
+                  villaNumber: true,
+                  block: true,
+                  ownerName: true
+                }
               }
+            }
+          },
+          gate: {
+            select: {
+              name: true,
+              location: true
             }
           }
         },
-        gate: {
-          select: {
-            name: true,
-            location: true
-          }
-        }
-      },
-      orderBy: { checkInAt: "desc" },
-      take: 100
-    });
-    return res.json({ visitors });
+        orderBy: { checkInAt: "desc" },
+        take: 100
+      }),
+      prisma.visitor.count({
+        where: { societyId, checkInAt: { gte: todayStart } },
+      }),
+    ]);
+    return res.json({ visitors, todayCount });
   } catch (error) {
     next(error);
   }

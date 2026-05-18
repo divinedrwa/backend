@@ -501,6 +501,52 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
   }
 });
 
+const createFinancialYearSchema = z.object({
+  label: z.string().min(2).max(80),
+  startDate: z.string().datetime(),
+  endDate: z.string().datetime(),
+});
+
+router.post(
+  "/admin/financial-years",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  validateBody(createFinancialYearSchema),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const body = req.body as z.infer<typeof createFinancialYearSchema>;
+      const startDate = new Date(body.startDate);
+      const endDate = new Date(body.endDate);
+      if (startDate >= endDate) {
+        res.status(400).json({ message: "startDate must be before endDate" });
+        return;
+      }
+      const fy = await prisma.financialYear.create({
+        data: {
+          societyId: auth.societyId,
+          label: body.label,
+          startDate,
+          endDate,
+        },
+      });
+
+      await writeAdminAuditLog({
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "financial_year.create",
+        entityType: "FinancialYear",
+        entityId: fy.id,
+        metadata: { label: body.label, startDate: body.startDate, endDate: body.endDate },
+      });
+
+      res.status(201).json({ financialYear: fy });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
 router.get("/admin/financial-years", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const auth = req.auth!;

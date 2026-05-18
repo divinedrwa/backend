@@ -3,6 +3,7 @@ import {
   BillingPaymentSource,
   BillingUserPaymentStatus,
   MaintenanceBillingRole,
+  NotificationCategory,
   Prisma,
   UserRole,
 } from "@prisma/client";
@@ -472,6 +473,30 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         return { payment: paymentRow, maintenance: maintenanceRow };
       }, { timeout: 15000 });
 
+      // Notify villa residents about payment recorded
+      void (async () => {
+        try {
+          const residents = await prisma.user.findMany({
+            where: { villaId: body.villaId, societyId, role: UserRole.RESIDENT, isActive: true },
+            select: { id: true },
+          });
+          if (residents.length > 0) {
+            const monthName = new Date(body.year, body.month - 1).toLocaleString("en-US", { month: "long" });
+            await notifyUsers(
+              residents.map((r) => r.id),
+              {
+                title: "Maintenance payment recorded",
+                body: `Your maintenance payment of \u20B9${body.amount} for ${monthName} ${body.year} has been recorded.`,
+                data: { type: "MAINTENANCE_PAYMENT_RECORDED", villaId: body.villaId },
+              },
+              { category: NotificationCategory.SYSTEM },
+            );
+          }
+        } catch {
+          // Fire-and-forget
+        }
+      })();
+
       return res.status(201).json({
         message: "Payment marked successfully",
         payment,
@@ -578,6 +603,30 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
             },
           },
         });
+
+    // Notify villa residents about payment recorded (legacy path)
+    void (async () => {
+      try {
+        const residents = await prisma.user.findMany({
+          where: { villaId: body.villaId, societyId, role: UserRole.RESIDENT, isActive: true },
+          select: { id: true },
+        });
+        if (residents.length > 0) {
+          const monthName = new Date(body.year, body.month - 1).toLocaleString("en-US", { month: "long" });
+          await notifyUsers(
+            residents.map((r) => r.id),
+            {
+              title: "Maintenance payment recorded",
+              body: `Your maintenance payment of \u20B9${body.amount} for ${monthName} ${body.year} has been recorded.`,
+              data: { type: "MAINTENANCE_PAYMENT_RECORDED", villaId: body.villaId },
+            },
+            { category: NotificationCategory.SYSTEM },
+          );
+        }
+      } catch {
+        // Fire-and-forget
+      }
+    })();
 
     return res.status(201).json({
       message: "Payment marked successfully",
