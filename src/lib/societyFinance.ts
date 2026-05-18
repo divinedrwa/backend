@@ -328,8 +328,10 @@ export async function computeSocietyMoneySnapshot(
   }
 
   // Total expected maintenance across every (villa, cycle) snapshot.
+  // Excludes WAIVED cycles — the society chose not to collect those.
   let expectedAllTime = 0;
   for (const s of snapshots) {
+    if (s.status === "WAIVED") continue;
     expectedAllTime += Number(s.expectedAmount);
   }
 
