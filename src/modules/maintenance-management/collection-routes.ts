@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import {
   BillingPaymentSource,
   BillingUserPaymentStatus,
@@ -12,7 +13,7 @@ import {
 } from "../../lib/maintenanceBillingRole";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
-import { getVillaCreditBalancesBulk } from "./credit-walker";
+import { applyVillaCreditAcrossSnapshots, getVillaCreditBalancesBulk } from "./credit-walker";
 import { refreshSnapshotStatus } from "./snapshot-helpers";
 
 const router = Router();
@@ -649,6 +650,64 @@ router.put(
           newPaid: p1,
           snapStatus,
         });
+
+        // ── Sync MaintenancePayment records so the credit walker stays consistent ──
+        // When the admin changes paidAmount via the grid, we must make the MP
+        // ledger match — otherwise the credit walker will re-derive paidAmount
+        // from stale MP records and override the admin's edit.
+        if (body.paidAmount !== undefined && Math.abs(p1 - p0) > 0.005) {
+          const existingMPs = await tx.maintenancePayment.findMany({
+            where: {
+              societyId,
+              villaId: body.villaId,
+              maintenanceCollectionCycleId: cycleId,
+            },
+            select: { id: true, amount: true },
+          });
+          const existingTotal = existingMPs.reduce(
+            (sum, mp) => sum + Number(mp.amount),
+            0,
+          );
+
+          if (Math.abs(p1 - existingTotal) > 0.005) {
+            // Delete all existing MP records for this (villa, cycle) and
+            // replace with a single record at the admin's intended amount.
+            if (existingMPs.length > 0) {
+              await tx.maintenancePayment.deleteMany({
+                where: {
+                  id: { in: existingMPs.map((mp) => mp.id) },
+                },
+              });
+            }
+            if (p1 > 0.005) {
+              const maintenanceRow = await tx.maintenance.findFirst({
+                where: {
+                  villaId: body.villaId,
+                  month: cycle.periodMonth,
+                  year: cycle.periodYear,
+                  societyId,
+                },
+                select: { id: true },
+              });
+              await tx.maintenancePayment.create({
+                data: {
+                  societyId,
+                  villaId: body.villaId,
+                  maintenanceId: maintenanceRow?.id ?? null,
+                  month: cycle.periodMonth,
+                  year: cycle.periodYear,
+                  amount: new Prisma.Decimal(p1),
+                  paymentDate: new Date(),
+                  paymentMode: "CASH",
+                  receiptNumber: `ADJ-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+                  remarks: `Admin grid edit: collected adjusted from ${p0} to ${p1}`,
+                  maintenanceCollectionCycleId: cycleId,
+                  villaMaintenanceSnapshotId: snapshot.id,
+                },
+              });
+            }
+          }
+        }
       });
 
       return res.json({
@@ -816,6 +875,30 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
       });
       if (rows.length > 0) {
         await prisma.villaMaintenanceSnapshot.createMany({ data: rows });
+      }
+
+      // Reconcile snapshots with any payments that were already recorded
+      // against this cycle (e.g. retroactive mark-paid via billing before
+      // the maintenance collection cycle existed). Without this, snapshots
+      // stay at paidAmount=0 even though cash was received.
+      const linkedPayments = await prisma.maintenancePayment.groupBy({
+        by: ["villaId"],
+        where: { maintenanceCollectionCycleId: maintenanceCycle.id },
+        _sum: { amount: true },
+      });
+      const villasWithCash = linkedPayments
+        .filter((p) => Number(p._sum.amount || 0) > 0.005)
+        .map((p) => p.villaId);
+      if (villasWithCash.length > 0) {
+        await prisma.$transaction(async (tx) => {
+          for (const villaId of villasWithCash) {
+            await applyVillaCreditAcrossSnapshots(tx, {
+              societyId,
+              villaId,
+              financialYearId: maintenanceCycle.financialYearId,
+            });
+          }
+        });
       }
     }
 
