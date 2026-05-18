@@ -59,6 +59,9 @@ export type SocietyMoneySnapshot = {
 
   /** Total advance credit pool sitting on residents' ledgers (sum of villa overpayments). */
   totalAdvanceCredit: number;
+
+  /** Sum of all expectedAmount across every (villa, cycle) snapshot — the total the society should have collected by now. */
+  expectedAllTime: number;
 };
 
 type CashRow = {
@@ -324,6 +327,12 @@ export async function computeSocietyMoneySnapshot(
     }
   }
 
+  // Total expected maintenance across every (villa, cycle) snapshot.
+  let expectedAllTime = 0;
+  for (const s of snapshots) {
+    expectedAllTime += Number(s.expectedAmount);
+  }
+
   const currentFundBalance =
     maintenanceCashAllTime + additionalFundsAllTime - expensesAllTime;
 
@@ -349,5 +358,6 @@ export async function computeSocietyMoneySnapshot(
       return cycleProgressByCycle.get(id) ?? 0;
     },
     totalAdvanceCredit,
+    expectedAllTime,
   };
 }

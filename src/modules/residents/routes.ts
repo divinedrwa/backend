@@ -242,6 +242,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
         additionalMergedInflowMonth: mergedMonthInflow,
         additionalMergedInflowAllTime: mergedAllTimeInflow,
         totalAdvanceCredit: money.totalAdvanceCredit,
+        expectedAllTime: money.expectedAllTime,
       },
       timestamp: new Date(),
     });
