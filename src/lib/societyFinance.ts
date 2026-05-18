@@ -62,6 +62,14 @@ export type SocietyMoneySnapshot = {
 
   /** Sum of all expectedAmount across every (villa, cycle) snapshot — the total the society should have collected by now. */
   expectedAllTime: number;
+
+  /**
+   * Gross outstanding dues: sum of max(0, expected − paid) per (villa, cycle).
+   * Unlike `expectedAllTime − maintenanceCashAllTime`, this does NOT net
+   * overpayments (advance credit) against other villas' shortfalls — Villa A's
+   * overpayment belongs to Villa A, not to the society's pending pool.
+   */
+  outstandingDues: number;
 };
 
 type CashRow = {
@@ -330,9 +338,13 @@ export async function computeSocietyMoneySnapshot(
   // Total expected maintenance across every (villa, cycle) snapshot.
   // Excludes WAIVED cycles — the society chose not to collect those.
   let expectedAllTime = 0;
+  let outstandingDues = 0;
   for (const s of snapshots) {
     if (s.status === "WAIVED") continue;
-    expectedAllTime += Number(s.expectedAmount);
+    const expected = Number(s.expectedAmount);
+    expectedAllTime += expected;
+    const paid = Number(s.paidAmount);
+    if (expected > paid) outstandingDues += expected - paid;
   }
 
   const currentFundBalance =
@@ -361,5 +373,6 @@ export async function computeSocietyMoneySnapshot(
     },
     totalAdvanceCredit,
     expectedAllTime,
+    outstandingDues,
   };
 }

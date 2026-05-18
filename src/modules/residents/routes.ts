@@ -215,14 +215,17 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
     const monthSpent = money.expensesForMonth(month, year);
     const monthNet = monthCollected - monthSpent;
 
-    // Pending dues: maintenance expected but not yet collected.
-    const pendingDues = Math.max(0, money.expectedAllTime - money.maintenanceCashAllTime);
+    // Pending dues: gross outstanding per (villa, cycle) — NOT netted against
+    // overpayments.  Villa A's advance credit belongs to Villa A, it doesn't
+    // reduce what Villa B still owes.
+    const pendingDues = money.outstandingDues;
     // Projected balance: what the fund would be if every pending due is paid.
     const projectedBalance = currentBalance + pendingDues;
-    // Collection rate (0–100).
+    // Collection rate (0–100) based on capped collected vs expected.
+    const collectedForRate = money.expectedAllTime - money.outstandingDues;
     const collectionRate =
       money.expectedAllTime > 0
-        ? Math.min(100, (money.maintenanceCashAllTime / money.expectedAllTime) * 100)
+        ? Math.min(100, (collectedForRate / money.expectedAllTime) * 100)
         : 0;
 
     return res.json({
