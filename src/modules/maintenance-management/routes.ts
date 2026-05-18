@@ -963,15 +963,14 @@ router.get("/year-report/:year", async (req, res, next) => {
           where: { societyId, year },
           select: { month: true, amount: true },
         }),
-        // Aggregate snapshot expectedAmount per collection cycle that falls in
-        // this calendar year.  This covers months that have snapshots but may
-        // not yet have Maintenance rows.
+        // Aggregate snapshot expected/paid per collection cycle that falls in
+        // this calendar year.  Snapshots are the canonical source of truth.
         prisma.maintenanceCollectionCycle.findMany({
           where: { societyId, periodYear: year },
           select: {
             periodMonth: true,
             snapshots: {
-              select: { expectedAmount: true },
+              select: { expectedAmount: true, paidAmount: true, status: true },
             },
           },
         }),
@@ -996,18 +995,33 @@ router.get("/year-report/:year", async (req, res, next) => {
       );
     }
 
-    // Build per-month expected totals from VillaMaintenanceSnapshot sums
-    // (covers months where snapshots exist but Maintenance rows may not).
+    // Build per-month expected + collected totals from VillaMaintenanceSnapshot
+    // (canonical source of truth — always preferred over old Maintenance table).
     const expectedFromSnapshots = new Map<number, number>();
+    const collectedFromSnapshots = new Map<number, number>();
+    const paidCountFromSnapshots = new Map<number, number>();
     for (const c of snapshotCycleTotals) {
-      const snapTotal = c.snapshots.reduce(
+      const snapExpected = c.snapshots.reduce(
         (sum, s) => sum + Number(s.expectedAmount),
         0
       );
-      if (snapTotal > 0) {
+      const snapCollected = c.snapshots.reduce(
+        (sum, s) => sum + Number(s.paidAmount),
+        0
+      );
+      const snapPaidCount = c.snapshots.filter((s) => s.status === "PAID").length;
+      if (snapExpected > 0 || snapCollected > 0) {
         expectedFromSnapshots.set(
           c.periodMonth,
-          (expectedFromSnapshots.get(c.periodMonth) ?? 0) + snapTotal
+          (expectedFromSnapshots.get(c.periodMonth) ?? 0) + snapExpected
+        );
+        collectedFromSnapshots.set(
+          c.periodMonth,
+          (collectedFromSnapshots.get(c.periodMonth) ?? 0) + snapCollected
+        );
+        paidCountFromSnapshots.set(
+          c.periodMonth,
+          (paidCountFromSnapshots.get(c.periodMonth) ?? 0) + snapPaidCount
         );
       }
     }
@@ -1036,14 +1050,18 @@ router.get("/year-report/:year", async (req, res, next) => {
     const monthlyData = [];
 
     for (let month = 1; month <= 12; month++) {
-      // Prefer historical Maintenance records, then snapshot totals, then
-      // fall back to the current villa rates.
-      const totalAmount =
-        expectedFromMaintenance.get(month) ??
-        expectedFromSnapshots.get(month) ??
-        currentMonthlyTotal;
+      // Prefer snapshot totals (canonical), then historical Maintenance
+      // records, then fall back to the current villa rates.
+      const hasSnapshot = expectedFromSnapshots.has(month);
+      const totalAmount = hasSnapshot
+        ? expectedFromSnapshots.get(month)!
+        : (expectedFromMaintenance.get(month) ?? currentMonthlyTotal);
 
-      const collected = collectedByMonth.get(month) ?? 0;
+      // When snapshots exist, use snapshot paidAmount (reconciled) for
+      // collected; otherwise fall back to raw MaintenancePayment sums.
+      const collected = hasSnapshot
+        ? collectedFromSnapshots.get(month) ?? 0
+        : (collectedByMonth.get(month) ?? 0);
       const pending = Math.max(0, totalAmount - collected);
       const collectionRate =
         totalAmount > 0 ? Math.round((collected / totalAmount) * 100) : 0;
@@ -1054,7 +1072,9 @@ router.get("/year-report/:year", async (req, res, next) => {
         collected,
         pending,
         collectionRate,
-        paymentCount: paymentCountByMonth.get(month) ?? 0,
+        paymentCount: hasSnapshot
+          ? (paidCountFromSnapshots.get(month) ?? 0)
+          : (paymentCountByMonth.get(month) ?? 0),
       });
     }
 
@@ -1399,7 +1419,21 @@ router.get("/financial-dashboard", async (req, res, next) => {
     if (!societyId) {
       return res.status(403).json({ message: "Tenant context required" });
     }
-    const collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+    let collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+
+    // Auto-detect MaintenanceCollectionCycle for the given month/year so the
+    // snapshot-based path is used whenever a cycle exists — even when the
+    // client doesn't pass an explicit cycleId.  This guarantees the admin
+    // month-view uses the same canonical VillaMaintenanceSnapshot data as the
+    // cycle-view.
+    if (!collectionCycleId) {
+      const { month: qMonth, year: qYear } = parseMonthYear(req.query);
+      const autoMatched = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { societyId, periodMonth: qMonth, periodYear: qYear },
+        select: { id: true },
+      });
+      if (autoMatched) collectionCycleId = autoMatched.id;
+    }
 
     if (collectionCycleId) {
       const core = await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
@@ -1410,10 +1444,22 @@ router.get("/financial-dashboard", async (req, res, next) => {
       const year = core.year;
 
       const [globalPending, expenses, recentAdditionalFunds, money] = await Promise.all([
-        prisma.maintenance.findMany({
-          where: { societyId, status: { in: ["PENDING", "OVERDUE"] } },
-          include: { villa: { select: { villaNumber: true, ownerName: true } } },
-          orderBy: { dueDate: "asc" },
+        // Canonical pending dues from VillaMaintenanceSnapshot (not the old
+        // Maintenance table which can be stale).
+        prisma.villaMaintenanceSnapshot.findMany({
+          where: {
+            cycle: { societyId },
+            status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+          },
+          select: {
+            id: true,
+            villaId: true,
+            expectedAmount: true,
+            paidAmount: true,
+            status: true,
+            villa: { select: { villaNumber: true, ownerName: true } },
+            cycle: { select: { periodMonth: true, periodYear: true, dueDate: true } },
+          },
           take: 250,
         }),
         prisma.expense.findMany({
@@ -1424,7 +1470,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
           },
         }),
         prisma.additionalFund.findMany({
-          where: { societyId },
+          where: { societyId, destination: "MERGE_WITH_MAINTENANCE" },
           orderBy: { receivedDate: "desc" },
           take: 25,
         }),
@@ -1516,16 +1562,16 @@ router.get("/financial-dashboard", async (req, res, next) => {
           notes: f.notes,
           receivedDate: f.receivedDate,
         })),
-        globalPendingDues: globalPending.map((g) => ({
-          id: g.id,
-          villaId: g.villaId,
-          villaNumber: g.villa?.villaNumber ?? null,
-          ownerName: g.villa?.ownerName ?? null,
-          month: g.month,
-          year: g.year,
-          amount: Number(g.amount),
-          dueDate: g.dueDate,
-          status: g.status,
+        globalPendingDues: globalPending.map((s) => ({
+          id: s.id,
+          villaId: s.villaId,
+          villaNumber: s.villa?.villaNumber ?? null,
+          ownerName: s.villa?.ownerName ?? null,
+          month: s.cycle.periodMonth,
+          year: s.cycle.periodYear,
+          amount: Math.max(0, Number(s.expectedAmount) - Number(s.paidAmount)),
+          dueDate: s.cycle.dueDate,
+          status: s.status,
         })),
       });
     }
@@ -1572,21 +1618,32 @@ router.get("/financial-dashboard", async (req, res, next) => {
         include: { villa: { select: { villaNumber: true, ownerName: true } } },
         orderBy: { paymentDate: "desc" },
       }),
-      prisma.maintenance.findMany({
-        where: { societyId, status: { in: ["PENDING", "OVERDUE"] } },
-        include: { villa: { select: { villaNumber: true, ownerName: true } } },
-        orderBy: { dueDate: "asc" },
+      // Canonical pending dues from VillaMaintenanceSnapshot.
+      prisma.villaMaintenanceSnapshot.findMany({
+        where: {
+          cycle: { societyId },
+          status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+        },
+        select: {
+          id: true,
+          villaId: true,
+          expectedAmount: true,
+          paidAmount: true,
+          status: true,
+          villa: { select: { villaNumber: true, ownerName: true } },
+          cycle: { select: { periodMonth: true, periodYear: true, dueDate: true } },
+        },
         take: 250,
       }),
       prisma.expense.findMany({
-        where: { societyId, month, year },
+        where: { societyId, month, year, status: "APPROVED" },
         select: {
           amount: true,
           category: { select: { name: true } },
         },
       }),
       prisma.additionalFund.findMany({
-        where: { societyId },
+        where: { societyId, destination: "MERGE_WITH_MAINTENANCE" },
         orderBy: { receivedDate: "desc" },
         take: 25,
       }),
@@ -1705,16 +1762,16 @@ router.get("/financial-dashboard", async (req, res, next) => {
         notes: f.notes,
         receivedDate: f.receivedDate,
       })),
-      globalPendingDues: globalPending.map((g) => ({
-        id: g.id,
-        villaId: g.villaId,
-        villaNumber: g.villa?.villaNumber ?? null,
-        ownerName: g.villa?.ownerName ?? null,
-        month: g.month,
-        year: g.year,
-        amount: Number(g.amount),
-        dueDate: g.dueDate,
-        status: g.status,
+      globalPendingDues: globalPending.map((s) => ({
+        id: s.id,
+        villaId: s.villaId,
+        villaNumber: s.villa?.villaNumber ?? null,
+        ownerName: s.villa?.ownerName ?? null,
+        month: s.cycle.periodMonth,
+        year: s.cycle.periodYear,
+        amount: Math.max(0, Number(s.expectedAmount) - Number(s.paidAmount)),
+        dueDate: s.cycle.dueDate,
+        status: s.status,
       })),
     });
   } catch (error) {
@@ -1780,21 +1837,50 @@ router.post("/send-dues-reminders", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { month, year } = parseMonthYear(req.body ?? {});
 
-    const pending = await prisma.maintenance.findMany({
-      where: {
-        societyId,
-        month,
-        year,
-        status: { in: ["PENDING", "OVERDUE"] },
-      },
-      include: { villa: { select: { villaNumber: true } } },
+    // Check for a MaintenanceCollectionCycle first — canonical source.
+    const reminderCycle = await prisma.maintenanceCollectionCycle.findFirst({
+      where: { societyId, periodMonth: month, periodYear: year },
+      select: { id: true },
     });
 
-    if (pending.length === 0) {
+    let pendingVillas: Array<{ villaId: string; amount: number; villaNumber: string }> = [];
+    if (reminderCycle) {
+      // Use VillaMaintenanceSnapshot (canonical).
+      const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
+        where: {
+          cycleId: reminderCycle.id,
+          status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+        },
+        select: {
+          villaId: true,
+          expectedAmount: true,
+          paidAmount: true,
+          villa: { select: { villaNumber: true } },
+        },
+      });
+      pendingVillas = snapshots.map((s) => ({
+        villaId: s.villaId,
+        amount: Math.max(0, Number(s.expectedAmount) - Number(s.paidAmount)),
+        villaNumber: s.villa.villaNumber,
+      }));
+    } else {
+      // Fallback to old Maintenance table for non-cycle months.
+      const pending = await prisma.maintenance.findMany({
+        where: { societyId, month, year, status: { in: ["PENDING", "OVERDUE"] } },
+        include: { villa: { select: { villaNumber: true } } },
+      });
+      pendingVillas = pending.map((p) => ({
+        villaId: p.villaId,
+        amount: Number(p.amount),
+        villaNumber: p.villa.villaNumber,
+      }));
+    }
+
+    if (pendingVillas.length === 0) {
       return res.json({ message: "No pending dues for selected period", sent: 0 });
     }
 
-    const villaIds = pending.map((p) => p.villaId);
+    const villaIds = pendingVillas.map((p) => p.villaId);
     const recipients = await prisma.user.findMany({
       where: {
         societyId,
@@ -1805,10 +1891,10 @@ router.post("/send-dues-reminders", async (req, res, next) => {
     });
 
     const amountByVilla = new Map(
-      pending.map((p) => [p.villaId, Number(p.amount)])
+      pendingVillas.map((p) => [p.villaId, p.amount])
     );
     const villaNumberByVilla = new Map(
-      pending.map((p) => [p.villaId, p.villa.villaNumber])
+      pendingVillas.map((p) => [p.villaId, p.villaNumber])
     );
 
     await prisma.userNotification.createMany({
@@ -2107,23 +2193,74 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
 
     const { month, year } = parseMonthYear(req.query);
 
-    const [villas, monthPayments, globalPending] = await Promise.all([
-      prisma.villa.findMany({
-        where: { societyId },
-        select: { id: true, monthlyMaintenance: true },
-      }),
-      prisma.maintenancePayment.findMany({
-        where: { societyId, month, year },
-      }),
-      prisma.maintenance.findMany({
-        where: { societyId, status: { in: ["PENDING", "OVERDUE"] } },
-        include: { villa: { select: { villaNumber: true, ownerName: true } } },
-        orderBy: { dueDate: "asc" },
-      }),
-    ]);
+    // Try snapshot-based data first (canonical).
+    const pdfCycle = await prisma.maintenanceCollectionCycle.findFirst({
+      where: { societyId, periodMonth: month, periodYear: year },
+      select: { id: true },
+    });
 
-    const expected = villas.reduce((sum, v) => sum + Number(v.monthlyMaintenance), 0);
-    const collected = monthPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+    let expected: number;
+    let collected: number;
+    let villaCount: number;
+    let pendingRows: Array<{ villaNumber: string; ownerName: string; amount: number; month: number; year: number }>;
+
+    if (pdfCycle) {
+      const [snapshots, allPending] = await Promise.all([
+        prisma.villaMaintenanceSnapshot.findMany({
+          where: { cycleId: pdfCycle.id },
+          select: { expectedAmount: true, paidAmount: true, status: true },
+        }),
+        prisma.villaMaintenanceSnapshot.findMany({
+          where: {
+            cycle: { societyId },
+            status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+          },
+          select: {
+            expectedAmount: true,
+            paidAmount: true,
+            villa: { select: { villaNumber: true, ownerName: true } },
+            cycle: { select: { periodMonth: true, periodYear: true } },
+          },
+        }),
+      ]);
+      villaCount = snapshots.length;
+      expected = snapshots.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
+      collected = snapshots.reduce((sum, s) => sum + Number(s.paidAmount), 0);
+      pendingRows = allPending.map((s) => ({
+        villaNumber: s.villa?.villaNumber ?? "-",
+        ownerName: s.villa?.ownerName ?? "-",
+        amount: Math.max(0, Number(s.expectedAmount) - Number(s.paidAmount)),
+        month: s.cycle.periodMonth,
+        year: s.cycle.periodYear,
+      }));
+    } else {
+      // Fallback to old tables for non-cycle months.
+      const [villas, monthPayments, globalPending] = await Promise.all([
+        prisma.villa.findMany({
+          where: { societyId },
+          select: { id: true, monthlyMaintenance: true },
+        }),
+        prisma.maintenancePayment.findMany({
+          where: { societyId, month, year },
+        }),
+        prisma.maintenance.findMany({
+          where: { societyId, status: { in: ["PENDING", "OVERDUE"] } },
+          include: { villa: { select: { villaNumber: true, ownerName: true } } },
+          orderBy: { dueDate: "asc" },
+        }),
+      ]);
+      villaCount = villas.length;
+      expected = villas.reduce((sum, v) => sum + Number(v.monthlyMaintenance), 0);
+      collected = monthPayments.reduce((sum, p) => sum + Number(p.amount), 0);
+      pendingRows = globalPending.map((g) => ({
+        villaNumber: g.villa?.villaNumber ?? "-",
+        ownerName: g.villa?.ownerName ?? "-",
+        amount: Number(g.amount),
+        month: g.month,
+        year: g.year,
+      }));
+    }
+
     const pending = Math.max(0, expected - collected);
     const rate = expected > 0 ? Math.round((collected / expected) * 100) : 0;
 
@@ -2132,19 +2269,13 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
       month,
       year,
       summaryRows: [
-        { label: "Total Villas", value: `${villas.length}` },
+        { label: "Total Villas", value: `${villaCount}` },
         { label: "Total Expected", value: `Rs. ${expected.toFixed(0)}` },
         { label: "Collected", value: `Rs. ${collected.toFixed(0)}` },
         { label: "Pending", value: `Rs. ${pending.toFixed(0)}` },
         { label: "Collection Rate", value: `${rate}%` },
       ],
-      pendingRows: globalPending.map((g) => ({
-        villaNumber: g.villa?.villaNumber ?? "-",
-        ownerName: g.villa?.ownerName ?? "-",
-        amount: Number(g.amount),
-        month: g.month,
-        year: g.year,
-      })),
+      pendingRows,
     });
 
     res.setHeader("Content-Type", "application/pdf");

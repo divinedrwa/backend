@@ -161,12 +161,16 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) 
     const maintenanceBillingExcluded =
       user?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
 
-    // Get pending maintenance count (billing contact only; others see 0)
+    // Get pending maintenance count from canonical VillaMaintenanceSnapshot
+    // (billing contact only; others see 0).
     const pendingMaintenance =
       maintenanceBillingExcluded || !villaId
         ? 0
-        : await prisma.maintenance.count({
-            where: { villaId, status: "PENDING" },
+        : await prisma.villaMaintenanceSnapshot.count({
+            where: {
+              villaId,
+              status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+            },
           });
 
     // Total complaints filed by this resident (all statuses). Same rows as GET /my-complaints without ?status=
