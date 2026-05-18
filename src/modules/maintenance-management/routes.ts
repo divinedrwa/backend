@@ -1417,7 +1417,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
           take: 250,
         }),
         prisma.expense.findMany({
-          where: { societyId, month, year },
+          where: { societyId, month, year, status: "APPROVED" },
           select: {
             amount: true,
             category: { select: { name: true } },

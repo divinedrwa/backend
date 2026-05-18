@@ -145,7 +145,7 @@ export async function computeSocietyMoneySnapshot(
       select: { amount: true, receivedDate: true, month: true, year: true },
     }),
     db.expense.findMany({
-      where: { societyId },
+      where: { societyId, status: "APPROVED" },
       select: { amount: true, paymentDate: true, month: true, year: true },
     }),
   ]);
