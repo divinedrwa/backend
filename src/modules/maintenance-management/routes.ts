@@ -1180,13 +1180,27 @@ const bulkMarkPaidSchema = z.object({
 
 router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res, next) => {
   try {
-    const { societyId } = req.auth!;
+    const { societyId, userId: adminId } = req.auth!;
     const { payments: paymentsData } = req.body as z.infer<typeof bulkMarkPaidSchema>;
 
     // Wrap all payment operations in a single transaction so either all
     // succeed or none are committed, preventing inconsistent partial states.
     const results = await prisma.$transaction(async (tx) => {
       const txResults = [];
+
+      // Pre-load all MaintenanceCollectionCycles for this society so we can
+      // link MP records to the correct cycle.
+      const allMCCs = await tx.maintenanceCollectionCycle.findMany({
+        where: { societyId },
+        select: { id: true, financialYearId: true, periodMonth: true, periodYear: true, periodKey: true, dueDate: true },
+      });
+      const mccByPeriod = new Map<string, (typeof allMCCs)[number]>();
+      for (const mcc of allMCCs) {
+        mccByPeriod.set(`${mcc.periodYear}-${mcc.periodMonth}`, mcc);
+      }
+
+      // Track (villaId, financialYearId) pairs that need credit walker reconciliation.
+      const walkerTargets = new Map<string, { villaId: string; financialYearId: string; throughCycleId: string }>();
 
       for (const paymentData of paymentsData) {
         // Find or create maintenance
@@ -1219,6 +1233,9 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
           });
         }
 
+        // Resolve the matching MaintenanceCollectionCycle for cycle-linked MP.
+        const mcc = mccByPeriod.get(`${paymentData.year}-${paymentData.month}`);
+
         const existingPayment = await tx.maintenancePayment.findFirst({
           where: {
             societyId,
@@ -1232,6 +1249,14 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
 
         const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
+        // Find snapshot to link MP to it.
+        const snapshot = mcc
+          ? await tx.villaMaintenanceSnapshot.findUnique({
+              where: { cycleId_villaId: { cycleId: mcc.id, villaId: paymentData.villaId } },
+              select: { id: true },
+            })
+          : null;
+
         const payment = existingPayment
           ? await tx.maintenancePayment.update({
               where: { id: existingPayment.id },
@@ -1242,6 +1267,8 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
                 paymentMode: paymentData.paymentMode,
                 transactionId: paymentData.transactionId,
                 bankAccountId: paymentData.bankAccountId,
+                maintenanceCollectionCycleId: mcc?.id ?? undefined,
+                villaMaintenanceSnapshotId: snapshot?.id ?? undefined,
               },
             })
           : await tx.maintenancePayment.create({
@@ -1257,14 +1284,103 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
                 transactionId: paymentData.transactionId,
                 receiptNumber,
                 bankAccountId: paymentData.bankAccountId,
+                maintenanceCollectionCycleId: mcc?.id ?? null,
+                villaMaintenanceSnapshotId: snapshot?.id ?? null,
               },
             });
+
+        // Queue credit walker for this villa's financial year.
+        if (mcc) {
+          const key = `${paymentData.villaId}:${mcc.financialYearId}`;
+          walkerTargets.set(key, {
+            villaId: paymentData.villaId,
+            financialYearId: mcc.financialYearId,
+            throughCycleId: mcc.id,
+          });
+        }
 
         txResults.push({ success: true as const, villaId: paymentData.villaId, payment });
       }
 
+      // Run credit walker for each affected (villa, FY) — reconciles snapshots
+      // and Maintenance status from the MP ledger.
+      for (const target of walkerTargets.values()) {
+        await applyVillaCreditAcrossSnapshots(tx, {
+          societyId,
+          villaId: target.villaId,
+          financialYearId: target.financialYearId,
+          throughCycleId: target.throughCycleId,
+        });
+      }
+
+      // Sync UserCyclePayment for each affected villa so resident billing
+      // screens reflect the new payment state.
+      const processedVillaCycles = new Set<string>();
+      for (const paymentData of paymentsData) {
+        const mcc = mccByPeriod.get(`${paymentData.year}-${paymentData.month}`);
+        if (!mcc) continue;
+        const vKey = `${paymentData.villaId}:${mcc.id}`;
+        if (processedVillaCycles.has(vKey)) continue;
+        processedVillaCycles.add(vKey);
+
+        const billingCycle = await tx.billingCycle.findFirst({
+          where: { societyId, financialYearId: mcc.financialYearId, cycleKey: mcc.periodKey },
+          select: { id: true },
+        });
+        if (!billingCycle) continue;
+
+        const reconciledSnap = await tx.villaMaintenanceSnapshot.findUnique({
+          where: { cycleId_villaId: { cycleId: mcc.id, villaId: paymentData.villaId } },
+          select: { paidAmount: true, status: true },
+        });
+        const snapStatus = reconciledSnap?.status ?? "PENDING";
+        const paidAmount = Number(reconciledSnap?.paidAmount ?? 0);
+
+        await clearExcludedResidentsUserCyclePayments(tx, {
+          societyId,
+          villaId: paymentData.villaId,
+          billingCycleId: billingCycle.id,
+        });
+
+        const primaryResidents = await tx.user.findMany({
+          where: {
+            societyId,
+            villaId: paymentData.villaId,
+            role: UserRole.RESIDENT,
+            isActive: true,
+            maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+          },
+          select: { id: true },
+        });
+        const payStatus =
+          snapStatus === "PAID" || snapStatus === "WAIVED"
+            ? BillingUserPaymentStatus.SUCCESS
+            : BillingUserPaymentStatus.PENDING;
+        for (const u of primaryResidents) {
+          await tx.userCyclePayment.upsert({
+            where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+            create: {
+              userId: u.id,
+              cycleId: billingCycle.id,
+              amountPaid: new Prisma.Decimal(paidAmount),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(paymentsData[0].paymentDate),
+            },
+            update: {
+              amountPaid: new Prisma.Decimal(paidAmount),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(paymentsData[0].paymentDate),
+            },
+          });
+        }
+      }
+
       return txResults;
-    }, { timeout: 15000 });
+    }, { timeout: 30000 });
 
     return res.status(201).json({
       message: `${results.length} of ${results.length} payments marked successfully`,

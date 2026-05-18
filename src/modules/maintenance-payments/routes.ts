@@ -1,12 +1,21 @@
 import { Router } from "express";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
+import {
+  BillingPaymentSource,
+  BillingUserPaymentStatus,
+  MaintenanceBillingRole,
+  PaymentMode,
+  Prisma,
+  UserRole,
+} from "@prisma/client";
+import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { PaymentMode, UserRole } from "@prisma/client";
+import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 
 const router = Router();
 
@@ -143,7 +152,21 @@ router.post(
         ? existingPayment.receiptNumber
         : `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
 
-      // 3. Create or update payment
+      // 3. Resolve matching MaintenanceCollectionCycle so the MP is linked
+      //    to the correct cycle (enables credit walker reconciliation).
+      const mcc = await tx.maintenanceCollectionCycle.findFirst({
+        where: { societyId, periodMonth: month, periodYear: year },
+        select: { id: true, financialYearId: true, periodKey: true, dueDate: true },
+      });
+
+      const snapshot = mcc
+        ? await tx.villaMaintenanceSnapshot.findUnique({
+            where: { cycleId_villaId: { cycleId: mcc.id, villaId } },
+            select: { id: true },
+          })
+        : null;
+
+      // 4. Create or update payment — linked to cycle when available.
       const payment = existingPayment
         ? await tx.maintenancePayment.update({
             where: { id: existingPayment.id },
@@ -155,6 +178,8 @@ router.post(
               transactionId,
               bankAccountId,
               remarks,
+              maintenanceCollectionCycleId: mcc?.id ?? undefined,
+              villaMaintenanceSnapshotId: snapshot?.id ?? undefined,
             },
             include: {
               villa: { select: { villaNumber: true, ownerName: true } },
@@ -176,6 +201,8 @@ router.post(
               bankAccountId,
               remarks,
               idempotencyKey, // Store idempotency key
+              maintenanceCollectionCycleId: mcc?.id ?? null,
+              villaMaintenanceSnapshotId: snapshot?.id ?? null,
             },
             include: {
               villa: { select: { villaNumber: true, ownerName: true } },
@@ -183,41 +210,72 @@ router.post(
             },
           });
 
-      // 4. Update snapshot if linked to a cycle
-      if (payment.maintenanceCollectionCycleId) {
-        const snapshot = await tx.villaMaintenanceSnapshot.findUnique({
-          where: {
-            cycleId_villaId: {
-              cycleId: payment.maintenanceCollectionCycleId,
-              villaId,
-            },
-          },
+      // 5. Run credit walker to reconcile snapshot from MP ledger.
+      //    This replaces the old direct-increment logic which could drift
+      //    from the canonical cash totals.
+      if (mcc) {
+        await applyVillaCreditAcrossSnapshots(tx, {
+          societyId,
+          villaId,
+          financialYearId: mcc.financialYearId,
+          throughCycleId: mcc.id,
         });
 
-        if (snapshot) {
-          // Use Decimal to avoid precision loss
-          const currentPaid = Number(snapshot.paidAmount);
-          const newPaidAmount = currentPaid + Number(amount);
-          const expectedAmount = Number(snapshot.expectedAmount);
-          
-          // Prevent negative balance
-          if (newPaidAmount < 0) {
-            throw new Error(`Cannot set negative balance: current=${currentPaid}, increment=${amount}`);
-          }
-
-          await tx.villaMaintenanceSnapshot.update({
-            where: {
-              cycleId_villaId: {
-                cycleId: payment.maintenanceCollectionCycleId,
-                villaId,
-              },
-            },
-            data: {
-              paidAmount: newPaidAmount,
-              status: newPaidAmount >= expectedAmount ? "PAID" : 
-                      newPaidAmount > 0 ? "PARTIAL" : "PENDING",
-            },
+        // 6. Sync UserCyclePayment so resident billing screens reflect
+        //    the new payment state.
+        const billingCycle = await tx.billingCycle.findFirst({
+          where: { societyId, financialYearId: mcc.financialYearId, cycleKey: mcc.periodKey },
+          select: { id: true },
+        });
+        if (billingCycle) {
+          await clearExcludedResidentsUserCyclePayments(tx, {
+            societyId,
+            villaId,
+            billingCycleId: billingCycle.id,
           });
+
+          const reconciledSnap = await tx.villaMaintenanceSnapshot.findUnique({
+            where: { cycleId_villaId: { cycleId: mcc.id, villaId } },
+            select: { paidAmount: true, status: true },
+          });
+          const snapStatus = reconciledSnap?.status ?? "PENDING";
+          const paidAmt = Number(reconciledSnap?.paidAmount ?? 0);
+
+          const primaryResidents = await tx.user.findMany({
+            where: {
+              societyId,
+              villaId,
+              role: UserRole.RESIDENT,
+              isActive: true,
+              maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+            },
+            select: { id: true },
+          });
+          const payStatus =
+            snapStatus === "PAID" || snapStatus === "WAIVED"
+              ? BillingUserPaymentStatus.SUCCESS
+              : BillingUserPaymentStatus.PENDING;
+          for (const u of primaryResidents) {
+            await tx.userCyclePayment.upsert({
+              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+              create: {
+                userId: u.id,
+                cycleId: billingCycle.id,
+                amountPaid: new Prisma.Decimal(paidAmt),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: userId,
+                paidAt: new Date(paymentDate),
+              },
+              update: {
+                amountPaid: new Prisma.Decimal(paidAmt),
+                paymentStatus: payStatus,
+                source: BillingPaymentSource.CASH_MANUAL,
+                manualMarkedByAdminId: userId,
+                paidAt: new Date(paymentDate),
+              },
+            });
+          }
         }
       }
 
