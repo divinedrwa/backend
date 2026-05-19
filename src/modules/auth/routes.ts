@@ -501,7 +501,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
     const candidates = await prisma.user.findMany({
       where: {
         societyId,
-        role: { in: [UserRole.RESIDENT, UserRole.GUARD] },
+        role: { in: [UserRole.RESIDENT, UserRole.GUARD, UserRole.ADMIN] },
         ...identifierWhere(identifier),
       },
       include: loginUserInclude,
