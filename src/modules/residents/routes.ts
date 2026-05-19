@@ -16,6 +16,7 @@ const updateProfileSchema = z.object({
   phone: z.string().optional(),
   email: z.string().email().optional(),
   notifyEmail: z.boolean().optional(),
+  notifyPush: z.boolean().optional(),
 });
 
 const router = Router();
@@ -30,6 +31,7 @@ const userMeResponseSelect = {
   role: true,
   residentType: true,
   notifyEmail: true,
+  notifyPush: true,
   villaId: true,
   moveInDate: true,
   moveOutDate: true,
@@ -289,6 +291,7 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
     let phone: string | undefined;
     let email: string | undefined;
     let notifyEmail: boolean | undefined;
+    let notifyPush: boolean | undefined;
 
     if (contentType.includes("multipart/form-data")) {
       const parsed = updateProfileSchema.safeParse({
@@ -303,6 +306,14 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
               : req.body.notifyEmail === "false"
                 ? false
                 : undefined,
+        notifyPush:
+          typeof req.body.notifyPush === "boolean"
+            ? req.body.notifyPush
+            : req.body.notifyPush === "true"
+              ? true
+              : req.body.notifyPush === "false"
+                ? false
+                : undefined,
       });
       if (!parsed.success) {
         return res.status(400).json({
@@ -310,13 +321,14 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
           issues: parsed.error.flatten(),
         });
       }
-      ({ name, phone, email, notifyEmail } = parsed.data);
+      ({ name, phone, email, notifyEmail, notifyPush } = parsed.data);
     } else {
       const b = req.body as z.infer<typeof updateProfileSchema>;
       name = b.name;
       phone = b.phone;
       email = b.email;
       notifyEmail = b.notifyEmail;
+      notifyPush = b.notifyPush;
     }
 
     let photoUrl: string | undefined;
@@ -344,7 +356,8 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
       (name !== undefined && name !== "") ||
       phone !== undefined ||
       (email !== undefined && email !== "") ||
-      notifyEmail !== undefined;
+      notifyEmail !== undefined ||
+      notifyPush !== undefined;
     if (!hasText && !photoUrl) {
       return res.status(400).json({ message: "Nothing to update" });
     }
@@ -356,6 +369,7 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
         ...(phone !== undefined && { phone }),
         ...(email !== undefined && email !== "" && { email }),
         ...(notifyEmail !== undefined && { notifyEmail }),
+        ...(notifyPush !== undefined && { notifyPush }),
         ...(photoUrl && { photoUrl }),
       },
       select: userMeResponseSelect,

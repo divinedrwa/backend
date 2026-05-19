@@ -82,44 +82,57 @@ export class NotificationService {
         hasImageUrl: Boolean(payload.imageUrl),
       }, "sendToUser target");
 
-      // Get all active devices for this user
-      const devices = await prisma.pushDevice.findMany({
-        where: {
-          userId,
-          isActive: true,
-        },
+      // Fetch user preferences up-front (also gives us societyId for the inbox row).
+      const user = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { societyId: true, notifyPush: true },
       });
 
-      if (devices.length === 0) {
-        logger.debug(
-          { userId },
-          "Skipping push for user because there are no active push devices",
-        );
-      } else {
-        logger.debug(
-          { userId, activeDeviceCount: devices.length },
-          "Found active push devices for user",
-        );
-        const tokens = devices.map((d) => d.token);
-        try {
-          await this.sendToTokens(tokens, payload);
-        } catch (fcmErr) {
-          logger.warn(
-            { err: fcmErr, userId },
-            "FCM failed for user; in-app notification will still be stored",
+      if (!user) {
+        logger.warn({ userId }, "sendToUser: user not found, skipping");
+        return;
+      }
+
+      const societyId = user.societyId || "";
+      let pushSent = false;
+
+      // Only attempt FCM when the user has push enabled globally.
+      if (user.notifyPush) {
+        const devices = await prisma.pushDevice.findMany({
+          where: {
+            userId,
+            isActive: true,
+          },
+        });
+
+        if (devices.length === 0) {
+          logger.debug(
+            { userId },
+            "Skipping push for user because there are no active push devices",
           );
+        } else {
+          logger.debug(
+            { userId, activeDeviceCount: devices.length },
+            "Found active push devices for user",
+          );
+          const tokens = devices.map((d) => d.token);
+          try {
+            await this.sendToTokens(tokens, payload);
+            pushSent = true;
+          } catch (fcmErr) {
+            logger.warn(
+              { err: fcmErr, userId },
+              "FCM failed for user; in-app notification will still be stored",
+            );
+          }
         }
+      } else {
+        logger.debug({ userId }, "Skipping push because user has notifyPush disabled");
       }
 
       if (options?.persistInApp === false) {
         return;
       }
-
-      const societyId =
-        (await prisma.user.findUnique({
-          where: { id: userId },
-          select: { societyId: true },
-        }))?.societyId || "";
 
       await prisma.userNotification.create({
         data: {
@@ -129,7 +142,7 @@ export class NotificationService {
           title: payload.title,
           body: payload.body,
           data: payload.data || {},
-          pushSent: devices.length > 0,
+          pushSent,
         },
       });
     } catch (error) {
@@ -521,10 +534,12 @@ export async function deliverNoticeNotificationsToResidents(params: {
 
   const jsonData = params.data ?? {};
 
+  // Only fetch devices for users who have push notifications enabled.
   const devices = await prisma.pushDevice.findMany({
     where: {
       userId: { in: userIds },
       isActive: true,
+      user: { notifyPush: true },
     },
     select: { userId: true, token: true },
   });

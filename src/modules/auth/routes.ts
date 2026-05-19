@@ -147,6 +147,7 @@ function serializeAuthUser(user: {
   photoUrl: string | null;
   residentType: ResidentType | null;
   notifyEmail: boolean;
+  notifyPush: boolean;
   moveInDate: Date | null;
   moveOutDate: Date | null;
   villa: { id: string; villaNumber: string | null; block: string | null } | null;
@@ -174,6 +175,7 @@ function serializeAuthUser(user: {
       photoUrl: user.photoUrl ?? null,
       residentType: user.residentType ?? null,
       notifyEmail: user.notifyEmail,
+      notifyPush: user.notifyPush,
       moveInDate: user.moveInDate?.toISOString() ?? null,
       moveOutDate: user.moveOutDate?.toISOString() ?? null,
       villa: user.villa

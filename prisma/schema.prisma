@@ -284,6 +284,9 @@ model User {
   phone        String?
   /// Society email alerts (billing, notices, etc.) — toggled in mobile settings.
   notifyEmail  Boolean      @default(false)
+  /// FCM push notifications — toggled in mobile settings. When false the notification
+  /// service skips FCM delivery for this user (in-app inbox rows are still created).
+  notifyPush   Boolean      @default(true)
   photoUrl     String?      // Public path e.g. /uploads/avatars/… (profile picture)
   moveInDate   DateTime?
   moveOutDate  DateTime?
