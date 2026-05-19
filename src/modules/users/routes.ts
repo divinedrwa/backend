@@ -15,6 +15,10 @@ import { findOrCreateShellVillaForResident } from "../../services/societyProvisi
 
 const router = Router();
 
+/** ADMIN users are also residents (they keep villa/unit/billing). */
+const isResidentLike = (role: UserRole) =>
+  role === UserRole.RESIDENT || role === UserRole.ADMIN;
+
 const createUserSchema = z
   .object({
     username: z.string().min(3).max(50),
@@ -34,7 +38,7 @@ const createUserSchema = z
   })
   .refine(
     (d) => {
-      if (d.role !== UserRole.RESIDENT) return true;
+      if (!isResidentLike(d.role)) return true;
       const hasVid = Boolean(d.villaId?.trim());
       const hasNum = Boolean(d.villaNumber?.trim());
       return hasVid || hasNum;
@@ -43,7 +47,7 @@ const createUserSchema = z
   )
   .refine(
     (d) => {
-      if (d.role !== UserRole.RESIDENT) return true;
+      if (!isResidentLike(d.role)) return true;
       const hasVid = Boolean(d.villaId?.trim());
       const hasNum = Boolean(d.villaNumber?.trim());
       return !(hasVid && hasNum);
@@ -51,12 +55,12 @@ const createUserSchema = z
     { message: "Provide either villaId or villaNumber, not both", path: ["villaNumber"] },
   )
   .refine(
-    (d) => d.role === UserRole.RESIDENT || d.maintenanceBillingRole === undefined,
+    (d) => isResidentLike(d.role) || d.maintenanceBillingRole === undefined,
     { message: "maintenanceBillingRole applies only to residents", path: ["maintenanceBillingRole"] },
   )
   .refine(
     (d) => {
-      if (d.role !== UserRole.RESIDENT) return true;
+      if (!isResidentLike(d.role)) return true;
       return Boolean(d.unitId?.trim());
     },
     {
@@ -73,6 +77,7 @@ const updateUserSchema = z.object({
     .preprocess((v) => (v === "" ? null : v), z.string().nullable().optional()),
   /** Admin password reset — omit or empty to leave unchanged */
   password: z.string().min(6).optional().or(z.literal("")),
+  role: z.nativeEnum(UserRole).optional(),
   villaId: z.string().optional().nullable(),
   unitId: z.string().optional().nullable(),
   residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
@@ -175,7 +180,7 @@ router.post(
       let resolvedVillaId: string | undefined =
         payload.villaId?.trim() || undefined;
 
-      if (payload.role === UserRole.RESIDENT) {
+      if (isResidentLike(payload.role)) {
         if (payload.villaId?.trim()) {
           const villa = await prisma.villa.findFirst({
             where: { id: payload.villaId, societyId },
@@ -198,7 +203,7 @@ router.post(
       }
 
       let resolvedDwelling: { villaId: string; unitId: string } | null = null;
-      if (payload.role === UserRole.RESIDENT && resolvedVillaId) {
+      if (isResidentLike(payload.role) && resolvedVillaId) {
         resolvedDwelling = await resolveResidentDwelling(prisma, {
           societyId,
           villaId: resolvedVillaId,
@@ -211,7 +216,7 @@ router.post(
       }
 
       let billingRole: MaintenanceBillingRole | undefined;
-      if (payload.role === UserRole.RESIDENT && resolvedVillaId) {
+      if (isResidentLike(payload.role) && resolvedVillaId) {
         billingRole =
           payload.maintenanceBillingRole ??
           (await defaultMaintenanceBillingRoleForNewResident({
@@ -247,20 +252,20 @@ router.post(
             passwordHash,
             role: payload.role,
             residentType:
-              payload.role === UserRole.RESIDENT && payload.residentType
+              isResidentLike(payload.role) && payload.residentType
                 ? payload.residentType
                 : "OWNER",
             villaId:
-              payload.role === UserRole.RESIDENT
+              isResidentLike(payload.role)
                 ? resolvedVillaId
                 : payload.villaId?.trim() || undefined,
             unitId:
-              payload.role === UserRole.RESIDENT && resolvedDwelling
+              isResidentLike(payload.role) && resolvedDwelling
                 ? resolvedDwelling.unitId
                 : undefined,
             moveInDate: payload.moveInDate ? new Date(payload.moveInDate) : new Date(),
             isActive: true,
-            ...(payload.role === UserRole.RESIDENT && resolvedVillaId && billingRole
+            ...(isResidentLike(payload.role) && resolvedVillaId && billingRole
               ? { maintenanceBillingRole: billingRole }
               : {}),
           },
@@ -268,7 +273,7 @@ router.post(
         });
 
         if (
-          created.role === UserRole.RESIDENT &&
+          isResidentLike(created.role) &&
           created.villaId &&
           billingRole === MaintenanceBillingRole.PRIMARY
         ) {
@@ -278,7 +283,7 @@ router.post(
             primaryUserId: created.id,
           });
         }
-        if (created.role === UserRole.RESIDENT && created.villaId) {
+        if (isResidentLike(created.role) && created.villaId) {
           await ensurePrimaryCoverageForVilla(tx, {
             societyId,
             villaId: created.villaId,
@@ -340,6 +345,7 @@ router.patch(
         moveOutDate,
         moveInDate,
         email,
+        role: bodyRole,
         maintenanceBillingRole,
         villaId: bodyVillaId,
         unitId: bodyUnitId,
@@ -362,7 +368,14 @@ router.patch(
         return res.status(404).json({ message: "User not found" });
       }
 
-      if (maintenanceBillingRole !== undefined && existing.role !== UserRole.RESIDENT) {
+      // Prevent admin from changing their own role
+      if (bodyRole !== undefined && id === req.auth!.userId) {
+        return res.status(400).json({ message: "You cannot change your own role" });
+      }
+
+      const effectiveRole = bodyRole ?? existing.role;
+
+      if (maintenanceBillingRole !== undefined && !isResidentLike(effectiveRole)) {
         return res.status(400).json({ message: "maintenanceBillingRole applies only to residents" });
       }
 
@@ -391,7 +404,7 @@ router.patch(
 
       if (
         nextBillingRole === MaintenanceBillingRole.EXCLUDED &&
-        existing.role === UserRole.RESIDENT &&
+        isResidentLike(effectiveRole) &&
         (switchingToExcluded || villaAssignmentChanged)
       ) {
         if (!nextVillaId) {
@@ -416,7 +429,7 @@ router.patch(
 
       let dwellingOverride: { villaId: string; unitId: string } | null = null;
       if (
-        existing.role === UserRole.RESIDENT &&
+        isResidentLike(effectiveRole) &&
         (bodyVillaId !== undefined || bodyUnitId !== undefined)
       ) {
         dwellingOverride = await resolveResidentDwelling(prisma, {
@@ -435,6 +448,9 @@ router.patch(
       }
 
       const data: Record<string, unknown> = { ...rest };
+      if (bodyRole !== undefined) {
+        data.role = bodyRole;
+      }
       if (dwellingOverride) {
         data.villaId = dwellingOverride.villaId;
         data.unitId = dwellingOverride.unitId;
@@ -482,7 +498,7 @@ router.patch(
         });
 
         const afterVillaId = after?.villaId ?? null;
-        if (after?.role === UserRole.RESIDENT && afterVillaId && after.isActive) {
+        if (after && isResidentLike(after.role) && afterVillaId && after.isActive) {
           if (after.maintenanceBillingRole === MaintenanceBillingRole.PRIMARY) {
             await demoteOtherResidentsToExcluded(tx, {
               societyId,

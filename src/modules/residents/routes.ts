@@ -137,7 +137,7 @@ const emergencyContactSchema = z.object({
 // ========================================
 
 // GET /api/residents/dashboard - Get resident dashboard
-router.get("/dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId, villaId } = req.auth!;
 
@@ -371,7 +371,7 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
 }
 
 // GET /api/residents/me - Get my profile
-router.get("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -393,7 +393,7 @@ router.get("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
 // PATCH /api/residents/me — JSON or multipart (`image` → Cloudinary; same request as text fields)
 router.patch(
   "/me",
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   conditionalProfileImageUpload,
   conditionalValidateProfileJson,
   updateResidentProfile
@@ -402,7 +402,7 @@ router.patch(
 // PUT /api/residents/me — same as PATCH (Flutter fallback)
 router.put(
   "/me",
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   conditionalProfileImageUpload,
   conditionalValidateProfileJson,
   updateResidentProfile
@@ -423,7 +423,7 @@ router.put(
 //     are scrubbed and credentials randomised so the user can never sign in
 //     again. The typed-name guard mirrors the super-admin society hard-delete
 //     pattern and prevents accidental destructive taps.
-router.delete("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -524,7 +524,7 @@ router.delete("/me", requireRole(UserRole.RESIDENT), async (req, res, next) => {
 });
 
 // GET /api/residents/my-villa - Get my villa details
-router.get("/my-villa", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-villa", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -576,7 +576,7 @@ router.get("/my-villa", requireRole(UserRole.RESIDENT), async (req, res, next) =
 // ========================================
 
 // GET /api/residents/my-family - Get family members
-router.get("/my-family", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-family", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -592,7 +592,7 @@ router.get("/my-family", requireRole(UserRole.RESIDENT), async (req, res, next) 
 });
 
 // POST /api/residents/add-family-member - Add family member
-router.post("/add-family-member", requireRole(UserRole.RESIDENT), validateBody(addFamilyMemberSchema), async (req, res, next) => {
+router.post("/add-family-member", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(addFamilyMemberSchema), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { name, relationship, age, phone, idProof } = req.body;
@@ -615,7 +615,7 @@ router.post("/add-family-member", requireRole(UserRole.RESIDENT), validateBody(a
 });
 
 // PATCH /api/residents/family/:id - Update family member
-router.patch("/family/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { id } = req.params;
@@ -648,7 +648,7 @@ router.patch("/family/:id", requireRole(UserRole.RESIDENT), async (req, res, nex
 });
 
 // DELETE /api/residents/family/:id - Remove family member
-router.delete("/family/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { id } = req.params;
@@ -675,7 +675,7 @@ router.delete("/family/:id", requireRole(UserRole.RESIDENT), async (req, res, ne
 // ========================================
 
 // GET /api/residents/security-contacts - Active guard contacts for resident society
-router.get("/security-contacts", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/security-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const contacts = await prisma.user.findMany({
@@ -707,7 +707,7 @@ router.get("/security-contacts", requireRole(UserRole.RESIDENT), async (req, res
 });
 
 // GET /api/residents/emergency-contacts - Get emergency contacts
-router.get("/emergency-contacts", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/emergency-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
 
@@ -723,7 +723,7 @@ router.get("/emergency-contacts", requireRole(UserRole.RESIDENT), async (req, re
 });
 
 // POST /api/residents/emergency-contacts - Add emergency contact
-router.post("/emergency-contacts", requireRole(UserRole.RESIDENT), validateBody(emergencyContactSchema), async (req, res, next) => {
+router.post("/emergency-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(emergencyContactSchema), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { name, relationship, phone, address } = req.body;
@@ -745,7 +745,7 @@ router.post("/emergency-contacts", requireRole(UserRole.RESIDENT), validateBody(
 });
 
 // DELETE /api/residents/emergency-contacts/:id - Remove emergency contact
-router.delete("/emergency-contacts/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/emergency-contacts/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { id } = req.params;
@@ -784,7 +784,7 @@ const MY_OPEN_SOS_LIST = [
 ];
 
 // GET /api/residents/sos/active — current open SOS (at most one expected)
-router.get("/sos/active", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/sos/active", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -808,7 +808,7 @@ router.get("/sos/active", requireRole(UserRole.RESIDENT), async (req, res, next)
 });
 
 // GET /api/residents/my-sos - Get my SOS alerts
-router.get("/my-sos", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-sos", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId, villaId } = req.auth!;
 
@@ -840,7 +840,7 @@ router.get("/my-sos", requireRole(UserRole.RESIDENT), async (req, res, next) => 
 // ========================================
 
 // GET /api/residents/my-notices - Get notices for residents
-router.get("/my-notices", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-notices", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId, userId } = req.auth!;
 
@@ -878,7 +878,7 @@ router.get("/my-notices", requireRole(UserRole.RESIDENT), async (req, res, next)
 // ========================================
 
 // GET /api/residents/my-documents - Get society documents
-router.get("/my-documents", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-documents", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
 
@@ -900,7 +900,7 @@ router.get("/my-documents", requireRole(UserRole.RESIDENT), async (req, res, nex
 // ========================================
 
 // GET /api/residents/my-polls — polls for community tab + villa vote state
-router.get("/my-polls", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-polls", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId, villaId } = req.auth!;
 
@@ -957,7 +957,7 @@ router.get("/my-polls", requireRole(UserRole.RESIDENT), async (req, res, next) =
 // ========================================
 
 // PATCH /api/residents/change-password — requires current password + new password.
-router.patch("/change-password", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { currentPassword, newPassword } = req.body as {

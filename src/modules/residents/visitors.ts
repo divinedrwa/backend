@@ -39,7 +39,7 @@ function generateOtp(): string {
 }
 
 // GET /api/residents/my-visitors - Get my visitor history
-router.get("/my-visitors", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { limit = "50", status } = req.query;
@@ -111,7 +111,7 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT), async (req, res, next
 });
 
 // GET /api/residents/visitors-today - Today's visitors
-router.get("/visitors-today", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/visitors-today", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -175,7 +175,7 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT), async (req, res, n
 
 // GET /api/residents/my-pre-approved - Get my pre-approved visitors
 // GET /api/residents/my-pre-approved-visitors - Alias for mobile app
-router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const limitRaw = parseInt(String(req.query.limit ?? "200"), 10);
@@ -223,7 +223,7 @@ router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRo
 });
 
 // POST /api/residents/pre-approve-visitor - Pre-approve a visitor
-router.post("/pre-approve-visitor", requireRole(UserRole.RESIDENT), validateBody(preApproveVisitorSchema), async (req, res, next) => {
+router.post("/pre-approve-visitor", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(preApproveVisitorSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { name, phone, purpose, validUntil, visitorType } = req.body;
@@ -290,7 +290,7 @@ router.post("/pre-approve-visitor", requireRole(UserRole.RESIDENT), validateBody
 });
 
 // DELETE /api/residents/pre-approved/:id - Remove pre-approval
-router.delete("/pre-approved/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/pre-approved/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -331,7 +331,7 @@ router.delete("/pre-approved/:id", requireRole(UserRole.RESIDENT), async (req, r
 });
 
 // PATCH /api/residents/pre-approved/:id - Update pre-approval
-router.patch("/pre-approved/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/pre-approved/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -398,7 +398,7 @@ function visitorApprovalInclude(villaId: string, unitId?: string | null) {
 }
 
 // GET /api/residents/visitor-approval-requests — fallback list (missed push / inbox)
-router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const filterRaw = String(req.query.filter ?? "all");
@@ -462,7 +462,7 @@ router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT), async (
 });
 
 // GET /api/residents/visitor-approval-requests/:visitorId
-router.get("/visitor-approval-requests/:visitorId", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/visitor-approval-requests/:visitorId", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { visitorId } = req.params;
@@ -638,7 +638,7 @@ async function applyResidentVisitorDecision(params: {
 // POST /api/residents/visitor-approval-requests/:visitorId/approve
 router.post(
   "/visitor-approval-requests/:visitorId/approve",
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   async (req, res, next) => {
     try {
              const { userId, societyId } = req.auth!;
@@ -659,7 +659,7 @@ router.post(
 // POST /api/residents/visitor-approval-requests/:visitorId/reject
 router.post(
   "/visitor-approval-requests/:visitorId/reject",
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   async (req, res, next) => {
     try {
              const { userId, societyId } = req.auth!;

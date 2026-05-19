@@ -23,7 +23,7 @@ const updateComplaintSchema = z.object({
 });
 
 // GET /api/residents/my-complaints - Get my complaints
-router.get("/my-complaints", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { status } = req.query;
@@ -55,7 +55,7 @@ router.get("/my-complaints", requireRole(UserRole.RESIDENT), async (req, res, ne
 });
 
 // GET /api/residents/complaints/:id - Get complaint details
-router.get("/complaints/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/complaints/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -86,7 +86,7 @@ router.get("/complaints/:id", requireRole(UserRole.RESIDENT), async (req, res, n
 });
 
 // POST /api/residents/complaints - Create complaint
-router.post("/complaints", requireRole(UserRole.RESIDENT), validateBody(createComplaintSchema), async (req, res, next) => {
+router.post("/complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(createComplaintSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { title, description, category, priority } = req.body;
@@ -124,7 +124,7 @@ router.post("/complaints", requireRole(UserRole.RESIDENT), validateBody(createCo
 });
 
 // PATCH /api/residents/complaints/:id - Update my complaint
-router.patch("/complaints/:id", requireRole(UserRole.RESIDENT), validateBody(updateComplaintSchema), async (req, res, next) => {
+router.patch("/complaints/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(updateComplaintSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -166,7 +166,7 @@ router.patch("/complaints/:id", requireRole(UserRole.RESIDENT), validateBody(upd
 });
 
 // DELETE /api/residents/complaints/:id - Delete my complaint
-router.delete("/complaints/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/complaints/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;

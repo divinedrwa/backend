@@ -380,7 +380,7 @@ router.patch(
 router.post(
   "/:id/cancel",
   requireAuth,
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   validateBody(cancelSOSSchema),
   async (req, res, next) => {
     try {

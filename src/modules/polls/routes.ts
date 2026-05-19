@@ -136,7 +136,7 @@ router.post(
 // Vote on poll (residents - one vote per flat)
 router.post(
   "/:id/vote",
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   validateBody(voteSchema),
   async (req, res, next) => {
     try {

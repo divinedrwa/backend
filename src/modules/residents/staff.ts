@@ -19,7 +19,7 @@ const addStaffSchema = z.object({
 });
 
 // GET /api/residents/my-staff - Get my domestic staff
-router.get("/my-staff", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-staff", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -81,7 +81,7 @@ router.get("/my-staff", requireRole(UserRole.RESIDENT), async (req, res, next) =
 });
 
 // POST /api/residents/add-staff - Add domestic staff
-router.post("/add-staff", requireRole(UserRole.RESIDENT), validateBody(addStaffSchema), async (req, res, next) => {
+router.post("/add-staff", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(addStaffSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { name, type, phone, address, idProof } = req.body;
@@ -156,7 +156,7 @@ router.post("/add-staff", requireRole(UserRole.RESIDENT), validateBody(addStaffS
 });
 
 // DELETE /api/residents/staff/:assignmentId - Remove staff
-router.delete("/staff/:assignmentId", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/staff/:assignmentId", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { assignmentId } = req.params;

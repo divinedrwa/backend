@@ -18,7 +18,7 @@ const bookAmenitySchema = z.object({
 });
 
 // GET /api/residents/my-bookings - Get my bookings
-router.get("/my-bookings", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-bookings", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { status } = req.query;
@@ -63,7 +63,7 @@ router.get("/my-bookings", requireRole(UserRole.RESIDENT), async (req, res, next
 });
 
 // GET /api/residents/bookings-upcoming - Get upcoming bookings
-router.get("/bookings-upcoming", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/bookings-upcoming", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -98,7 +98,7 @@ router.get("/bookings-upcoming", requireRole(UserRole.RESIDENT), async (req, res
 });
 
 // POST /api/residents/book-amenity - Create booking
-router.post("/book-amenity", requireRole(UserRole.RESIDENT), validateBody(bookAmenitySchema), async (req, res, next) => {
+router.post("/book-amenity", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(bookAmenitySchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { amenityId, startTime, endTime, notes } = req.body;
@@ -174,7 +174,7 @@ router.post("/book-amenity", requireRole(UserRole.RESIDENT), validateBody(bookAm
 });
 
 // PATCH /api/residents/bookings/:id/cancel - Cancel booking
-router.patch("/bookings/:id/cancel", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/bookings/:id/cancel", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -217,7 +217,7 @@ router.patch("/bookings/:id/cancel", requireRole(UserRole.RESIDENT), async (req,
 
 // GET /api/residents/amenities-available - Get available amenities
 // GET /api/residents/my-amenities - Alias for mobile app
-router.get(["/amenities-available", "/my-amenities"], requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get(["/amenities-available", "/my-amenities"], requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
 

@@ -8,7 +8,7 @@ const router = Router();
 router.use(requireAuth);
 
 // GET /api/residents/my-parcels - Get my parcels
-router.get("/my-parcels", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-parcels", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { status } = req.query;
@@ -52,7 +52,7 @@ router.get("/my-parcels", requireRole(UserRole.RESIDENT), async (req, res, next)
 });
 
 // GET /api/residents/parcels-pending - Get pending parcels
-router.get("/parcels-pending", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/parcels-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -88,7 +88,7 @@ router.get("/parcels-pending", requireRole(UserRole.RESIDENT), async (req, res, 
 });
 
 // PATCH /api/residents/parcels/:id/collected - Mark parcel as collected
-router.patch("/parcels/:id/collected", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/parcels/:id/collected", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;

@@ -185,7 +185,7 @@ function buildResidentPdfBuffer(params: {
 }
 
 // GET /api/residents/my-maintenance - Get my payment history
-router.get("/my-maintenance", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-maintenance", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -321,7 +321,7 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT), async (req, res, n
 });
 
 // GET /api/residents/maintenance-pending - Get pending dues
-router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -468,7 +468,7 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT), async (req, r
 });
 
 // GET /api/residents/maintenance-history/:year - Get year history
-router.get("/maintenance-history/:year", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/maintenance-history/:year", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { year } = req.params;
@@ -512,7 +512,7 @@ router.get("/maintenance-history/:year", requireRole(UserRole.RESIDENT), async (
 });
 
 // POST /api/residents/request-receipt - Request payment receipt
-router.post("/request-receipt", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.post("/request-receipt", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { maintenanceId } = req.body;
@@ -569,7 +569,7 @@ router.post("/request-receipt", requireRole(UserRole.RESIDENT), async (req, res,
 });
 
 // GET /api/residents/maintenance-summary - Get overall summary
-router.get("/maintenance-summary", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/maintenance-summary", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -634,7 +634,7 @@ router.get("/maintenance-summary", requireRole(UserRole.RESIDENT), async (req, r
 });
 
 // GET /api/residents/maintenance-dashboard - Structured dashboard payload
-router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { month, year } = parseMonthYear(req.query);
@@ -1037,7 +1037,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT), async (req,
 });
 
 // GET /api/residents/maintenance-dashboard/report-pdf
-router.get("/maintenance-dashboard/report-pdf", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/maintenance-dashboard/report-pdf", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { month, year } = parseMonthYear(req.query);

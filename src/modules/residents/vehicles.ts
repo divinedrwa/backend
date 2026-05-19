@@ -21,7 +21,7 @@ const registerVehicleSchema = z.object({
 });
 
 // GET /api/residents/my-vehicles - Get my vehicles
-router.get("/my-vehicles", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.get("/my-vehicles", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
 
@@ -67,7 +67,7 @@ router.get("/my-vehicles", requireRole(UserRole.RESIDENT), async (req, res, next
 });
 
 // POST /api/residents/register-vehicle - Register new vehicle
-router.post("/register-vehicle", requireRole(UserRole.RESIDENT), validateBody(registerVehicleSchema), async (req, res, next) => {
+router.post("/register-vehicle", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(registerVehicleSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { registrationNumber, type, make, model, color, parkingSlot } = req.body;
@@ -119,7 +119,7 @@ router.post("/register-vehicle", requireRole(UserRole.RESIDENT), validateBody(re
 });
 
 // PATCH /api/residents/vehicles/:id - Update vehicle
-router.patch("/vehicles/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.patch("/vehicles/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;
@@ -168,7 +168,7 @@ router.patch("/vehicles/:id", requireRole(UserRole.RESIDENT), async (req, res, n
 });
 
 // DELETE /api/residents/vehicles/:id - Remove vehicle
-router.delete("/vehicles/:id", requireRole(UserRole.RESIDENT), async (req, res, next) => {
+router.delete("/vehicles/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
     const { id } = req.params;

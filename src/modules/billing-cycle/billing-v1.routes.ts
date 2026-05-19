@@ -673,7 +673,7 @@ const createOrderSchema = z.object({
 router.post(
   "/payments/create-order",
   requireAuth,
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   validateBody(createOrderSchema),
   async (req, res, next) => {
     try {
@@ -1282,7 +1282,7 @@ router.get("/admin/audit-logs", requireAuth, requireRole(UserRole.ADMIN), async 
 router.get(
   "/payments/:paymentId/invoice.pdf",
   requireAuth,
-  requireRole(UserRole.RESIDENT),
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   async (req, res, next) => {
     try {
       const auth = req.auth!;
