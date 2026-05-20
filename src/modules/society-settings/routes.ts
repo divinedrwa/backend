@@ -12,11 +12,20 @@ router.use(requireAuth);
 const patchSocietySchema = z
   .object({
     visitorMultiVillaApprovalMode: z.nativeEnum(VisitorMultiVillaApprovalMode).optional(),
+    visitorApprovalRequired: z.boolean().optional(),
+    guardCanApproveVisitors: z.boolean().optional(),
     status: z.nativeEnum(SocietyStatus).optional(),
+    upiVpa: z.string().min(3).regex(/@/, "Must contain @").nullable().optional(),
   })
-  .refine((body) => body.visitorMultiVillaApprovalMode != null || body.status != null, {
-    message: "Send at least one field to update",
-  });
+  .refine(
+    (body) =>
+      body.visitorMultiVillaApprovalMode != null ||
+      body.visitorApprovalRequired != null ||
+      body.guardCanApproveVisitors != null ||
+      body.status != null ||
+      body.upiVpa !== undefined,
+    { message: "Send at least one field to update" },
+  );
 
 /**
  * GET /api/society-settings — gate rules + lifecycle (ADMIN).
@@ -31,6 +40,9 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         name: true,
         status: true,
         visitorMultiVillaApprovalMode: true,
+        visitorApprovalRequired: true,
+        guardCanApproveVisitors: true,
+        upiVpa: true,
       },
     });
     if (!society) {
@@ -56,14 +68,26 @@ router.patch(
 
       const data: {
         visitorMultiVillaApprovalMode?: VisitorMultiVillaApprovalMode;
+        visitorApprovalRequired?: boolean;
+        guardCanApproveVisitors?: boolean;
         status?: SocietyStatus;
+        upiVpa?: string | null;
       } = {};
 
       if (body.visitorMultiVillaApprovalMode != null) {
         data.visitorMultiVillaApprovalMode = body.visitorMultiVillaApprovalMode;
       }
+      if (body.visitorApprovalRequired != null) {
+        data.visitorApprovalRequired = body.visitorApprovalRequired;
+      }
+      if (body.guardCanApproveVisitors != null) {
+        data.guardCanApproveVisitors = body.guardCanApproveVisitors;
+      }
       if (body.status != null) {
         data.status = body.status;
+      }
+      if (body.upiVpa !== undefined) {
+        data.upiVpa = body.upiVpa;
       }
 
       const updated = await prisma.society.updateMany({
@@ -82,6 +106,9 @@ router.patch(
           name: true,
           status: true,
           visitorMultiVillaApprovalMode: true,
+          visitorApprovalRequired: true,
+          guardCanApproveVisitors: true,
+          upiVpa: true,
         },
       });
 

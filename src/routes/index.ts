@@ -43,6 +43,8 @@ import invitationRoutes from "../modules/invitations/routes";
 import importRoutes from "../modules/import/routes";
 import exportRoutes from "../modules/export/routes";
 import reconciliationRoutes from "../modules/reconciliation/routes";
+import upiPaymentAdminRoutes from "../modules/upi-payments/admin-routes";
+import upiPaymentResidentRoutes from "../modules/upi-payments/resident-routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -140,6 +142,9 @@ router.use("/v1", billingV1Routes);
 /** Financial reconciliation & monitoring (admin only). */
 router.use("/reconciliation", reconciliationRoutes);
 
+/** UPI payment submissions (admin verify/reject). */
+router.use("/upi-payments", upiPaymentAdminRoutes);
+
 // ========================================
 // MOBILE APP APIs (NEW)
 // ========================================
@@ -147,6 +152,7 @@ router.use("/reconciliation", reconciliationRoutes);
 // Resident Mobile APIs
 router.use("/residents", residentRoutes); // Profile, villa, family, emergency contacts
 router.use("/residents", residentMaintenanceRoutes); // Maintenance payments
+router.use("/residents", upiPaymentResidentRoutes); // UPI payment submissions
 router.use("/residents", residentVisitorRoutes); // Visitors, pre-approval
 router.use("/residents", residentParcelRoutes); // Parcels
 router.use("/residents", residentComplaintRoutes); // Complaints

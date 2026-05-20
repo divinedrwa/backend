@@ -167,6 +167,15 @@ model Society {
   /// How multi-villa visitor approval combines (guard walk-in requests).
   visitorMultiVillaApprovalMode VisitorMultiVillaApprovalMode @default(ANY_ONE_APPROVAL)
 
+  /// Whether visitors require resident approval before entry (society-level default).
+  visitorApprovalRequired Boolean @default(false)
+
+  /// Whether guards can approve visitor entry directly without resident confirmation.
+  guardCanApproveVisitors Boolean @default(false)
+
+  /// UPI Virtual Payment Address for collecting maintenance dues (e.g. society@upi).
+  upiVpa String?
+
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
@@ -177,6 +186,7 @@ model Society {
   units           Unit[]
   billingAccounts BillingAccount[]
   reconciliationAlerts ReconciliationAlert[]
+  upiPaymentSubmissions UpiPaymentSubmission[]
 
   @@index([status])
 }
@@ -325,6 +335,8 @@ model User {
   amenityBookings       AmenityBooking[]
   unit                  Unit?          @relation(fields: [unitId], references: [id], onDelete: Restrict)
   cycleVillaExclusions  CycleVillaExclusion[] @relation("CycleVillaExclusions")
+  upiSubmissions        UpiPaymentSubmission[] @relation("UpiSubmitter")
+  upiVerifications      UpiPaymentSubmission[] @relation("UpiVerifier")
 
   @@index([societyId])
   @@index([villaId])
@@ -366,6 +378,7 @@ model Villa {
   units                 Unit[]
   billingAccount        BillingAccount?
   cycleExclusions       CycleVillaExclusion[]
+  upiPaymentSubmissions UpiPaymentSubmission[]
 
   @@unique([societyId, villaNumber])
   @@index([societyId])
@@ -1721,4 +1734,37 @@ model Invitation {
 
   @@index([societyId, status])
   @@index([villaId])
+}
+
+// --- UPI Payment Submissions (resident-initiated, admin-verified) ---
+
+enum UpiPaymentStatus {
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+model UpiPaymentSubmission {
+  id                 String           @id @default(cuid())
+  societyId          String
+  society            Society          @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User             @relation("UpiSubmitter", fields: [userId], references: [id], onDelete: Cascade)
+  villaId            String
+  villa              Villa            @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  cycleId            String?
+  amount             Decimal          @db.Decimal(10, 2)
+  upiTransactionRef  String?
+  status             UpiPaymentStatus @default(PENDING)
+  submittedAt        DateTime         @default(now())
+  verifiedAt         DateTime?
+  verifiedByAdminId  String?
+  verifiedByAdmin    User?            @relation("UpiVerifier", fields: [verifiedByAdminId], references: [id], onDelete: SetNull)
+  rejectionReason    String?
+  month              Int
+  year               Int
+
+  @@index([societyId, status])
+  @@index([userId])
+  @@map("upi_payment_submissions")
 }
