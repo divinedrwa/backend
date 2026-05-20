@@ -46,6 +46,7 @@ const submitSchema = z.object({
   year: z.number().int().min(2020),
   upiTransactionRef: z.string().min(6).max(30).optional(),
   cycleId: z.string().optional(),
+  remark: z.string().max(500).optional(),
 });
 
 router.post(
@@ -59,7 +60,7 @@ router.post(
         return res.status(400).json({ message: "No villa assigned to your account" });
       }
 
-      const { amount, month, year, upiTransactionRef, cycleId } = req.body;
+      const { amount, month, year, upiTransactionRef, cycleId, remark } = req.body;
 
       // Duplicate check: same user, same month/year, still PENDING
       const existing = await prisma.upiPaymentSubmission.findFirst({
@@ -86,6 +87,7 @@ router.post(
           cycleId: cycleId ?? null,
           amount,
           upiTransactionRef: upiTransactionRef ?? null,
+          remark: remark ?? null,
           month,
           year,
         },
@@ -101,11 +103,12 @@ router.post(
         select: { villaNumber: true },
       });
 
+      const remarkSuffix = remark ? ` — ${remark}` : ` for ${month}/${year}`;
       await notifySociety(
         societyId,
         {
           title: "UPI Payment Submitted",
-          body: `${user?.name ?? "Resident"} (Villa ${villa?.villaNumber ?? ""}) submitted ₹${amount} UPI payment for ${month}/${year}`,
+          body: `${user?.name ?? "Resident"} (Villa ${villa?.villaNumber ?? ""}) submitted ₹${amount} UPI payment${remarkSuffix}`,
           data: {
             type: "UPI_PAYMENT_SUBMITTED",
             submissionId: submission.id,

@@ -1764,6 +1764,7 @@ model UpiPaymentSubmission {
   verifiedByAdminId  String?
   verifiedByAdmin    User?            @relation("UpiVerifier", fields: [verifiedByAdminId], references: [id], onDelete: SetNull)
   rejectionReason    String?
+  remark             String?
   month              Int
   year               Int
 

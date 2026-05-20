@@ -26,6 +26,13 @@ export interface RecordPaymentParams {
   /** userId of whoever is recording (admin or the verifying admin) */
   recordedByUserId: string;
   auditAction?: string;
+  /**
+   * When true, the credit walker processes ALL cycles in the financial year
+   * (not just up to the payment's cycle). This allows overpayment credit to
+   * flow forward and settle subsequent unpaid cycles — used for "Pay All"
+   * multi-month UPI payments.
+   */
+  walkAllCycles?: boolean;
 }
 
 /**
@@ -154,15 +161,41 @@ export async function recordPaymentAndSyncLedgers(
       societyId,
       villaId,
       financialYearId: mcc.financialYearId,
-      throughCycleId: mcc.id,
+      // When walkAllCycles is set (e.g. "Pay All" multi-month payments),
+      // let the walker process every cycle so overpayment credit flows
+      // forward to settle subsequent unpaid cycles.
+      throughCycleId: params.walkAllCycles ? undefined : mcc.id,
     });
 
-    // 6. Sync UserCyclePayment so resident billing screens reflect the new payment
-    const billingCycle = await tx.billingCycle.findFirst({
-      where: { societyId, financialYearId: mcc.financialYearId, cycleKey: mcc.periodKey },
+    // 6. Sync UserCyclePayment so resident billing screens reflect the new payment.
+    //    When walkAllCycles is set, sync ALL cycles in the financial year
+    //    (not just the payment's cycle) since the walker may have updated many.
+    const cyclesToSync = params.walkAllCycles
+      ? await tx.maintenanceCollectionCycle.findMany({
+          where: { societyId, financialYearId: mcc.financialYearId },
+          orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+          select: { id: true, periodKey: true },
+        })
+      : [{ id: mcc.id, periodKey: mcc.periodKey }];
+
+    const primaryResidents = await tx.user.findMany({
+      where: {
+        societyId,
+        villaId,
+        role: UserRole.RESIDENT,
+        isActive: true,
+        maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+      },
       select: { id: true },
     });
-    if (billingCycle) {
+
+    for (const cycleToSync of cyclesToSync) {
+      const billingCycle = await tx.billingCycle.findFirst({
+        where: { societyId, financialYearId: mcc.financialYearId, cycleKey: cycleToSync.periodKey },
+        select: { id: true },
+      });
+      if (!billingCycle) continue;
+
       await clearExcludedResidentsUserCyclePayments(tx, {
         societyId,
         villaId,
@@ -170,22 +203,12 @@ export async function recordPaymentAndSyncLedgers(
       });
 
       const reconciledSnap = await tx.villaMaintenanceSnapshot.findUnique({
-        where: { cycleId_villaId: { cycleId: mcc.id, villaId } },
+        where: { cycleId_villaId: { cycleId: cycleToSync.id, villaId } },
         select: { paidAmount: true, status: true },
       });
       const snapStatus = reconciledSnap?.status ?? "PENDING";
       const paidAmt = Number(reconciledSnap?.paidAmount ?? 0);
 
-      const primaryResidents = await tx.user.findMany({
-        where: {
-          societyId,
-          villaId,
-          role: UserRole.RESIDENT,
-          isActive: true,
-          maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-        },
-        select: { id: true },
-      });
       const payStatus =
         snapStatus === "PAID" || snapStatus === "WAIVED"
           ? BillingUserPaymentStatus.SUCCESS

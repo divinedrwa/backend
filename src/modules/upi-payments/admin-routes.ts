@@ -52,6 +52,18 @@ router.post("/:id/verify", async (req, res, next) => {
       return res.status(404).json({ message: "Submission not found or already processed" });
     }
 
+    // Detect multi-month "Pay All" payments: if the amount exceeds the
+    // expected amount for the single cycle, the credit walker should
+    // process all cycles so overpayment flows to subsequent months.
+    const matchingCycle = await prisma.maintenanceCollectionCycle.findFirst({
+      where: { societyId, periodMonth: submission.month, periodYear: submission.year },
+      include: { snapshots: { where: { villaId: submission.villaId }, select: { expectedAmount: true } } },
+    });
+    const singleCycleExpected = matchingCycle?.snapshots?.[0]
+      ? Number(matchingCycle.snapshots[0].expectedAmount)
+      : 0;
+    const isMultiMonth = Number(submission.amount) > singleCycleExpected && singleCycleExpected > 0;
+
     // Run payment recording inside transaction, then mark submission verified
     const result = await prisma.$transaction(
       async (tx) => {
@@ -66,6 +78,7 @@ router.post("/:id/verify", async (req, res, next) => {
           transactionId: submission.upiTransactionRef ?? undefined,
           recordedByUserId: adminId,
           auditAction: "VERIFY_UPI_PAYMENT",
+          walkAllCycles: isMultiMonth,
         });
 
         const updated = await tx.upiPaymentSubmission.update({
@@ -87,11 +100,14 @@ router.post("/:id/verify", async (req, res, next) => {
     );
 
     // Notify the submitting resident
+    const verifyRemarkSuffix = submission.remark
+      ? ` — ${submission.remark}`
+      : ` for ${submission.month}/${submission.year}`;
     await notifyUser(
       submission.userId,
       {
         title: "UPI Payment Verified",
-        body: `Your UPI payment of ₹${Number(submission.amount)} for ${submission.month}/${submission.year} has been verified.`,
+        body: `Your UPI payment of ₹${Number(submission.amount)}${verifyRemarkSuffix} has been verified.`,
         data: {
           type: "UPI_PAYMENT_VERIFIED",
           submissionId: submission.id,

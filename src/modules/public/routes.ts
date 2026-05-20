@@ -9,8 +9,9 @@ const router = Router();
  */
 router.get("/societies", async (_req, res, next) => {
   try {
-    /** All tenants for login pickers (mobile + web). Clients should prefer ACTIVE; INACTIVE may be shown disabled. */
+    /** All tenants for login pickers (mobile + web). Exclude archived societies. */
     const rows = await prisma.society.findMany({
+      where: { archivedAt: null },
       select: { id: true, name: true, address: true, status: true },
       orderBy: { name: "asc" },
     });
