@@ -4,6 +4,8 @@ import { SocietyStatus, UserRole, VisitorMultiVillaApprovalMode } from "@prisma/
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { upiQrImageMemory } from "../../lib/upiQrUpload";
+import { uploadUpiQrImageBuffer } from "../../services/cloudinaryUpiQr";
 
 const router = Router();
 
@@ -16,6 +18,7 @@ const patchSocietySchema = z
     guardCanApproveVisitors: z.boolean().optional(),
     status: z.nativeEnum(SocietyStatus).optional(),
     upiVpa: z.string().min(3).regex(/@/, "Must contain @").nullable().optional(),
+    upiQrCodeUrl: z.string().url().nullable().optional(),
   })
   .refine(
     (body) =>
@@ -23,7 +26,8 @@ const patchSocietySchema = z
       body.visitorApprovalRequired != null ||
       body.guardCanApproveVisitors != null ||
       body.status != null ||
-      body.upiVpa !== undefined,
+      body.upiVpa !== undefined ||
+      body.upiQrCodeUrl !== undefined,
     { message: "Send at least one field to update" },
   );
 
@@ -43,6 +47,7 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         visitorApprovalRequired: true,
         guardCanApproveVisitors: true,
         upiVpa: true,
+        upiQrCodeUrl: true,
       },
     });
     if (!society) {
@@ -72,6 +77,7 @@ router.patch(
         guardCanApproveVisitors?: boolean;
         status?: SocietyStatus;
         upiVpa?: string | null;
+        upiQrCodeUrl?: string | null;
       } = {};
 
       if (body.visitorMultiVillaApprovalMode != null) {
@@ -88,6 +94,9 @@ router.patch(
       }
       if (body.upiVpa !== undefined) {
         data.upiVpa = body.upiVpa;
+      }
+      if (body.upiQrCodeUrl !== undefined) {
+        data.upiQrCodeUrl = body.upiQrCodeUrl;
       }
 
       const updated = await prisma.society.updateMany({
@@ -109,6 +118,7 @@ router.patch(
           visitorApprovalRequired: true,
           guardCanApproveVisitors: true,
           upiVpa: true,
+          upiQrCodeUrl: true,
         },
       });
 
@@ -116,6 +126,54 @@ router.patch(
         message: "Society settings updated",
         society,
       });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/society-settings/upload-qr — upload a custom UPI QR code image (ADMIN).
+ */
+router.post(
+  "/upload-qr",
+  requireRole(UserRole.ADMIN),
+  upiQrImageMemory.single("qrImage"),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+
+      const url = await uploadUpiQrImageBuffer(req.file.buffer, societyId);
+
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { upiQrCodeUrl: url },
+      });
+
+      return res.json({ url });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/qr-code — remove the custom UPI QR code image (ADMIN).
+ */
+router.delete(
+  "/qr-code",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { upiQrCodeUrl: null },
+      });
+      return res.json({ message: "QR code removed" });
     } catch (error) {
       next(error);
     }

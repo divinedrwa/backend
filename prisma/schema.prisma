@@ -176,6 +176,9 @@ model Society {
   /// UPI Virtual Payment Address for collecting maintenance dues (e.g. society@upi).
   upiVpa String?
 
+  /// Optional URL to a custom UPI QR code image uploaded by the admin (e.g. from their bank app).
+  upiQrCodeUrl String?
+
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
