@@ -123,7 +123,18 @@ router.post(
         }
       });
 
-      return res.status(201).json({ vehicle });
+      return res.status(201).json({
+        vehicle: {
+          id: vehicle.id,
+          vehicleNumber: vehicle.registrationNumber,
+          vehicleType: vehicle.type,
+          model: vehicle.model,
+          color: vehicle.color,
+          parkingSlot: vehicle.parkingSlot,
+          villa: vehicle.villa,
+          createdAt: vehicle.createdAt,
+        },
+      });
     } catch (error) {
       next(error);
     }

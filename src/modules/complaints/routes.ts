@@ -78,6 +78,7 @@ router.post(
         data: {
           societyId: req.auth!.societyId,
           villaId: body.villaId,
+          residentId: req.auth!.userId,
           title: body.title,
           description: body.description
         },

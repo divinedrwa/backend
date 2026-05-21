@@ -209,8 +209,14 @@ router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRo
     const active = preApproved.filter((v) => !v.validUntil || new Date(v.validUntil) > now);
     const expired = preApproved.filter((v) => v.validUntil && new Date(v.validUntil) <= now);
 
+    // Map response: add 'passcode' alias for 'otp' (Flutter expects 'passcode')
+    const mapped = preApproved.map((v) => ({
+      ...v,
+      passcode: v.otp,
+    }));
+
     return res.json({
-      preApproved,
+      preApproved: mapped,
       summary: {
         total: preApproved.length,
         active: active.length,
@@ -281,8 +287,9 @@ router.post("/pre-approve-visitor", requireRole(UserRole.RESIDENT, UserRole.ADMI
 
     return res.status(201).json({
       message: "Visitor pre-approved successfully",
-      preApproved,
+      preApproved: { ...preApproved, passcode: otp },
       otp,
+      passcode: otp,
     });
   } catch (error) {
     next(error);

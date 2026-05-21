@@ -63,6 +63,19 @@ cron.schedule(
           // Clean up stale inactive push devices (>90 days)
           await NotificationService.cleanupInactiveDevices();
 
+          // Purge expired or revoked refresh tokens (>7 days past expiry)
+          const { count: purgedTokens } = await prisma.refreshToken.deleteMany({
+            where: {
+              OR: [
+                { expiresAt: { lt: new Date() }, revoked: false },
+                { revoked: true },
+              ],
+            },
+          });
+          if (purgedTokens > 0) {
+            logger.info({ purgedTokens }, "[billing-cron] Purged expired/revoked refresh tokens");
+          }
+
           return true;
         },
       );

@@ -35,7 +35,7 @@ router.get("/my-vehicles", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    const vehicles = await prisma.vehicle.findMany({
+    const raw = await prisma.vehicle.findMany({
       where: {
         villaId: user.villaId,
         societyId,
@@ -50,8 +50,20 @@ router.get("/my-vehicles", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       orderBy: { createdAt: "desc" },
     });
 
-    const twoWheelers = vehicles.filter((v) => v.type === "TWO_WHEELER");
-    const fourWheelers = vehicles.filter((v) => v.type === "FOUR_WHEELER");
+    const twoWheelers = raw.filter((v) => v.type === "TWO_WHEELER");
+    const fourWheelers = raw.filter((v) => v.type === "FOUR_WHEELER");
+
+    const vehicles = raw.map((v) => ({
+      id: v.id,
+      vehicleNumber: v.registrationNumber,
+      type: v.type,
+      make: v.make,
+      model: v.model,
+      color: v.color,
+      parkingSlot: v.parkingSlot,
+      villa: v.villa,
+      createdAt: v.createdAt,
+    }));
 
     return res.json({
       vehicles,
@@ -101,17 +113,25 @@ router.post("/register-vehicle", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
         villaId: user.villaId,
         registrationNumber: registrationNumber.toUpperCase(),
         type: normalizedType,
-        // Prisma schema requires these non-null fields.
-        make: make?.trim() || "Unknown",
-        model: model?.trim() || "Unknown",
-        color: color?.trim() || "Unknown",
+        make: make?.trim() || "",
+        model: model?.trim() || "",
+        color: color?.trim() || "",
         parkingSlot,
       },
     });
 
     return res.status(201).json({
       message: "Vehicle registered successfully",
-      vehicle,
+      vehicle: {
+        id: vehicle.id,
+        vehicleNumber: vehicle.registrationNumber,
+        type: vehicle.type,
+        make: vehicle.make,
+        model: vehicle.model,
+        color: vehicle.color,
+        parkingSlot: vehicle.parkingSlot,
+        createdAt: vehicle.createdAt,
+      },
     });
   } catch (error) {
     next(error);
@@ -160,7 +180,16 @@ router.patch("/vehicles/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
 
     return res.json({
       message: "Vehicle updated successfully",
-      vehicle: updated,
+      vehicle: {
+        id: updated.id,
+        vehicleNumber: updated.registrationNumber,
+        type: updated.type,
+        make: updated.make,
+        model: updated.model,
+        color: updated.color,
+        parkingSlot: updated.parkingSlot,
+        createdAt: updated.createdAt,
+      },
     });
   } catch (error) {
     next(error);
