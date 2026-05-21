@@ -40,7 +40,7 @@ router.get("/", async (req, res, next) => {
       whereClause.villaId = req.auth!.villaId;
     }
 
-    const vehicles = await prisma.vehicle.findMany({
+    const raw = await prisma.vehicle.findMany({
       where: whereClause,
       include: {
         villa: {
@@ -53,6 +53,17 @@ router.get("/", async (req, res, next) => {
       },
       orderBy: { createdAt: "desc" }
     });
+
+    const vehicles = raw.map((v) => ({
+      id: v.id,
+      vehicleNumber: v.registrationNumber,
+      vehicleType: v.type,
+      model: v.model,
+      color: v.color,
+      parkingSlot: v.parkingSlot,
+      villa: v.villa,
+      createdAt: v.createdAt,
+    }));
 
     return res.json({ vehicles });
   } catch (error) {
@@ -92,9 +103,9 @@ router.post(
         villaId: body.villaId,
         registrationNumber: body.vehicleNumber.toUpperCase(),
         type: body.vehicleType,
-        make: body.model?.trim() || "Unknown",
-        model: body.model?.trim() || "Unknown",
-        color: body.color?.trim() || "Unknown",
+        make: body.model?.trim() || "",
+        model: body.model?.trim() || "",
+        color: body.color?.trim() || "",
       };
 
       if (body.parkingSlot) vehicleData.parkingSlot = body.parkingSlot;
