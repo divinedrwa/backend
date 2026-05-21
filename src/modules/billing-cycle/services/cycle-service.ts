@@ -6,6 +6,7 @@ import {
   NotificationCategory,
   UserRole,
 } from "@prisma/client";
+import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc } from "../domain/cycleStatus";
 import { computeAmountDueForCycle } from "../domain/amountDue";
@@ -590,8 +591,7 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
           });
           await billingCacheSet(noticeKey, "1", 36 * 60 * 60);
         } catch (noticeErr) {
-          // eslint-disable-next-line no-console
-          console.error("[billing-reminder] notice create failed:", noticeErr);
+          logger.error({ err: noticeErr }, "[billing-reminder] notice create failed");
         }
       }
 
@@ -610,8 +610,7 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
           { category: NotificationCategory.MAINTENANCE },
         );
       } catch (pushErr) {
-        // eslint-disable-next-line no-console
-        console.error("[billing-reminder] push send failed:", pushErr);
+        logger.error({ err: pushErr }, "[billing-reminder] push send failed");
       }
 
       await billingCacheSet(sentKey, "1", 16 * 60 * 60);

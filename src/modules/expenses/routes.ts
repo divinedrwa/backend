@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { ExpenseStatus, ExpenseType, PaymentMode, Prisma, UserRole } from '@prisma/client';
 import { z } from 'zod';
+import { logger } from '../../lib/logger';
 import { getPagination, paginationMeta } from '../../lib/pagination';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, requireRole } from '../../middlewares/auth';
@@ -675,7 +676,7 @@ router.get('/summary/monthly', async (req, res) => {
     
     res.json(summary);
   } catch (error) {
-    console.error('[expenses] GET /summary/monthly', error);
+    logger.error({ err: error }, '[expenses] GET /summary/monthly');
     res.status(500).json({
       message: 'Failed to fetch summary',
       error: 'Failed to fetch summary'
@@ -740,7 +741,7 @@ router.get('/summary/yearly', async (req, res) => {
       }
     });
   } catch (error) {
-    console.error('[expenses] GET /summary/yearly', error);
+    logger.error({ err: error }, '[expenses] GET /summary/yearly');
     res.status(500).json({
       message: 'Failed to fetch yearly summary',
       error: 'Failed to fetch yearly summary'
@@ -792,7 +793,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
 
     res.json(breakdown);
   } catch (error) {
-    console.error('[expenses] GET /summary/category-breakdown', error);
+    logger.error({ err: error }, '[expenses] GET /summary/category-breakdown');
     res.status(500).json({
       message: 'Failed to fetch breakdown',
       error: 'Failed to fetch breakdown'
@@ -854,7 +855,7 @@ router.get('/analytics/trends', async (req, res) => {
 
     res.json(trends);
   } catch (error) {
-    console.error('[expenses] GET /analytics/trends', error);
+    logger.error({ err: error }, '[expenses] GET /analytics/trends');
     res.status(500).json({
       message: 'Failed to fetch trends',
       error: 'Failed to fetch trends'
@@ -903,7 +904,7 @@ router.get('/analytics/top-categories', async (req, res) => {
     
     res.json(result);
   } catch (error) {
-    console.error('[expenses] GET /analytics/top-categories', error);
+    logger.error({ err: error }, '[expenses] GET /analytics/top-categories');
     res.status(500).json({
       message: 'Failed to fetch top categories',
       error: 'Failed to fetch top categories'

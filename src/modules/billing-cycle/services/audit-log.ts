@@ -1,3 +1,4 @@
+import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
 
 export async function writeAdminAuditLog(input: {
@@ -20,6 +21,6 @@ export async function writeAdminAuditLog(input: {
       },
     });
   } catch (e) {
-    console.error("[audit] Failed to persist admin audit:", e);
+    logger.error({ err: e }, "[audit] Failed to persist admin audit");
   }
 }

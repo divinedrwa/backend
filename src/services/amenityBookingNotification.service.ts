@@ -1,4 +1,5 @@
 import { BookingStatus, NotificationCategory } from "@prisma/client";
+import { logger } from "../lib/logger";
 import { NotificationService } from "./notification.service";
 
 function statusLabel(s: BookingStatus): string {
@@ -52,9 +53,6 @@ export async function notifyResidentAmenityBookingStatusChanged(params: {
       { category: NotificationCategory.AMENITY },
     );
   } catch (e) {
-    console.error("[amenity-booking-notify] failed", {
-      bookingId: params.bookingId,
-      error: e,
-    });
+    logger.error({ err: e, bookingId: params.bookingId }, "[amenity-booking-notify] failed");
   }
 }

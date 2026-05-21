@@ -1,4 +1,5 @@
 import Redis from "ioredis";
+import { logger } from "../../../lib/logger";
 
 const MEMORY = new Map<string, { expiresAtMs: number; value: string }>();
 
@@ -15,7 +16,7 @@ function getRedis(): Redis | null {
       retryStrategy: (times) => (times > 5 ? null : Math.min(times * 200, 3000)),
     });
     redisClient.on("error", (err) => {
-      console.error("[billing-cache] Redis error:", err.message);
+      logger.error({ err }, "[billing-cache] Redis error");
     });
   }
   return redisClient;

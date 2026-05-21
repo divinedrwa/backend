@@ -6,6 +6,7 @@
  */
 
 import { Prisma } from '@prisma/client';
+import { logger } from './logger';
 import { prisma } from './prisma';
 import { computeSocietyMoneySnapshot } from './societyFinance';
 
@@ -33,7 +34,7 @@ export async function reconcileSocietyLedger(
   societyId: string,
   db: Db = prisma,
 ): Promise<ReconciliationResult> {
-  console.log(`[Reconciliation] Starting for society ${societyId}`);
+  logger.info(`[Reconciliation] Starting for society ${societyId}`);
 
   try {
     // 1. Get society-level snapshot
@@ -135,12 +136,13 @@ export async function reconcileSocietyLedger(
           });
           alertsCreated++;
 
-          console.error(`[Reconciliation] MISMATCH in cycle ${cycleId}:`, {
+          logger.error({
+            cycleId,
             cycleTitle: data.cycleTitle,
             villaSum: villaSum.toFixed(2),
             societyCash: societyCash.toFixed(2),
             difference: difference.toFixed(2),
-          });
+          }, `[Reconciliation] MISMATCH in cycle ${cycleId}`);
         }
       }
     }
@@ -157,7 +159,7 @@ export async function reconcileSocietyLedger(
     const totalDifference = Math.abs(totalVillaSum - totalSocietyCash);
     const overallMatched = totalDifference <= 0.01;
 
-    console.log(`[Reconciliation] Overall: villa=${totalVillaSum.toFixed(2)}, society=${totalSocietyCash.toFixed(2)}, diff=${totalDifference.toFixed(2)}`);
+    logger.info(`[Reconciliation] Overall: villa=${totalVillaSum.toFixed(2)}, society=${totalSocietyCash.toFixed(2)}, diff=${totalDifference.toFixed(2)}`);
 
     return {
       matched: overallMatched && cycleResults.every(r => r.matched),
@@ -166,7 +168,7 @@ export async function reconcileSocietyLedger(
       alertsCreated,
     };
   } catch (error) {
-    console.error(`[Reconciliation] Error for society ${societyId}:`, error);
+    logger.error({ err: error, societyId }, `[Reconciliation] Error for society ${societyId}`);
     throw error;
   }
 }
@@ -195,18 +197,19 @@ export async function reconcileAllSocieties(): Promise<{
       const result = await reconcileSocietyLedger(society.id);
       
       if (!result.matched) {
-        console.error(`[Cron] Reconciliation FAILED for ${society.name}:`, {
+        logger.error({
+          societyName: society.name,
           totalDifference: result.totalDifference.toFixed(2),
           alertsCreated: result.alertsCreated,
-        });
+        }, `[Cron] Reconciliation FAILED for ${society.name}`);
       } else {
-        console.log(`[Cron] Reconciliation OK for ${society.name}`);
+        logger.info(`[Cron] Reconciliation OK for ${society.name}`);
       }
 
       totalAlerts += result.alertsCreated;
       successful++;
     } catch (error) {
-      console.error(`[Cron] Reconciliation error for ${society.name}:`, error);
+      logger.error({ err: error, societyName: society.name }, `[Cron] Reconciliation error for ${society.name}`);
       failed++;
     }
   }

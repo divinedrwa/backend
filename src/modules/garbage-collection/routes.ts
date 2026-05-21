@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { notifySocietyRoles } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -55,7 +56,7 @@ router.post("/entry", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(l
       title: "Garbage collection",
       body: `Collector arrived at ${event.gate?.name ?? "the gate"}. Please prepare your garbage.`,
       data: { eventId: event.id, gateId },
-    }).catch((err) => console.error("[notifications] garbage push failed:", err));
+    }).catch((err) => logger.error({ err }, "[notifications] garbage push failed"));
 
     return res.status(201).json({
       event,

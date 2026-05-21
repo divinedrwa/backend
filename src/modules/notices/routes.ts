@@ -1,6 +1,7 @@
 import { NoticeCategory, NoticePriority, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import {
   broadcastNoticeToAllResidents,
@@ -168,14 +169,14 @@ router.post(
             body: preview,
             data,
             userIds: recipientResolved.ids,
-          }).catch((err) => console.error("[notifications] targeted notice failed:", err));
+          }).catch((err) => logger.error({ err }, "[notifications] targeted notice failed"));
         } else {
           void broadcastNoticeToAllResidents({
             societyId,
             title: body.title,
             body: preview,
             data,
-          }).catch((err) => console.error("[notifications] notice broadcast failed:", err));
+          }).catch((err) => logger.error({ err }, "[notifications] notice broadcast failed"));
         }
       }
 

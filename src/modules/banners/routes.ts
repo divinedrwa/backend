@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -45,7 +46,7 @@ function notifyResidentsAboutBanner(banner: {
       bannerType: banner.type,
     },
   }).catch((err) =>
-    console.error("[notifications] banner broadcast failed:", err),
+    logger.error({ err }, "[notifications] banner broadcast failed"),
   );
 }
 

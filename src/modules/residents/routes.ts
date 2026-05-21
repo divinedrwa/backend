@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -346,8 +347,7 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
           `profile_${userId}_${Date.now()}`
         );
       } catch (e) {
-        // eslint-disable-next-line no-console
-        console.error("[cloudinary] profile upload", e);
+        logger.error({ err: e }, "[cloudinary] profile upload failed");
         return res.status(502).json({ message: "Could not upload image. Try again." });
       }
     }
@@ -592,12 +592,22 @@ router.get("/my-villa", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (r
 // GET /api/residents/my-family - Get family members
 router.get("/my-family", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
-    const { userId, societyId } = req.auth!;
+    const { userId } = req.auth!;
 
-    const familyMembers = await prisma.familyMember.findMany({
+    const raw = await prisma.familyMember.findMany({
       where: { residentId: userId },
       orderBy: { createdAt: "desc" },
     });
+
+    const familyMembers = raw.map((m) => ({
+      id: m.id,
+      name: m.name,
+      relationship: m.relation,
+      age: m.age,
+      phone: m.phone,
+      idProof: m.idProof,
+      createdAt: m.createdAt,
+    }));
 
     return res.json({ familyMembers, count: familyMembers.length });
   } catch (error) {
@@ -611,18 +621,30 @@ router.post("/add-family-member", requireRole(UserRole.RESIDENT, UserRole.ADMIN)
     const { userId } = req.auth!;
     const { name, relationship, age, phone, idProof } = req.body;
 
-    const familyMember = await prisma.familyMember.create({
+    const created = await prisma.familyMember.create({
       data: {
         residentId: userId,
         name,
-        relation: relationship, // Schema field is 'relation'
+        relation: relationship,
+        relationship,
         age,
         phone,
         idProof,
       },
     });
 
-    return res.status(201).json({ message: "Family member added successfully", familyMember });
+    return res.status(201).json({
+      message: "Family member added successfully",
+      familyMember: {
+        id: created.id,
+        name: created.name,
+        relationship: created.relation,
+        age: created.age,
+        phone: created.phone,
+        idProof: created.idProof,
+        createdAt: created.createdAt,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -644,18 +666,29 @@ router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asyn
       return res.status(404).json({ message: "Family member not found" });
     }
 
-    const familyMember = await prisma.familyMember.update({
+    const updated = await prisma.familyMember.update({
       where: { id },
       data: {
         ...(name && { name }),
-        ...(relationship && { relation: relationship }),
+        ...(relationship && { relation: relationship, relationship }),
         ...(age && { age }),
         ...(phone && { phone }),
         ...(idProof && { idProof }),
       },
     });
 
-    return res.json({ message: "Family member updated successfully", familyMember });
+    return res.json({
+      message: "Family member updated successfully",
+      familyMember: {
+        id: updated.id,
+        name: updated.name,
+        relationship: updated.relation,
+        age: updated.age,
+        phone: updated.phone,
+        idProof: updated.idProof,
+        createdAt: updated.createdAt,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -725,10 +758,19 @@ router.get("/emergency-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN)
   try {
     const { userId } = req.auth!;
 
-    const contacts = await prisma.emergencyContact.findMany({
+    const raw = await prisma.emergencyContact.findMany({
       where: { residentId: userId },
       orderBy: { createdAt: "desc" },
     });
+
+    const contacts = raw.map((c) => ({
+      id: c.id,
+      name: c.name,
+      relationship: c.relation,
+      phone: c.phone,
+      address: c.address,
+      createdAt: c.createdAt,
+    }));
 
     return res.json({ contacts, count: contacts.length });
   } catch (error) {
@@ -742,17 +784,28 @@ router.post("/emergency-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN
     const { userId } = req.auth!;
     const { name, relationship, phone, address } = req.body;
 
-    const contact = await prisma.emergencyContact.create({
+    const created = await prisma.emergencyContact.create({
       data: {
         residentId: userId,
         name,
-        relation: relationship, // Schema field is 'relation'
+        relation: relationship,
+        relationship,
         phone,
         address,
       },
     });
 
-    return res.status(201).json({ message: "Emergency contact added successfully", contact });
+    return res.status(201).json({
+      message: "Emergency contact added successfully",
+      contact: {
+        id: created.id,
+        name: created.name,
+        relationship: created.relation,
+        phone: created.phone,
+        address: created.address,
+        createdAt: created.createdAt,
+      },
+    });
   } catch (error) {
     next(error);
   }
@@ -802,7 +855,7 @@ router.get("/sos/active", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
   try {
     const { userId, societyId } = req.auth!;
 
-    const alert = await prisma.sOSAlert.findFirst({
+    const raw = await prisma.sOSAlert.findFirst({
       where: {
         triggeredBy: userId,
         societyId,
@@ -815,6 +868,14 @@ router.get("/sos/active", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
       orderBy: { createdAt: "desc" },
     });
 
+    const alert = raw
+      ? {
+          ...raw,
+          type: raw.emergencyType,
+          description: raw.message,
+        }
+      : null;
+
     return res.json({ alert });
   } catch (error) {
     next(error);
@@ -826,7 +887,7 @@ router.get("/my-sos", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req
   try {
     const { userId, societyId, villaId } = req.auth!;
 
-    const sosAlerts = await prisma.sOSAlert.findMany({
+    const raw = await prisma.sOSAlert.findMany({
       where: {
         triggeredBy: userId,
         societyId,
@@ -843,7 +904,13 @@ router.get("/my-sos", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req
       take: 50,
     });
 
-    return res.json({ alerts: sosAlerts, count: sosAlerts.length });
+    const alerts = raw.map((a) => ({
+      ...a,
+      type: a.emergencyType,
+      description: a.message,
+    }));
+
+    return res.json({ alerts, count: alerts.length });
   } catch (error) {
     next(error);
   }
@@ -877,6 +944,7 @@ router.get("/my-notices", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
       const { _count, ...rest } = n;
       return {
         ...rest,
+        attachmentUrl: n.fileUrl,
         audienceScope: _count.recipients > 0 ? "SELECTED" : "SOCIETY",
       };
     });

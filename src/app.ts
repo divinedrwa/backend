@@ -1,6 +1,7 @@
 import "./config/env";
 import cors from "cors";
 import express from "express";
+import rateLimit from "express-rate-limit";
 import helmet from "helmet";
 import path from "path";
 import pinoHttp from "pino-http";
@@ -32,8 +33,8 @@ const corsAllowList = (process.env.CORS_ORIGINS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 if (corsAllowList.length === 0 && process.env.NODE_ENV === "production") {
-  console.warn(
-    "⚠️  CORS_ORIGINS is not set in production — defaulting to restrictive CORS. " +
+  logger.warn(
+    "CORS_ORIGINS is not set in production — defaulting to restrictive CORS. " +
     "Set CORS_ORIGINS to a comma-separated allow-list of origins."
   );
 }
@@ -45,6 +46,18 @@ app.use(
         : process.env.NODE_ENV === "production"
           ? false
           : true,
+  })
+);
+
+// Global rate limit: 100 requests per minute per IP. Stricter per-route
+// limits on /auth/login and /auth/register still apply on top of this.
+app.use(
+  rateLimit({
+    windowMs: 60 * 1000,
+    limit: 100,
+    standardHeaders: "draft-7",
+    legacyHeaders: false,
+    message: { message: "Too many requests, please try again later" },
   })
 );
 

@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
 import { UserRole } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -78,7 +79,7 @@ router.post(
       });
 
       if (existing) {
-        console.log(`[Idempotency] Returning existing payment for key: ${idempotencyKey}`);
+        logger.info(`[Idempotency] Returning existing payment for key: ${idempotencyKey}`);
         return res.status(200).json({
           payment: existing,
           note: 'Payment already recorded (idempotent)',
@@ -130,7 +131,7 @@ router.post(
 
     return res.status(201).json({ payment: result.payment });
   } catch (error: unknown) {
-    console.error('[Payment] Recording failed:', error);
+    logger.error({ err: error }, '[Payment] Recording failed');
     
     // Sanitize errors for client
     if (error instanceof Error) {

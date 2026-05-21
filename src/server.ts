@@ -13,6 +13,11 @@ const server = app.listen(env.PORT, host, () => {
   logger.info({ host, port: env.PORT }, "API listening");
 });
 
+// Request & connection timeouts
+server.timeout = 30_000; // 30s per request
+server.keepAliveTimeout = 65_000; // slightly above typical LB idle timeout (60s)
+server.headersTimeout = 66_000; // must exceed keepAliveTimeout
+
 /* ── Graceful shutdown ────────────────────────────────────────── */
 async function shutdown(signal: string) {
   logger.info({ signal }, "Shutting down gracefully");

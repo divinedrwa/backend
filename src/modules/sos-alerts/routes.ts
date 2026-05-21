@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -116,7 +117,7 @@ router.post("/", requireAuth, validateBody(createSOSSchema), async (req, res, ne
         emergencyType,
         type: "SOS_CREATED",
       },
-    }).catch((err) => console.error("[notifications] SOS push failed:", err));
+    }).catch((err) => logger.error({ err }, "[notifications] SOS push failed"));
 
     scheduleSosEscalation(alert.id, societyId, vl, emergencyType);
 

@@ -2,6 +2,7 @@ import { Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import { logger } from "../../lib/logger";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -132,8 +133,7 @@ router.post(
           villa: visitor.villa,
         });
       } catch (notifyErr) {
-        // eslint-disable-next-line no-console
-        console.error("[pre-approved-visitors POST] guard notify error:", notifyErr);
+        logger.error({ err: notifyErr }, "[pre-approved-visitors POST] guard notify error");
       }
 
       return res.status(201).json({ visitor, otp });

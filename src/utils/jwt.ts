@@ -1,3 +1,4 @@
+import crypto from "crypto";
 import jwt from "jsonwebtoken";
 import { UserRole } from "@prisma/client";
 import { env } from "../config/env";
@@ -27,9 +28,19 @@ export function signAuthToken(payload: JwtPayload): string {
   } else {
     body.societyId = payload.societyId;
   }
-  return jwt.sign(body, env.JWT_SECRET, { expiresIn: "7d" });
+  return jwt.sign(body, env.JWT_SECRET, { expiresIn: "15m" });
 }
 
 export function verifyAuthToken(token: string): JwtPayload {
   return jwt.verify(token, env.JWT_SECRET) as JwtPayload;
+}
+
+/** Generate a cryptographically random refresh token string. */
+export function generateRefreshToken(): string {
+  return crypto.randomBytes(40).toString("hex");
+}
+
+/** Hash a refresh token for DB storage (SHA-256). */
+export function hashRefreshToken(token: string): string {
+  return crypto.createHash("sha256").update(token).digest("hex");
 }

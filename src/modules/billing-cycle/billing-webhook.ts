@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import type { Request, Response } from "express";
 import { BillingPaymentSource, BillingUserPaymentStatus, Prisma } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { verifyRazorpayWebhookSignature } from "./services/razorpay-webhook-verify";
 import { notifyUser } from "../../services/notification.service";
@@ -238,7 +239,7 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
 
     res.status(200).json({ ok: true });
   } catch (e) {
-    console.error("[billing webhook]", e);
+    logger.error({ err: e }, "[billing webhook] processing failed");
     res.status(500).json({ message: "Processing failed" });
   }
 }

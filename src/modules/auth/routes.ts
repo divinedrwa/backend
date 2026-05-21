@@ -9,9 +9,10 @@ import {
   SocietyStatus,
   UserRole,
 } from "@prisma/client";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
-import { signAuthToken } from "../../utils/jwt";
+import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
 
 const router = Router();
 
@@ -84,11 +85,7 @@ async function applyLoginDevice(opts: {
   } catch (deviceError) {
     // Device token registration is best-effort during login. Failure must
     // not break sign-in; log without leaking the FCM token itself.
-    console.error("[auth] device token upsert failed", {
-      userId,
-      deviceId,
-      deviceType,
-    });
+    logger.error({ userId, deviceId, deviceType }, "[auth] device token upsert failed");
   }
 }
 
@@ -133,7 +130,21 @@ function identifierWhere(identifier: string) {
   };
 }
 
-function serializeAuthUser(user: {
+/** Create a hashed refresh token row in the DB and return the raw token. */
+async function createRefreshTokenForUser(userId: string): Promise<string> {
+  const raw = generateRefreshToken();
+  const hashed = hashRefreshToken(raw);
+  await prisma.refreshToken.create({
+    data: {
+      token: hashed,
+      userId,
+      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+    },
+  });
+  return raw;
+}
+
+async function serializeAuthUser(user: {
   id: string;
   username: string;
   name: string;
@@ -159,8 +170,10 @@ function serializeAuthUser(user: {
     role: user.role,
     villaId: user.villaId,
   });
+  const refreshToken = await createRefreshTokenForUser(user.id);
   return {
     token,
+    refreshToken,
     user: {
       id: user.id,
       username: user.username,
@@ -357,7 +370,7 @@ router.post(
         deviceName: body.deviceName,
       });
 
-      return res.status(201).json(serializeAuthUser(userResult));
+      return res.status(201).json(await serializeAuthUser(userResult));
     } catch (error) {
       if (error instanceof InviteRegisterError) {
         res.status(error.statusCode).json({ message: error.message });
@@ -425,7 +438,7 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
     }
 
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
-    return res.json(serializeAuthUser(user));
+    return res.json(await serializeAuthUser(user));
   } catch (error) {
     next(error);
   }
@@ -477,7 +490,7 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
     }
 
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
-    return res.json(serializeAuthUser(user));
+    return res.json(await serializeAuthUser(user));
   } catch (error) {
     next(error);
   }
@@ -533,7 +546,48 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
     }
 
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
-    return res.json(serializeAuthUser(user));
+    return res.json(await serializeAuthUser(user));
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /auth/refresh — exchange a valid refresh token for a new access + refresh token pair.
+ * The old refresh token is revoked (rotation).
+ */
+const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+
+router.post("/refresh", validateBody(refreshSchema), async (req, res, next) => {
+  try {
+    const { refreshToken: rawToken } = req.body as z.infer<typeof refreshSchema>;
+    const hashed = hashRefreshToken(rawToken);
+
+    const stored = await prisma.refreshToken.findUnique({
+      where: { token: hashed },
+      include: {
+        user: {
+          include: loginUserInclude,
+        },
+      },
+    });
+
+    if (!stored || stored.revoked || stored.expiresAt <= new Date()) {
+      return res.status(401).json({ message: "Invalid or expired refresh token" });
+    }
+
+    if (!stored.user.isActive) {
+      return res.status(401).json({ message: "Account is inactive" });
+    }
+
+    // Revoke old token (rotation)
+    await prisma.refreshToken.update({
+      where: { id: stored.id },
+      data: { revoked: true },
+    });
+
+    // Issue new tokens
+    return res.json(await serializeAuthUser(stored.user));
   } catch (error) {
     next(error);
   }

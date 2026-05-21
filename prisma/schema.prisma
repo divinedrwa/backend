@@ -340,6 +340,7 @@ model User {
   cycleVillaExclusions  CycleVillaExclusion[] @relation("CycleVillaExclusions")
   upiSubmissions        UpiPaymentSubmission[] @relation("UpiSubmitter")
   upiVerifications      UpiPaymentSubmission[] @relation("UpiVerifier")
+  refreshTokens         RefreshToken[]
 
   @@index([societyId])
   @@index([villaId])
@@ -1771,4 +1772,16 @@ model UpiPaymentSubmission {
   @@index([societyId, status])
   @@index([userId])
   @@map("upi_payment_submissions")
+}
+
+model RefreshToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
 }

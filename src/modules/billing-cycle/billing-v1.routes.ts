@@ -11,6 +11,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -197,8 +198,7 @@ router.post(
           { category: NotificationCategory.MAINTENANCE },
         );
       } catch (notifyErr) {
-        // eslint-disable-next-line no-console
-        console.error("[billing-cycle.create] resident notify failed:", notifyErr);
+        logger.error({ err: notifyErr }, "[billing-cycle.create] resident notify failed");
       }
 
       res.status(201).json({ cycle });
