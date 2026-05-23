@@ -190,6 +190,7 @@ model Society {
   billingAccounts BillingAccount[]
   reconciliationAlerts ReconciliationAlert[]
   upiPaymentSubmissions UpiPaymentSubmission[]
+  specialProjects       SpecialProject[]
 
   @@index([status])
 }
@@ -220,6 +221,7 @@ enum NotificationCategory {
   GARBAGE
   MAINTENANCE
   EXPENSE
+  PROJECT
   OTHER
 }
 
@@ -341,6 +343,9 @@ model User {
   upiSubmissions        UpiPaymentSubmission[] @relation("UpiSubmitter")
   upiVerifications      UpiPaymentSubmission[] @relation("UpiVerifier")
   refreshTokens         RefreshToken[]
+  specialProjectsCreated SpecialProject[]     @relation("SpecialProjectCreator")
+  projectPaymentsMarked  ProjectPayment[]     @relation("ProjectPaymentMarker")
+  projectExpensesCreated ProjectExpense[]      @relation("ProjectExpenseCreator")
 
   @@index([societyId])
   @@index([villaId])
@@ -383,6 +388,7 @@ model Villa {
   billingAccount        BillingAccount?
   cycleExclusions       CycleVillaExclusion[]
   upiPaymentSubmissions UpiPaymentSubmission[]
+  projectContributions  ProjectContribution[]
 
   @@unique([societyId, villaNumber])
   @@index([societyId])
@@ -1788,4 +1794,106 @@ model RefreshToken {
   createdAt DateTime @default(now())
 
   @@index([userId])
+}
+
+// --- Special Projects & Collections ---
+
+enum SpecialProjectStatus {
+  ACTIVE
+  COMPLETED
+  CANCELLED
+}
+
+enum SpecialProjectType {
+  REPAIR
+  UPGRADE
+  PURCHASE
+  EVENT
+  OTHER
+}
+
+enum ProjectContributionStatus {
+  UNPAID
+  PARTIALLY_PAID
+  PAID
+}
+
+model SpecialProject {
+  id              String               @id @default(cuid())
+  societyId       String
+  society         Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  title           String
+  description     String?
+  type            SpecialProjectType   @default(OTHER)
+  status          SpecialProjectStatus @default(ACTIVE)
+  targetAmount    Decimal              @db.Decimal(12, 2)
+  totalCollected  Decimal              @default(0) @db.Decimal(12, 2)
+  totalExpenses   Decimal              @default(0) @db.Decimal(12, 2)
+  createdById     String
+  createdBy       User                 @relation("SpecialProjectCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  contributions   ProjectContribution[]
+  expenses        ProjectExpense[]
+
+  @@index([societyId, status])
+  @@index([societyId])
+  @@map("special_projects")
+}
+
+model ProjectContribution {
+  id        String                    @id @default(cuid())
+  projectId String
+  project   SpecialProject            @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  villaId   String
+  villa     Villa                     @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  amount    Decimal                   @db.Decimal(12, 2)
+  paidAmount Decimal                  @default(0) @db.Decimal(12, 2)
+  status    ProjectContributionStatus @default(UNPAID)
+  dueDate   DateTime?
+  createdAt DateTime                  @default(now())
+  updatedAt DateTime                  @updatedAt
+
+  payments  ProjectPayment[]
+
+  @@unique([projectId, villaId])
+  @@index([projectId])
+  @@index([villaId])
+  @@map("project_contributions")
+}
+
+model ProjectPayment {
+  id              String             @id @default(cuid())
+  contributionId  String
+  contribution    ProjectContribution @relation(fields: [contributionId], references: [id], onDelete: Cascade)
+  amount          Decimal            @db.Decimal(12, 2)
+  method          PaymentMode        @default(CASH)
+  reference       String?
+  paidAt          DateTime           @default(now())
+  markedById      String
+  markedBy        User               @relation("ProjectPaymentMarker", fields: [markedById], references: [id], onDelete: Restrict)
+  idempotencyKey  String?            @unique
+  createdAt       DateTime           @default(now())
+
+  @@index([contributionId])
+  @@map("project_payments")
+}
+
+model ProjectExpense {
+  id          String         @id @default(cuid())
+  projectId   String
+  project     SpecialProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  description String
+  amount      Decimal        @db.Decimal(12, 2)
+  vendor      String?
+  receiptUrl  String?
+  expenseDate DateTime       @default(now())
+  createdById String
+  createdBy   User           @relation("ProjectExpenseCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt   DateTime       @default(now())
+  updatedAt   DateTime       @updatedAt
+
+  @@index([projectId])
+  @@map("project_expenses")
 }

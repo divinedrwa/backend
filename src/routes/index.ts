@@ -45,6 +45,7 @@ import exportRoutes from "../modules/export/routes";
 import reconciliationRoutes from "../modules/reconciliation/routes";
 import upiPaymentAdminRoutes from "../modules/upi-payments/admin-routes";
 import upiPaymentResidentRoutes from "../modules/upi-payments/resident-routes";
+import specialProjectRoutes from "../modules/special-projects/routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -56,6 +57,7 @@ import residentAmenityRoutes from "../modules/residents/amenities";
 import residentVehicleRoutes from "../modules/residents/vehicles";
 import residentStaffRoutes from "../modules/residents/staff";
 import residentExpenseRoutes from "../modules/residents/expenses";
+import residentSpecialProjectRoutes from "../modules/residents/special-projects";
 
 // NEW: Guard Mobile APIs
 import guardRoutes from "../modules/guards/routes";
@@ -145,6 +147,9 @@ router.use("/reconciliation", reconciliationRoutes);
 /** UPI payment submissions (admin verify/reject). */
 router.use("/upi-payments", upiPaymentAdminRoutes);
 
+/** Special Projects & Collections (admin). */
+router.use("/special-projects", specialProjectRoutes);
+
 // ========================================
 // MOBILE APP APIs (NEW)
 // ========================================
@@ -160,6 +165,7 @@ router.use("/residents", residentAmenityRoutes); // Amenity bookings
 router.use("/residents", residentVehicleRoutes); // Vehicles
 router.use("/residents", residentStaffRoutes); // Domestic staff
 router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
+router.use("/residents", residentSpecialProjectRoutes); // Special projects
 
 // Guard Mobile APIs
 router.use("/guards", guardRoutes); // Dashboard, shift, SOS
