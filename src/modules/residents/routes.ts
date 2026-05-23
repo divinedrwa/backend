@@ -1084,4 +1084,60 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   }
 });
 
+// ========================================
+// COMMUNITY DIRECTORY
+// ========================================
+
+// GET /api/residents/community-directory — searchable resident directory
+router.get("/community-directory", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const q = ((req.query.q as string) || "").trim().toLowerCase();
+
+    const residents = await prisma.user.findMany({
+      where: {
+        societyId,
+        role: { in: [UserRole.RESIDENT, UserRole.ADMIN] },
+        isActive: true,
+        ...(q
+          ? {
+              OR: [
+                { name: { contains: q, mode: "insensitive" as const } },
+                { villa: { villaNumber: { contains: q, mode: "insensitive" as const } } },
+                { villa: { block: { contains: q, mode: "insensitive" as const } } },
+              ],
+            }
+          : {}),
+      },
+      take: 100,
+      orderBy: { name: "asc" },
+      select: {
+        id: true,
+        name: true,
+        phone: true,
+        villa: {
+          select: {
+            villaNumber: true,
+            block: true,
+          },
+        },
+      },
+    });
+
+    const rows = residents.map((r) => ({
+      userId: r.id,
+      name: r.name,
+      villaNumber: r.villa?.villaNumber ?? null,
+      block: r.villa?.block ?? null,
+      phoneMasked: r.phone && r.phone.length >= 4
+        ? "****" + r.phone.slice(-4)
+        : null,
+    }));
+
+    return res.json({ residents: rows, count: rows.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;

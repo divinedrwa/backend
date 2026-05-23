@@ -233,4 +233,64 @@ router.delete("/vehicles/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), a
   }
 });
 
+// GET /api/residents/my-vehicle-log - Gate entry/exit log for resident's vehicles
+router.get("/my-vehicle-log", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { userId, societyId } = req.auth!;
+
+    // Get user's villa to find registered vehicles
+    const user = await prisma.user.findFirst({
+      where: { id: userId, societyId },
+      select: { villaId: true },
+    });
+
+    if (!user || !user.villaId) {
+      return res.json({ entries: [], count: 0 });
+    }
+
+    // Get registration numbers of villa's registered vehicles
+    const vehicles = await prisma.vehicle.findMany({
+      where: { villaId: user.villaId, societyId },
+      select: { registrationNumber: true },
+    });
+
+    const regNumbers = vehicles.map((v) => v.registrationNumber.toUpperCase());
+
+    if (regNumbers.length === 0) {
+      return res.json({ entries: [], count: 0 });
+    }
+
+    // Query gate vehicle ledger for matching registration numbers
+    const entries = await prisma.gateVehicleLedger.findMany({
+      where: {
+        societyId,
+        registrationNumber: { in: regNumbers },
+      },
+      orderBy: { entryAt: "desc" },
+      take: 50,
+      include: {
+        guard: { select: { name: true } },
+        villa: { select: { villaNumber: true, block: true } },
+      },
+    });
+
+    const mapped = entries.map((e) => ({
+      id: e.id,
+      registrationNumber: e.registrationNumber,
+      kind: e.kind,
+      entryAt: e.entryAt,
+      exitAt: e.exitAt,
+      guardName: e.guard?.name ?? null,
+      notes: e.notes,
+      villa: e.villa
+        ? { villaNumber: e.villa.villaNumber, block: e.villa.block }
+        : null,
+    }));
+
+    return res.json({ entries: mapped, count: mapped.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;
