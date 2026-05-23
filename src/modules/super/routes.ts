@@ -6,6 +6,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { signAuthToken } from "../../utils/jwt";
+import { passwordSchema } from "../../lib/passwordSchema";
 
 const router = Router();
 
@@ -41,7 +42,7 @@ const createSocietyAdminSchema = z.object({
   username: z.string().min(3).max(50),
   name: z.string().min(2),
   email: z.string().email(),
-  password: z.string().min(6),
+  password: passwordSchema,
   phone: z.string().min(5).optional(),
 });
 

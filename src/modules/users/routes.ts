@@ -7,11 +7,13 @@ import {
   demoteOtherResidentsToExcluded,
   ensurePrimaryCoverageForVilla,
 } from "../../lib/maintenanceBillingRole";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { resolveResidentDwelling } from "../../lib/residentUnitResolve";
 import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
+import { passwordSchema } from "../../lib/passwordSchema";
 
 const router = Router();
 
@@ -24,7 +26,7 @@ const createUserSchema = z
     username: z.string().min(3).max(50),
     name: z.string().min(2),
     email: z.string().email(),
-    password: z.string().min(6),
+    password: passwordSchema,
     phone: z.string().optional(),
     role: z.nativeEnum(UserRole),
     residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
@@ -76,7 +78,7 @@ const updateUserSchema = z.object({
   phone: z
     .preprocess((v) => (v === "" ? null : v), z.string().nullable().optional()),
   /** Admin password reset — omit or empty to leave unchanged */
-  password: z.string().min(6).optional().or(z.literal("")),
+  password: passwordSchema.optional().or(z.literal("")),
   role: z.nativeEnum(UserRole).optional(),
   villaId: z.string().optional().nullable(),
   unitId: z.string().optional().nullable(),
@@ -94,46 +96,52 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { role, isActive } = req.query;
     const roleParam = typeof role === "string" ? role : undefined;
-    
+    const pagination = getPagination(req);
+
     const where: Prisma.UserWhereInput = { societyId: req.auth!.societyId };
     if (roleParam) where.role = roleParam as UserRole;
     if (isActive !== undefined) where.isActive = isActive === "true";
 
-    const users = await prisma.user.findMany({
-      where,
-      select: {
-        id: true,
-        societyId: true,
-        username: true,
-        name: true,
-        email: true,
-        phone: true,
-        role: true,
-        residentType: true,
-        villaId: true,
-        unitId: true,
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
+    const [users, total] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        select: {
+          id: true,
+          societyId: true,
+          username: true,
+          name: true,
+          email: true,
+          phone: true,
+          role: true,
+          residentType: true,
+          villaId: true,
+          unitId: true,
+          villa: {
+            select: {
+              villaNumber: true,
+              block: true,
+            },
           },
-        },
-        unit: {
-          select: {
-            id: true,
-            unitCode: true,
-            label: true,
-            isDefault: true,
+          unit: {
+            select: {
+              id: true,
+              unitCode: true,
+              label: true,
+              isDefault: true,
+            },
           },
+          moveInDate: true,
+          moveOutDate: true,
+          isActive: true,
+          maintenanceBillingRole: true,
+          createdAt: true,
         },
-        moveInDate: true,
-        moveOutDate: true,
-        isActive: true,
-        maintenanceBillingRole: true,
-        createdAt: true,
-      },
-      orderBy: { createdAt: "desc" },
-    });
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.user.count({ where }),
+    ]);
 
     return res.json({
       users: users.map((u) => ({
@@ -141,6 +149,7 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         linkedPropertyId: u.villaId,
         linkedUnitId: u.unitId,
       })),
+      ...paginationMeta(total, users.length, pagination),
     });
   } catch (error) {
     next(error);
@@ -547,6 +556,14 @@ router.patch(
 
       if (!updatedUser) {
         return res.status(404).json({ message: "User not found" });
+      }
+
+      // If password was changed, revoke all refresh tokens to force re-login.
+      if (data.passwordHash) {
+        await prisma.refreshToken.updateMany({
+          where: { userId: id, revoked: false },
+          data: { revoked: true },
+        });
       }
 
       return res.json({

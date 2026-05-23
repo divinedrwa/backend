@@ -2,6 +2,7 @@ import { NoticeCategory, NoticePriority, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { logger } from "../../lib/logger";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import {
   broadcastNoticeToAllResidents,
@@ -78,25 +79,32 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    const notices = await prisma.notice.findMany({
-      where: { societyId: req.auth!.societyId },
-      orderBy: { createdAt: "desc" },
-      include: {
-        recipients: {
-          include: {
-            user: {
-              select: {
-                id: true,
-                name: true,
-                email: true,
-                villa: { select: { villaNumber: true, block: true } },
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [notices, total] = await Promise.all([
+      prisma.notice.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+        include: {
+          recipients: {
+            include: {
+              user: {
+                select: {
+                  id: true,
+                  name: true,
+                  email: true,
+                  villa: { select: { villaNumber: true, block: true } },
+                },
               },
             },
           },
         },
-      },
-    });
-    return res.json({ notices });
+      }),
+      prisma.notice.count({ where }),
+    ]);
+    return res.json({ notices, ...paginationMeta(total, notices.length, pagination) });
   } catch (error) {
     next(error);
   }

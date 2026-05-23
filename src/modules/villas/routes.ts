@@ -5,6 +5,7 @@ import {
   normalizeDefaultUnitFlag,
   syncVillaOccupantUnits,
 } from "../../lib/propertyInfrastructure";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { UserRole } from "@prisma/client";
@@ -99,40 +100,48 @@ const bulkMaintenanceAmountSchema = z.object({
 router.get("/", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
+    const pagination = getPagination(req);
 
-    const villas = await prisma.villa.findMany({
-      where: { societyId },
-      include: {
-        users: {
-          where: { isActive: true },
-          select: {
-            id: true,
-            name: true,
-            email: true,
-            role: true,
-            residentType: true,
-            moveInDate: true,
-            unitId: true,
-            unit: { select: { id: true, unitCode: true, label: true } },
+    const where = { societyId };
+    const [villas, total] = await Promise.all([
+      prisma.villa.findMany({
+        where,
+        include: {
+          users: {
+            where: { isActive: true },
+            select: {
+              id: true,
+              name: true,
+              email: true,
+              role: true,
+              residentType: true,
+              moveInDate: true,
+              unitId: true,
+              unit: { select: { id: true, unitCode: true, label: true } },
+            },
+          },
+          units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
+          billingAccount: { select: { id: true, scope: true, villaId: true } },
+          _count: {
+            select: {
+              users: true,
+              maintenance: { where: { status: "PENDING" } },
+            },
           },
         },
-        units: { orderBy: [{ sortOrder: "asc" }, { unitCode: "asc" }] },
-        billingAccount: { select: { id: true, scope: true, villaId: true } },
-        _count: {
-          select: {
-            users: true,
-            maintenance: { where: { status: "PENDING" } },
-          },
-        },
-      },
-      orderBy: { villaNumber: "asc" },
-    });
+        orderBy: { villaNumber: "asc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.villa.count({ where }),
+    ]);
 
     return res.json({
       villas: villas.map((v) => ({
         ...v,
         propertyId: v.id,
       })),
+      ...paginationMeta(total, villas.length, pagination),
     });
   } catch (error) {
     next(error);

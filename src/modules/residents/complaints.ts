@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -28,14 +29,21 @@ router.get("/my-complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asy
     const { userId, societyId } = req.auth!;
     const { status } = req.query;
 
-    const complaints = await prisma.complaint.findMany({
-      where: {
-        residentId: userId,
-        societyId,
-        ...(status && { status: status as any }),
-      },
-      orderBy: { createdAt: "desc" },
-    });
+    const pagination = getPagination(req);
+    const where = {
+      residentId: userId,
+      societyId,
+      ...(status && { status: status as any }),
+    };
+    const [complaints, total] = await Promise.all([
+      prisma.complaint.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.complaint.count({ where }),
+    ]);
 
     const open = complaints.filter((c) => c.status === "OPEN");
     const resolved = complaints.filter((c) => c.status === "RESOLVED");
@@ -43,11 +51,12 @@ router.get("/my-complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asy
     return res.json({
       complaints,
       summary: {
-        total: complaints.length,
+        total,
         open: open.length,
         inProgress: complaints.filter((c) => c.status === "IN_PROGRESS").length,
         resolved: resolved.length,
       },
+      ...paginationMeta(total, complaints.length, pagination),
     });
   } catch (error) {
     next(error);

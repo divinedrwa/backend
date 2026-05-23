@@ -1,6 +1,7 @@
 import { PatrolStatus, Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -26,26 +27,22 @@ router.use(requireAuth);
 // List all patrols (admin)
 router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
-    const patrols = await prisma.guardPatrol.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        guard: {
-          select: {
-            id: true,
-            name: true
-          }
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [patrols, total] = await Promise.all([
+      prisma.guardPatrol.findMany({
+        where,
+        include: {
+          guard: { select: { id: true, name: true } },
+          gate: { select: { id: true, name: true } },
         },
-        gate: {
-          select: {
-            id: true,
-            name: true
-          }
-        }
-      },
-      orderBy: { scheduledTime: "desc" },
-      take: 100
-    });
-    return res.json({ patrols });
+        orderBy: { scheduledTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.guardPatrol.count({ where }),
+    ]);
+    return res.json({ patrols, ...paginationMeta(total, patrols.length, pagination) });
   } catch (error) {
     next(error);
   }
@@ -54,24 +51,19 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
 // My patrols (for guards)
 router.get("/my-patrols", requireRole(UserRole.GUARD), async (req, res, next) => {
   try {
-    const patrols = await prisma.guardPatrol.findMany({
-      where: {
-        societyId: req.auth!.societyId,
-        guardId: req.auth!.userId
-      },
-      include: {
-        gate: {
-          select: {
-            id: true,
-            name: true,
-            location: true
-          }
-        }
-      },
-      orderBy: { scheduledTime: "desc" },
-      take: 50
-    });
-    return res.json({ patrols });
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId, guardId: req.auth!.userId };
+    const [patrols, total] = await Promise.all([
+      prisma.guardPatrol.findMany({
+        where,
+        include: { gate: { select: { id: true, name: true, location: true } } },
+        orderBy: { scheduledTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.guardPatrol.count({ where }),
+    ]);
+    return res.json({ patrols, ...paginationMeta(total, patrols.length, pagination) });
   } catch (error) {
     next(error);
   }

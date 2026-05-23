@@ -1,4 +1,5 @@
 import "./config/env";
+import crypto from "crypto";
 import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -61,10 +62,18 @@ app.use(
   })
 );
 
-// Structured HTTP request logging — inherits redaction rules from the shared logger.
+// Request ID: propagate incoming X-Request-Id or generate a new UUID.
+// Attached to every log line via pino-http's `genReqId` and echoed
+// back in the response header for client-side correlation.
 app.use(
   pinoHttp({
     logger,
+    genReqId: (req, res) => {
+      const existing = req.headers["x-request-id"];
+      const id = (typeof existing === "string" && existing) || crypto.randomUUID();
+      res.setHeader("x-request-id", id);
+      return id;
+    },
     autoLogging: { ignore: (req) => req.url === "/health" },
   })
 );

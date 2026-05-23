@@ -164,53 +164,46 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     const maintenanceBillingExcluded =
       user?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
 
-    // Get pending maintenance count from canonical VillaMaintenanceSnapshot
-    // (billing contact only; others see 0).
-    const pendingMaintenance =
-      maintenanceBillingExcluded || !villaId
-        ? 0
-        : await prisma.villaMaintenanceSnapshot.count({
-            where: {
-              villaId,
-              status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
-            },
-          });
-
-    // Total complaints filed by this resident (all statuses). Same rows as GET /my-complaints without ?status=
-    const complaintCount = await prisma.complaint.count({
-      where: {
-        societyId,
-        residentId: userId,
-      },
-    });
-
-    // Get undelivered parcels count
-    const pendingParcels = villaId
-      ? await prisma.parcel.count({
-          where: {
-            villaId,
-            status: { in: ["RECEIVED", "PENDING"] },
-          },
-        })
-      : 0;
-
     const now = new Date();
     const month = now.getMonth() + 1;
     const year = now.getFullYear();
 
-    // Get upcoming bookings count
-    const upcomingBookings = await prisma.amenityBooking.count({
-      where: {
-        residentId: userId,
-        status: { in: ["CONFIRMED", "PENDING"] },
-        startTime: { gte: now },
-      },
-    });
-
-    // Canonical society money snapshot — same source of truth the admin
-    // dashboard uses, so admin and resident views can never disagree on
-    // the society's bank-account balance.
-    const money = await computeSocietyMoneySnapshot(prisma, societyId);
+    // Run all independent counts + money snapshot in parallel.
+    const [pendingMaintenance, complaintCount, pendingParcels, upcomingBookings, money] =
+      await Promise.all([
+        // Pending maintenance (billing contact only; others see 0).
+        maintenanceBillingExcluded || !villaId
+          ? 0
+          : prisma.villaMaintenanceSnapshot.count({
+              where: {
+                villaId,
+                status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+              },
+            }),
+        // Total complaints filed by this resident.
+        prisma.complaint.count({
+          where: { societyId, residentId: userId },
+        }),
+        // Undelivered parcels.
+        villaId
+          ? prisma.parcel.count({
+              where: {
+                villaId,
+                status: { in: ["RECEIVED", "PENDING"] },
+              },
+            })
+          : 0,
+        // Upcoming amenity bookings.
+        prisma.amenityBooking.count({
+          where: {
+            residentId: userId,
+            status: { in: ["CONFIRMED", "PENDING"] },
+            startTime: { gte: now },
+          },
+        }),
+        // Canonical society money snapshot.
+        computeSocietyMoneySnapshot(prisma, societyId),
+      ]);
 
     const mergedAllTimeInflow = money.additionalFundsAllTime;
     const mergedMonthInflow = money.additionalFundsForMonth(month, year);
@@ -1051,8 +1044,11 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
       return res.status(400).json({ message: "Current password is required" });
     }
 
-    if (typeof newPassword !== "string" || newPassword.length < 6) {
-      return res.status(400).json({ message: "New password must be at least 6 characters" });
+    if (typeof newPassword !== "string" || newPassword.length < 8) {
+      return res.status(400).json({ message: "New password must be at least 8 characters" });
+    }
+    if (!/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
+      return res.status(400).json({ message: "Password must contain at least one uppercase letter, one lowercase letter, and one number" });
     }
 
     const user = await prisma.user.findUnique({
@@ -1074,6 +1070,12 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
     await prisma.user.update({
       where: { id: userId },
       data: { passwordHash: hashedPassword },
+    });
+
+    // Revoke all refresh tokens to force re-login on other devices.
+    await prisma.refreshToken.updateMany({
+      where: { userId, revoked: false },
+      data: { revoked: true },
     });
 
     return res.json({ message: "Password changed successfully" });

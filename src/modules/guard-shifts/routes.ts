@@ -1,6 +1,7 @@
 import { Prisma, ShiftType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -79,27 +80,22 @@ router.use(requireAuth);
 // List shifts
 router.get("/", async (req, res, next) => {
   try {
-    const shifts = await prisma.guardShift.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        guard: {
-          select: {
-            id: true,
-            name: true,
-            email: true
-          }
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [shifts, total] = await Promise.all([
+      prisma.guardShift.findMany({
+        where,
+        include: {
+          guard: { select: { id: true, name: true, email: true } },
+          gate: { select: { id: true, name: true, location: true } },
         },
-        gate: {
-          select: {
-            id: true,
-            name: true,
-            location: true
-          }
-        }
-      },
-      orderBy: { startTime: "desc" }
-    });
-    return res.json({ shifts });
+        orderBy: { startTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.guardShift.count({ where }),
+    ]);
+    return res.json({ shifts, ...paginationMeta(total, shifts.length, pagination) });
   } catch (error) {
     next(error);
   }
@@ -108,28 +104,27 @@ router.get("/", async (req, res, next) => {
 // My shifts (for guards)
 router.get("/my-shifts", requireRole(UserRole.GUARD), async (req, res, next) => {
   try {
+    const pagination = getPagination(req);
     const daysBack = parseInt(req.query.days as string, 10) || 7;
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - daysBack);
 
-    const shifts = await prisma.guardShift.findMany({
-      where: {
-        societyId: req.auth!.societyId,
-        guardId: req.auth!.userId,
-        OR: [{ recurringDaily: true }, { recurringDaily: false, startTime: { gte: startDate } }],
-      },
-      include: {
-        gate: {
-          select: {
-            id: true,
-            name: true,
-            location: true,
-          },
-        },
-      },
-      orderBy: { startTime: "desc" },
-    });
-    return res.json({ shifts });
+    const where: Prisma.GuardShiftWhereInput = {
+      societyId: req.auth!.societyId,
+      guardId: req.auth!.userId,
+      OR: [{ recurringDaily: true }, { recurringDaily: false, startTime: { gte: startDate } }],
+    };
+    const [shifts, total] = await Promise.all([
+      prisma.guardShift.findMany({
+        where,
+        include: { gate: { select: { id: true, name: true, location: true } } },
+        orderBy: { startTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.guardShift.count({ where }),
+    ]);
+    return res.json({ shifts, ...paginationMeta(total, shifts.length, pagination) });
   } catch (error) {
     next(error);
   }

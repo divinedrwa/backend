@@ -1,6 +1,7 @@
 import { Prisma, UserRole, VehicleType } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -40,19 +41,19 @@ router.get("/", async (req, res, next) => {
       whereClause.villaId = req.auth!.villaId;
     }
 
-    const raw = await prisma.vehicle.findMany({
-      where: whereClause,
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
-            ownerName: true
-          }
-        }
-      },
-      orderBy: { createdAt: "desc" }
-    });
+    const pagination = getPagination(req);
+    const [raw, total] = await Promise.all([
+      prisma.vehicle.findMany({
+        where: whereClause,
+        include: {
+          villa: { select: { villaNumber: true, block: true, ownerName: true } },
+        },
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.vehicle.count({ where: whereClause }),
+    ]);
 
     const vehicles = raw.map((v) => ({
       id: v.id,
@@ -65,7 +66,7 @@ router.get("/", async (req, res, next) => {
       createdAt: v.createdAt,
     }));
 
-    return res.json({ vehicles });
+    return res.json({ vehicles, ...paginationMeta(total, vehicles.length, pagination) });
   } catch (error) {
     next(error);
   }

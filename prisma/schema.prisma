@@ -534,6 +534,7 @@ model MaintenanceCollectionCycle {
 
   @@unique([financialYearId, periodKey])
   @@index([societyId])
+  @@index([societyId, status])
   @@index([societyId, periodYear, periodMonth])
 }
 
@@ -893,6 +894,9 @@ model GuardPatrol {
   @@index([societyId])
   @@index([guardId])
   @@index([gateId])
+  @@index([scheduledTime])
+  @@index([societyId, guardId])
+  @@index([societyId, status])
 }
 
 enum AmenityType {

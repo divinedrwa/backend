@@ -18,43 +18,47 @@ router.get(
   "/alerts",
   requireAuth,
   requireRole(UserRole.ADMIN),
-  async (req, res) => {
-    const { societyId } = req.auth!;
-    const { status = 'unresolved' } = req.query;
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const { status = 'unresolved' } = req.query;
 
-    const whereClause: any = { societyId };
-    if (status === 'unresolved') {
-      whereClause.resolvedAt = null;
-    } else if (status === 'resolved') {
-      whereClause.resolvedAt = { not: null };
-    }
+      const whereClause: any = { societyId };
+      if (status === 'unresolved') {
+        whereClause.resolvedAt = null;
+      } else if (status === 'resolved') {
+        whereClause.resolvedAt = { not: null };
+      }
 
-    const alerts = await prisma.reconciliationAlert.findMany({
-      where: whereClause,
-      include: {
-        cycle: {
-          select: {
-            title: true,
-            periodMonth: true,
-            periodYear: true,
+      const alerts = await prisma.reconciliationAlert.findMany({
+        where: whereClause,
+        include: {
+          cycle: {
+            select: {
+              title: true,
+              periodMonth: true,
+              periodYear: true,
+            },
           },
         },
-      },
-      orderBy: [
-        { severity: 'desc' },
-        { detectedAt: 'desc' },
-      ],
-    });
+        orderBy: [
+          { severity: 'desc' },
+          { detectedAt: 'desc' },
+        ],
+      });
 
-    // Calculate stats
-    const stats = {
-      total: alerts.length,
-      critical: alerts.filter(a => a.severity === 'CRITICAL').length,
-      warning: alerts.filter(a => a.severity === 'WARNING').length,
-      totalDifference: alerts.reduce((sum, a) => sum + Number(a.difference), 0),
-    };
+      // Calculate stats
+      const stats = {
+        total: alerts.length,
+        critical: alerts.filter(a => a.severity === 'CRITICAL').length,
+        warning: alerts.filter(a => a.severity === 'WARNING').length,
+        totalDifference: alerts.reduce((sum, a) => sum + Number(a.difference), 0),
+      };
 
-    return res.json({ alerts, stats });
+      return res.json({ alerts, stats });
+    } catch (e) {
+      next(e);
+    }
   }
 );
 
@@ -68,33 +72,37 @@ router.post(
   requireAuth,
   requireRole(UserRole.ADMIN),
   validateBody(resolveSchema),
-  async (req, res) => {
-    const { userId, societyId } = req.auth!;
-    const { id } = req.params;
-    const { notes } = req.body;
+  async (req, res, next) => {
+    try {
+      const { userId, societyId } = req.auth!;
+      const { id } = req.params;
+      const { notes } = req.body;
 
-    const alert = await prisma.reconciliationAlert.findFirst({
-      where: { id, societyId },
-    });
+      const alert = await prisma.reconciliationAlert.findFirst({
+        where: { id, societyId },
+      });
 
-    if (!alert) {
-      return res.status(404).json({ message: "Alert not found" });
+      if (!alert) {
+        return res.status(404).json({ message: "Alert not found" });
+      }
+
+      if (alert.resolvedAt) {
+        return res.status(400).json({ message: "Alert already resolved" });
+      }
+
+      const updated = await prisma.reconciliationAlert.update({
+        where: { id },
+        data: {
+          resolvedAt: new Date(),
+          resolvedBy: userId,
+          notes,
+        },
+      });
+
+      return res.json({ alert: updated });
+    } catch (e) {
+      next(e);
     }
-
-    if (alert.resolvedAt) {
-      return res.status(400).json({ message: "Alert already resolved" });
-    }
-
-    const updated = await prisma.reconciliationAlert.update({
-      where: { id },
-      data: {
-        resolvedAt: new Date(),
-        resolvedBy: userId,
-        notes,
-      },
-    });
-
-    return res.json({ alert: updated });
   }
 );
 
@@ -103,51 +111,49 @@ router.get(
   "/summary",
   requireAuth,
   requireRole(UserRole.ADMIN),
-  async (req, res) => {
-    const { societyId } = req.auth!;
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const sixMonthsAgo = new Date();
+      sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
-    const unresolvedAlerts = await prisma.reconciliationAlert.count({
-      where: { societyId, resolvedAt: null },
-    });
+      const [unresolvedAlerts, criticalAlerts, recentPayments, totalCycles, activeCycles] =
+        await Promise.all([
+          prisma.reconciliationAlert.count({
+            where: { societyId, resolvedAt: null },
+          }),
+          prisma.reconciliationAlert.count({
+            where: { societyId, resolvedAt: null, severity: 'CRITICAL' },
+          }),
+          prisma.maintenancePayment.count({
+            where: {
+              societyId,
+              createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
+            },
+          }),
+          prisma.maintenanceCollectionCycle.count({
+            where: { societyId },
+          }),
+          prisma.maintenanceCollectionCycle.count({
+            where: { societyId, createdAt: { gte: sixMonthsAgo } },
+          }),
+        ]);
 
-    const criticalAlerts = await prisma.reconciliationAlert.count({
-      where: { societyId, resolvedAt: null, severity: 'CRITICAL' },
-    });
-
-    const recentPayments = await prisma.maintenancePayment.count({
-      where: {
-        societyId,
-        createdAt: { gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) },
-      },
-    });
-
-    const totalCycles = await prisma.maintenanceCollectionCycle.count({
-      where: { societyId },
-    });
-
-    // Count recent cycles (last 6 months)
-    const sixMonthsAgo = new Date();
-    sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
-    
-    const activeCycles = await prisma.maintenanceCollectionCycle.count({
-      where: { 
-        societyId,
-        createdAt: { gte: sixMonthsAgo },
-      },
-    });
-
-    return res.json({
-      financialHealth: {
-        status: criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY',
-        unresolvedAlerts,
-        criticalAlerts,
-        recentPayments7Days: recentPayments,
-      },
-      cycles: {
-        total: totalCycles,
-        active: activeCycles,
-      },
-    });
+      return res.json({
+        financialHealth: {
+          status: criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY',
+          unresolvedAlerts,
+          criticalAlerts,
+          recentPayments7Days: recentPayments,
+        },
+        cycles: {
+          total: totalCycles,
+          active: activeCycles,
+        },
+      });
+    } catch (e) {
+      next(e);
+    }
   }
 );
 

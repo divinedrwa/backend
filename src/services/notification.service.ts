@@ -152,7 +152,7 @@ export class NotificationService {
   }
 
   /**
-   * Send notification to multiple users
+   * Send notification to multiple users (concurrent batches of 10).
    */
   static async sendToUsers(
     userIds: string[],
@@ -161,13 +161,16 @@ export class NotificationService {
   ): Promise<void> {
     logger.info({ userCount: userIds.length }, "Sending notification to users");
 
-    for (const userId of userIds) {
-      try {
-        await this.sendToUser(userId, payload, options);
-      } catch (error) {
-        logger.error({ err: error, userId }, "Error sending notification to user in batch");
-        // Continue with other users
-      }
+    const CONCURRENCY = 10;
+    for (let i = 0; i < userIds.length; i += CONCURRENCY) {
+      const batch = userIds.slice(i, i + CONCURRENCY);
+      await Promise.allSettled(
+        batch.map((userId) =>
+          this.sendToUser(userId, payload, options).catch((error) => {
+            logger.error({ err: error, userId }, "Error sending notification to user in batch");
+          }),
+        ),
+      );
     }
   }
 

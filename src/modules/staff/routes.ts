@@ -1,6 +1,7 @@
 import { Prisma, StaffType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -43,33 +44,34 @@ router.get("/", async (req, res, next) => {
       societyId,
     };
 
-    const staff = await prisma.staff.findMany({
-      where: whereClause,
-      include: {
-        assignments: {
-          where: {
-            isActive: true,
-            ...(role === UserRole.RESIDENT && villaId ? { villaId } : {}),
-          },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                block: true,
-              },
+    const pagination = getPagination(req);
+    const [staff, total] = await Promise.all([
+      prisma.staff.findMany({
+        where: whereClause,
+        include: {
+          assignments: {
+            where: {
+              isActive: true,
+              ...(role === UserRole.RESIDENT && villaId ? { villaId } : {}),
+            },
+            include: {
+              villa: { select: { villaNumber: true, block: true } },
             },
           },
         },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.staff.count({ where: whereClause }),
+    ]);
 
     // Filter staff based on role
     const filteredStaff = role === UserRole.RESIDENT && villaId
       ? staff.filter(s => s.assignments.length > 0)
       : staff;
 
-    return res.json({ staff: filteredStaff });
+    return res.json({ staff: filteredStaff, ...paginationMeta(total, filteredStaff.length, pagination) });
   } catch (error) {
     next(error);
   }

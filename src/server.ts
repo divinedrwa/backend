@@ -33,6 +33,16 @@ async function shutdown(signal: string) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
+/* ── Crash safety ─────────────────────────────────────────────── */
+process.on("uncaughtException", (err) => {
+  logger.fatal({ err }, "Uncaught exception — shutting down");
+  process.exit(1);
+});
+process.on("unhandledRejection", (reason) => {
+  logger.fatal({ err: reason }, "Unhandled promise rejection — shutting down");
+  process.exit(1);
+});
+
 /**
  * UTC hourly: persist cycle enum from windows + reminder notifications.
  *

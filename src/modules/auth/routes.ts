@@ -13,6 +13,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
 import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
+import { passwordSchema } from "../../lib/passwordSchema";
 
 const router = Router();
 
@@ -94,7 +95,7 @@ const registerWithInvitationSchema = z.object({
   username: z.string().min(3).max(50),
   name: z.string().min(2),
   email: z.string().email(),
-  password: z.string().min(6),
+  password: passwordSchema,
   phone: z.string().optional(),
   villaId: z.string().optional(),
   fcmToken: z.string().nullable().optional(),

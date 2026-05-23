@@ -62,10 +62,11 @@ export function errorHandler(
   }
 
   if (err instanceof Prisma.PrismaClientValidationError) {
+    // Log the full detail server-side but don't expose schema info to clients.
     const msg = err.message.length > 800 ? `${err.message.slice(0, 800)}…` : err.message;
+    logger.error({ detail: msg }, "Prisma validation error");
     res.status(400).json({
       message: "Invalid database query",
-      detail: msg,
     });
     return;
   }

@@ -12,5 +12,6 @@ function mustGet(name: string): string {
 
 export const env = {
   PORT: Number(process.env.PORT ?? 4000),
-  JWT_SECRET: mustGet("JWT_SECRET")
+  DATABASE_URL: mustGet("DATABASE_URL"),
+  JWT_SECRET: mustGet("JWT_SECRET"),
 };

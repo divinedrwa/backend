@@ -1,6 +1,7 @@
 import { NotificationCategory, ParcelStatus, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -21,27 +22,25 @@ router.use(requireAuth);
 
 router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
+    const pagination = getPagination(req);
     const societyId = req.auth!.societyId;
-    const [parcels, pendingCount] = await Promise.all([
+    const where = { societyId };
+    const [parcels, total, pendingCount] = await Promise.all([
       prisma.parcel.findMany({
-        where: { societyId },
+        where,
         include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true,
-              ownerName: true
-            }
-          }
+          villa: { select: { villaNumber: true, block: true, ownerName: true } },
         },
         orderBy: { receivedAt: "desc" },
-        take: 100
+        take: pagination.take,
+        skip: pagination.skip,
       }),
+      prisma.parcel.count({ where }),
       prisma.parcel.count({
         where: { societyId, status: { notIn: ["DELIVERED", "COLLECTED"] } },
       }),
     ]);
-    return res.json({ parcels, pendingCount });
+    return res.json({ parcels, pendingCount, ...paginationMeta(total, parcels.length, pagination) });
   } catch (error) {
     next(error);
   }
