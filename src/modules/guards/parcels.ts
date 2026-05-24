@@ -18,13 +18,14 @@ const logParcelSchema = z.object({
   trackingNumber: z.string().optional(),
   senderName: z.string().optional(),
   description: z.string().optional(),
+  photoUrl: z.string().url().optional(),
 });
 
 // POST /api/guards/parcel-received - Log parcel
 router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logParcelSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { villaId, deliveryService, trackingNumber, senderName, description } = req.body;
+    const { villaId, deliveryService, trackingNumber, senderName, description, photoUrl } = req.body;
 
     // Verify villa exists
     const villa = await prisma.villa.findFirst({
@@ -43,6 +44,7 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
         trackingNumber,
         senderName,
         description,
+        photoUrl,
         receivedAt: new Date(),
         status: ParcelStatus.RECEIVED, // Use enum
       },

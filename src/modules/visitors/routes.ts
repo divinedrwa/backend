@@ -31,9 +31,11 @@ router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, ne
     const societyId = req.auth!.societyId;
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
-    const [visitors, todayCount] = await Promise.all([
+    const pagination = getPagination(req);
+    const where = { societyId };
+    const [visitors, total, todayCount] = await Promise.all([
       prisma.visitor.findMany({
-        where: { societyId },
+        where,
         include: {
           villaVisits: {
             include: {
@@ -54,13 +56,15 @@ router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, ne
           }
         },
         orderBy: { checkInAt: "desc" },
-        take: 100
+        take: pagination.take,
+        skip: pagination.skip,
       }),
+      prisma.visitor.count({ where }),
       prisma.visitor.count({
         where: { societyId, checkInAt: { gte: todayStart } },
       }),
     ]);
-    return res.json({ visitors, todayCount });
+    return res.json({ visitors, todayCount, ...paginationMeta(total, visitors.length, pagination) });
   } catch (error) {
     next(error);
   }

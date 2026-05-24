@@ -7,6 +7,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { signAuthToken } from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -31,6 +32,13 @@ router.post("/societies", validateBody(createSocietySchema), async (req, res, ne
         createdByUserId: req.auth!.userId,
       },
       select: { id: true, name: true, address: true, status: true },
+    });
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      action: "CREATE_SOCIETY",
+      entityType: "Society",
+      entityId: society.id,
+      metadata: { name: society.name },
     });
     res.status(201).json({ society });
   } catch (e) {
@@ -153,6 +161,18 @@ router.post("/societies/:societyId/tenant-session", async (req, res, next) => {
       role: UserRole.ADMIN,
       societyId: adminUser.societyId,
       villaId: adminUser.villaId,
+    });
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "IMPERSONATE_TENANT",
+      entityType: "Society",
+      entityId: societyId,
+      metadata: {
+        impersonatedUserId: adminUser.id,
+        impersonatedUsername: adminUser.username,
+      },
     });
 
     res.json({ token, user: adminUser });
@@ -350,6 +370,13 @@ router.delete("/societies/:societyId", async (req, res, next) => {
         return;
       }
       await prisma.society.delete({ where: { id: societyId } });
+      auditFromRequest(req, {
+        adminId: req.auth!.userId,
+        action: "HARD_DELETE_SOCIETY",
+        entityType: "Society",
+        entityId: societyId,
+        metadata: { name: existing.name },
+      });
       res.status(200).json({
         ok: true,
         mode: "hard_deleted",
@@ -375,6 +402,13 @@ router.delete("/societies/:societyId", async (req, res, next) => {
         status: SocietyStatus.INACTIVE,
       },
       select: { id: true, name: true, archivedAt: true, archivedBy: true, status: true },
+    });
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      action: "ARCHIVE_SOCIETY",
+      entityType: "Society",
+      entityId: societyId,
+      metadata: { name: existing.name },
     });
     res.status(200).json({
       ok: true,
@@ -427,6 +461,13 @@ router.post("/societies/:societyId/restore", async (req, res, next) => {
         status: true,
         archivedAt: true,
       },
+    });
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      action: "RESTORE_SOCIETY",
+      entityType: "Society",
+      entityId: societyId,
+      metadata: { name: existing.name },
     });
     res.json({ ok: true, society });
   } catch (e) {

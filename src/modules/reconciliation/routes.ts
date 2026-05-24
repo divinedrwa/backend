@@ -6,10 +6,11 @@
 
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 
 const router = Router();
 
@@ -23,39 +24,50 @@ router.get(
       const { societyId } = req.auth!;
       const { status = 'unresolved' } = req.query;
 
-      const whereClause: any = { societyId };
+      const whereClause: Prisma.ReconciliationAlertWhereInput = { societyId };
       if (status === 'unresolved') {
         whereClause.resolvedAt = null;
       } else if (status === 'resolved') {
         whereClause.resolvedAt = { not: null };
       }
 
-      const alerts = await prisma.reconciliationAlert.findMany({
-        where: whereClause,
-        include: {
-          cycle: {
-            select: {
-              title: true,
-              periodMonth: true,
-              periodYear: true,
+      const pagination = getPagination(req);
+      const [alerts, total, allAlerts] = await Promise.all([
+        prisma.reconciliationAlert.findMany({
+          where: whereClause,
+          include: {
+            cycle: {
+              select: {
+                title: true,
+                periodMonth: true,
+                periodYear: true,
+              },
             },
           },
-        },
-        orderBy: [
-          { severity: 'desc' },
-          { detectedAt: 'desc' },
-        ],
-      });
+          orderBy: [
+            { severity: 'desc' },
+            { detectedAt: 'desc' },
+          ],
+          take: pagination.take,
+          skip: pagination.skip,
+        }),
+        prisma.reconciliationAlert.count({ where: whereClause }),
+        // Fetch severity + difference for stats across all matching rows
+        prisma.reconciliationAlert.findMany({
+          where: whereClause,
+          select: { severity: true, difference: true },
+        }),
+      ]);
 
-      // Calculate stats
+      // Calculate stats across the full (unpaginated) result set
       const stats = {
-        total: alerts.length,
-        critical: alerts.filter(a => a.severity === 'CRITICAL').length,
-        warning: alerts.filter(a => a.severity === 'WARNING').length,
-        totalDifference: alerts.reduce((sum, a) => sum + Number(a.difference), 0),
+        total,
+        critical: allAlerts.filter(a => a.severity === 'CRITICAL').length,
+        warning: allAlerts.filter(a => a.severity === 'WARNING').length,
+        totalDifference: allAlerts.reduce((sum, a) => sum + Number(a.difference), 0),
       };
 
-      return res.json({ alerts, stats });
+      return res.json({ alerts, stats, ...paginationMeta(total, alerts.length, pagination) });
     } catch (e) {
       next(e);
     }

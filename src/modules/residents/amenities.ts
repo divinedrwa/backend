@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole } from "@prisma/client";
+import { BookingStatus, UserRole } from "@prisma/client";
 
 const router = Router();
 
@@ -27,7 +27,7 @@ router.get("/my-bookings", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       where: {
         residentId: userId,
         societyId,
-        ...(status && { status: status as any }),
+        ...(status && { status: status as BookingStatus }),
       },
       include: {
         amenity: {

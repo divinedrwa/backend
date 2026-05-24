@@ -39,7 +39,7 @@ const additionalFundSchema = z.object({
   notes: z.string().max(500).optional(),
 });
 
-function parseMonthYear(query: any) {
+function parseMonthYear(query: Record<string, unknown>) {
   const now = new Date();
   const rawM = query?.month;
   const rawY = query?.year;
@@ -1150,6 +1150,90 @@ router.get("/year-report/:year", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/maintenance-management/profit-loss/:year
+ *
+ * Unified Profit & Loss report combining:
+ *  - Income: maintenance collections + additional funds (merged)
+ *  - Expenses: society expenses by category
+ *  - Net surplus/deficit per month
+ *
+ * Uses computeSocietyMoneySnapshot for authoritative cash numbers.
+ */
+router.get("/profit-loss/:year", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const snap = await computeSocietyMoneySnapshot(prisma, societyId);
+
+    // Expense category breakdown per month
+    const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
+      where: { societyId, year },
+      select: { month: true, totalExpenses: true, categoryBreakdown: true },
+    });
+    const expenseByMonth = new Map<number, { total: number; categories: Record<string, number> }>();
+    for (const s of expenseSummaries) {
+      expenseByMonth.set(s.month, {
+        total: Number(s.totalExpenses),
+        categories: (s.categoryBreakdown as Record<string, number>) ?? {},
+      });
+    }
+
+    // Build month-by-month P&L
+    const months = [];
+    let totalIncome = 0;
+    let totalExpenses = 0;
+
+    for (let m = 1; m <= 12; m++) {
+      const maintenance = snap.maintenanceCashForMonth(m, year);
+      const additional = snap.additionalFundsForMonth(m, year);
+      const income = maintenance + additional;
+      const expenses = expenseByMonth.get(m)?.total ?? snap.expensesForMonth(m, year);
+      const net = income - expenses;
+
+      totalIncome += income;
+      totalExpenses += expenses;
+
+      months.push({
+        month: m,
+        maintenance: Math.round(maintenance * 100) / 100,
+        additionalFunds: Math.round(additional * 100) / 100,
+        totalIncome: Math.round(income * 100) / 100,
+        expenses: Math.round(expenses * 100) / 100,
+        expenseCategories: expenseByMonth.get(m)?.categories ?? {},
+        net: Math.round(net * 100) / 100,
+      });
+    }
+
+    // Aggregate all expense categories for the year
+    const yearCategories: Record<string, number> = {};
+    for (const [, v] of expenseByMonth) {
+      for (const [cat, amt] of Object.entries(v.categories)) {
+        yearCategories[cat] = (yearCategories[cat] ?? 0) + amt;
+      }
+    }
+
+    return res.json({
+      year,
+      totalIncome: Math.round(totalIncome * 100) / 100,
+      totalExpenses: Math.round(totalExpenses * 100) / 100,
+      netSurplus: Math.round((totalIncome - totalExpenses) * 100) / 100,
+      currentFundBalance: Math.round(snap.currentFundBalance * 100) / 100,
+      outstandingDues: Math.round(snap.outstandingDues * 100) / 100,
+      totalAdvanceCredit: Math.round(snap.totalAdvanceCredit * 100) / 100,
+      months,
+      expenseCategorySummary: yearCategories,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/maintenance-management/villa-history/:villaId
 // Get complete payment history for a villa
 router.get("/villa-history/:villaId", async (req, res, next) => {
@@ -1216,7 +1300,19 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
 
     // Calculate statistics
     const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
-    const avgPaymentDelay = 0; // TODO: Calculate average delay
+
+    // Average payment delay: days between due date and payment date for paid bills
+    const delays: number[] = [];
+    for (const m of maintenanceRecords) {
+      const payment = payments.find((p) => p.year === m.year && p.month === m.month);
+      if (payment?.paymentDate && m.dueDate) {
+        const delayMs = payment.paymentDate.getTime() - m.dueDate.getTime();
+        delays.push(Math.round(delayMs / (1000 * 60 * 60 * 24)));
+      }
+    }
+    const avgPaymentDelay = delays.length > 0
+      ? Math.round(delays.reduce((sum, d) => sum + d, 0) / delays.length)
+      : 0;
 
     return res.json({
       villa,
@@ -1514,7 +1610,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
           take: 250,
         }),
         prisma.expense.findMany({
-          where: { societyId, month, year, status: "APPROVED" },
+          where: { societyId, month, year, status: "APPROVED", deletedAt: null },
           select: {
             amount: true,
             category: { select: { name: true } },
@@ -1687,7 +1783,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
         take: 250,
       }),
       prisma.expense.findMany({
-        where: { societyId, month, year, status: "APPROVED" },
+        where: { societyId, month, year, status: "APPROVED", deletedAt: null },
         select: {
           amount: true,
           category: { select: { name: true } },
@@ -2167,7 +2263,7 @@ router.post(
             villaNumber: villa.villaNumber,
           },
         },
-        { category: "MAINTENANCE" as any },
+        { category: NotificationCategory.MAINTENANCE },
       );
 
       return res.json({
@@ -2205,7 +2301,7 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
       const rate = core.summary.collectionRate;
 
       const pendingRows = core.residents
-        .filter((r: any) => !r.isExcluded)
+        .filter((r) => !r.isExcluded)
         .map((r) => {
           const paid = r.paidTowardCycle ?? (r.status === "PAID" ? r.amount : 0);
           const remaining = Math.max(0, Math.round((r.amount - paid) * 100) / 100);

@@ -1,5 +1,6 @@
 import { IncidentSeverity, UserRole } from "@prisma/client";
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
@@ -7,6 +8,13 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
 const router = Router();
+
+const incidentCreateRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 minutes
+  max: 5,
+  message: "Too many incident reports, please try again later",
+  keyGenerator: (req) => req.ip ?? "unknown",
+});
 
 const createIncidentSchema = z.object({
   title: z.string().min(3).max(200),
@@ -65,6 +73,7 @@ router.get("/", async (req, res, next) => {
 // Report incident (guards and admins)
 router.post(
   "/",
+  incidentCreateRateLimiter,
   requireRole(UserRole.GUARD, UserRole.ADMIN),
   validateBody(createIncidentSchema),
   async (req, res, next) => {

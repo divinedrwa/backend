@@ -25,6 +25,8 @@ const upload = multer({
   limits: { fileSize: 5 * 1024 * 1024 },
 });
 
+const MAX_IMPORT_ROWS = 1000;
+
 router.use(requireAuth);
 router.use(requireRole(UserRole.ADMIN));
 
@@ -86,6 +88,9 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
     }
 
     const records = csvRowsToRecords(header, rows.slice(1));
+    if (records.length > MAX_IMPORT_ROWS) {
+      return res.status(400).json({ message: `CSV exceeds maximum of ${MAX_IMPORT_ROWS} data rows` });
+    }
     const result: ImportResult = {
       created: 0,
       skipped: 0,
@@ -252,6 +257,9 @@ router.post("/residents-csv", upload.single("file"), async (req, res, next) => {
     const villaByNumber = await loadVillaLookupMap(societyId);
 
     const records = csvRowsToRecords(header, rows.slice(1));
+    if (records.length > MAX_IMPORT_ROWS) {
+      return res.status(400).json({ message: `CSV exceeds maximum of ${MAX_IMPORT_ROWS} data rows` });
+    }
     const result: ImportResult = { created: 0, skipped: 0, errors: [], villasAutoCreated: 0 };
 
     for (let i = 0; i < records.length; i++) {
@@ -416,6 +424,9 @@ router.post("/guards-csv", upload.single("file"), async (req, res, next) => {
     }
 
     const records = csvRowsToRecords(header, rows.slice(1));
+    if (records.length > MAX_IMPORT_ROWS) {
+      return res.status(400).json({ message: `CSV exceeds maximum of ${MAX_IMPORT_ROWS} data rows` });
+    }
     const result: ImportResult = { created: 0, skipped: 0, errors: [] };
 
     for (let i = 0; i < records.length; i++) {

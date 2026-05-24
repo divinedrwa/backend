@@ -1,12 +1,11 @@
-import crypto from "crypto";
 import type { Request, Response } from "express";
-import { BillingPaymentSource, BillingUserPaymentStatus, Prisma } from "@prisma/client";
+import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
-import { verifyRazorpayWebhookSignature } from "./services/razorpay-webhook-verify";
+import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecret } from "./services/razorpay-webhook-verify";
+import { getWebhookSecretForSociety } from "./services/razorpay-billing";
 import { notifyUser } from "../../services/notification.service";
-import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
-import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
+import { syncLedgerForPayment } from "./ledger-sync";
 
 /**
  * Razorpay webhook — raw Buffer body. Mounted with express.raw before json().
@@ -21,11 +20,10 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
   const raw = req.body as Buffer;
   const sigHeader = req.headers["x-razorpay-signature"];
   const headerStr = Array.isArray(sigHeader) ? sigHeader[0] : sigHeader;
+  const sigStr = typeof headerStr === "string" ? headerStr : undefined;
 
-  if (!verifyRazorpayWebhookSignature(raw, typeof headerStr === "string" ? headerStr : undefined)) {
-    res.status(400).json({ message: "Invalid signature" });
-    return;
-  }
+  // Try global webhook secret first
+  const globalVerified = verifyRazorpayWebhookSignature(raw, sigStr);
 
   let parsed: Record<string, unknown>;
   try {
@@ -33,6 +31,29 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
   } catch {
     res.status(400).json({ message: "Invalid JSON" });
     return;
+  }
+
+  // If global verification failed, try per-society secret
+  if (!globalVerified) {
+    // Extract societyId from order notes to look up per-society secret
+    const payloadRoot = parsed.payload as Record<string, unknown> | undefined;
+    const payContainer = payloadRoot?.payment as Record<string, unknown> | undefined;
+    const entity = ((payContainer?.entity as Record<string, unknown>) || payContainer || {}) as Record<string, unknown>;
+    const notes = entity.notes as Record<string, string> | undefined;
+    const societyId = notes?.societyId;
+
+    let perSocietyVerified = false;
+    if (societyId && sigStr) {
+      const secret = await getWebhookSecretForSociety(societyId);
+      if (secret) {
+        perSocietyVerified = verifyRazorpayWebhookSignatureWithSecret(raw, sigStr, secret);
+      }
+    }
+
+    if (!perSocietyVerified) {
+      res.status(400).json({ message: "Invalid signature" });
+      return;
+    }
   }
 
   const eventName = typeof parsed.event === "string" ? parsed.event : "";
@@ -72,7 +93,8 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
     });
 
     if (!row) {
-      res.status(404).json({ message: "Unknown order" });
+      // Return 200 to prevent Razorpay from retrying for orders we don't recognize.
+      res.status(200).json({ ok: true, skipped: true, reason: "unknown_order" });
       return;
     }
 
@@ -97,135 +119,25 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         },
       });
 
-      await tx.billingPaymentLog.create({
-        data: {
-          societyId: row.cycle.societyId,
-          userId: row.userId,
-          cycleId: row.cycle.id,
-          status: eventName,
-          responsePayload: { paymentId, orderId, amountPaise } as object,
-        },
-      });
+      if (row.userId) {
+        await tx.billingPaymentLog.create({
+          data: {
+            societyId: row.cycle.societyId,
+            userId: row.userId,
+            cycleId: row.cycle.id,
+            status: eventName,
+            responsePayload: { paymentId, orderId, amountPaise } as object,
+          },
+        });
+      }
 
       // ── Sync maintenance ledger for successful payments ──
       if (!isFailure) {
-        const billingCycle = await tx.billingCycle.findUnique({
-          where: { id: row.cycleId },
-          select: { cycleKey: true, financialYearId: true, societyId: true },
-        });
-
-        const user = await tx.user.findUnique({
-          where: { id: row.userId },
-          select: { villaId: true },
-        });
-
-        if (billingCycle?.financialYearId && user?.villaId) {
-          const maintenanceCycle = await tx.maintenanceCollectionCycle.findFirst({
-            where: {
-              societyId: billingCycle.societyId,
-              financialYearId: billingCycle.financialYearId,
-              periodKey: billingCycle.cycleKey,
-            },
-          });
-
-          if (maintenanceCycle) {
-            // Lock the snapshot row to prevent concurrent calls from
-            // reading the same paidAmount and double-counting.
-            const [snapshot] = await tx.$queryRawUnsafe<
-              { id: string; expectedAmount: string; paidAmount: string }[]
-            >(
-              `SELECT id, "expectedAmount"::text, "paidAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
-              maintenanceCycle.id,
-              user.villaId,
-            );
-
-            if (snapshot) {
-              const expected = Number(snapshot.expectedAmount);
-              const paidSoFar = Number(snapshot.paidAmount);
-              const appliedToCycle = Math.max(0, Math.min(amountPaidNum, expected - paidSoFar));
-              const newPaid = paidSoFar + appliedToCycle;
-              const snapStatus = refreshSnapshotStatus(expected, newPaid, maintenanceCycle.dueDate);
-
-              // Upsert the legacy Maintenance row so financial-dashboard stays in sync.
-              const maintenanceRow = await tx.maintenance.upsert({
-                where: {
-                  villaId_month_year: {
-                    villaId: user.villaId,
-                    month: maintenanceCycle.periodMonth,
-                    year: maintenanceCycle.periodYear,
-                  },
-                },
-                create: {
-                  societyId: billingCycle.societyId,
-                  villaId: user.villaId,
-                  month: maintenanceCycle.periodMonth,
-                  year: maintenanceCycle.periodYear,
-                  amount: snapshot.expectedAmount,
-                  dueDate: maintenanceCycle.dueDate,
-                  status:
-                    snapStatus === "PAID"
-                      ? "PAID"
-                      : snapStatus === "OVERDUE"
-                        ? "OVERDUE"
-                        : "PENDING",
-                },
-                update: {
-                  amount: snapshot.expectedAmount,
-                  dueDate: maintenanceCycle.dueDate,
-                  status:
-                    snapStatus === "PAID"
-                      ? "PAID"
-                      : snapStatus === "OVERDUE"
-                        ? "OVERDUE"
-                        : "PENDING",
-                },
-              });
-
-              // Record the full amount as a MaintenancePayment row — the cash
-              // ledger that financial-dashboard reads for allTimeCollected /
-              // currentFundBalance.
-              if (amountPaidNum > 0.005) {
-                await tx.maintenancePayment.create({
-                  data: {
-                    societyId: billingCycle.societyId,
-                    villaId: user.villaId,
-                    maintenanceId: maintenanceRow.id,
-                    month: maintenanceCycle.periodMonth,
-                    year: maintenanceCycle.periodYear,
-                    amount: new Prisma.Decimal(amountPaidNum),
-                    paymentDate: paidAt!,
-                    paymentMode: "ONLINE",
-                    receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-                    remarks: "Razorpay online payment sync",
-                    maintenanceCollectionCycleId: maintenanceCycle.id,
-                    villaMaintenanceSnapshotId: snapshot.id,
-                  },
-                });
-              }
-
-              await tx.villaMaintenanceSnapshot.update({
-                where: { id: snapshot.id },
-                data: {
-                  paidAmount: new Prisma.Decimal(newPaid),
-                  status: snapStatus,
-                },
-              });
-            }
-
-            // Reconcile snapshots up to this cycle so advance credit is
-            // accounted for (mirrors mark-cash handler logic).
-            await applyVillaCreditAcrossSnapshots(tx, {
-              societyId: billingCycle.societyId,
-              villaId: user.villaId,
-              financialYearId: billingCycle.financialYearId,
-              throughCycleId: maintenanceCycle.id,
-            });
-          }
-        }
+        await syncLedgerForPayment(tx, row, amountPaidNum, paidAt!, PaymentMode.ONLINE, "Razorpay online payment sync");
       }
     });
 
-    if (!isFailure) {
+    if (!isFailure && row.userId) {
       try {
         await notifyUser(row.userId, {
           title: "Payment received",

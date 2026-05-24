@@ -46,6 +46,12 @@ import reconciliationRoutes from "../modules/reconciliation/routes";
 import upiPaymentAdminRoutes from "../modules/upi-payments/admin-routes";
 import upiPaymentResidentRoutes from "../modules/upi-payments/resident-routes";
 import specialProjectRoutes from "../modules/special-projects/routes";
+import paymentMethodRoutes, { residentPaymentMethodsRouter } from "../modules/payment-methods/routes";
+import auditLogRoutes from "../modules/audit-log/routes";
+import vendorContractRoutes from "../modules/vendor-contracts/routes";
+import assetRoutes from "../modules/assets/routes";
+import meetingRoutes from "../modules/meetings/routes";
+import staffAttendanceRoutes from "../modules/staff-attendance/routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -150,6 +156,24 @@ router.use("/upi-payments", upiPaymentAdminRoutes);
 /** Special Projects & Collections (admin). */
 router.use("/special-projects", specialProjectRoutes);
 
+/** Unified payment methods (admin CRUD + test-connection). */
+router.use("/payment-methods", paymentMethodRoutes);
+
+/** Admin audit log viewer. */
+router.use("/audit-log", auditLogRoutes);
+
+/** Vendor contracts (admin CRUD). */
+router.use("/vendor-contracts", vendorContractRoutes);
+
+/** Society asset inventory (admin CRUD). */
+router.use("/assets", assetRoutes);
+
+/** Meetings & AGM management. */
+router.use("/meetings", meetingRoutes);
+
+/** Domestic staff attendance tracking. */
+router.use("/staff-attendance", staffAttendanceRoutes);
+
 // ========================================
 // MOBILE APP APIs (NEW)
 // ========================================
@@ -166,6 +190,7 @@ router.use("/residents", residentVehicleRoutes); // Vehicles
 router.use("/residents", residentStaffRoutes); // Domestic staff
 router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
 router.use("/residents", residentSpecialProjectRoutes); // Special projects
+router.use("/residents", residentPaymentMethodsRouter); // Payment methods
 
 // Guard Mobile APIs
 router.use("/guards", guardRoutes); // Dashboard, shift, SOS

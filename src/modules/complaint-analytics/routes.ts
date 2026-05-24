@@ -102,6 +102,30 @@ router.get("/summary", async (req, res, next) => {
       avgResolutionTime = totalResolutionTime / resolvedComplaints.length;
     }
 
+    // SLA compliance
+    const now = new Date();
+    const openComplaints = complaints.filter(
+      (c) => c.status === "OPEN" || c.status === "IN_PROGRESS"
+    );
+    const slaBreached = openComplaints.filter(
+      (c) => c.slaDeadline && new Date(c.slaDeadline) < now
+    ).length;
+    const resolvedWithSla = resolvedComplaints.filter((c) => c.slaDeadline);
+    const resolvedWithinSla = resolvedWithSla.filter(
+      (c) => c.resolvedAt && c.slaDeadline && new Date(c.resolvedAt) <= new Date(c.slaDeadline)
+    ).length;
+    const slaComplianceRate = resolvedWithSla.length > 0
+      ? Math.round((resolvedWithinSla / resolvedWithSla.length) * 100)
+      : 100;
+
+    // Priority breakdown
+    const byPriority = {
+      LOW: complaints.filter((c) => c.priority === "LOW").length,
+      MEDIUM: complaints.filter((c) => c.priority === "MEDIUM").length,
+      HIGH: complaints.filter((c) => c.priority === "HIGH").length,
+      URGENT: complaints.filter((c) => c.priority === "URGENT").length,
+    };
+
     return res.json({
       period: {
         startDate: periodStart,
@@ -114,7 +138,10 @@ router.get("/summary", async (req, res, next) => {
         inProgressCount,
         pendingCount,
         resolutionRate,
-        avgResolutionTime: Math.round(avgResolutionTime * 10) / 10, // Round to 1 decimal
+        avgResolutionTime: Math.round(avgResolutionTime * 10) / 10,
+        slaBreached,
+        slaComplianceRate,
+        byPriority,
       },
     });
   } catch (error) {
@@ -252,15 +279,22 @@ router.get("/pending-list", async (req, res, next) => {
       take: parseInt(limit as string),
     });
 
-    // Calculate days pending for each
+    const now = Date.now();
+    // Calculate days pending and SLA status for each
     const complaintsWithAge = pendingComplaints.map((complaint) => {
       const daysPending = Math.floor(
-        (Date.now() - new Date(complaint.createdAt).getTime()) / (1000 * 60 * 60 * 24)
+        (now - new Date(complaint.createdAt).getTime()) / (1000 * 60 * 60 * 24)
       );
 
+      const slaBreached = complaint.slaDeadline
+        ? new Date(complaint.slaDeadline).getTime() < now
+        : daysPending > 7;
+
       let urgencyLevel = "normal";
-      if (daysPending > 7) {
+      if (slaBreached) {
         urgencyLevel = "critical";
+      } else if (complaint.priority === "URGENT" || complaint.priority === "HIGH") {
+        urgencyLevel = "high";
       } else if (daysPending > 3) {
         urgencyLevel = "high";
       }
@@ -269,6 +303,7 @@ router.get("/pending-list", async (req, res, next) => {
         ...complaint,
         daysPending,
         urgencyLevel,
+        slaBreached,
       };
     });
 

@@ -10,6 +10,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { UserRole } from "@prisma/client";
 import { validateBody } from "../../middlewares/validate";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -436,6 +437,14 @@ router.delete("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res,
 
     await prisma.villa.deleteMany({
       where: { id, societyId },
+    });
+
+    auditFromRequest(req, {
+      societyId,
+      adminId: req.auth!.userId,
+      action: "VILLA_DELETE",
+      entityType: "Villa",
+      entityId: id,
     });
 
     return res.json({ message: "Villa deleted successfully" });

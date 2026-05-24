@@ -1,4 +1,4 @@
-import { ComplaintStatus, UserRole } from "@prisma/client";
+import { ComplaintPriority, ComplaintStatus, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
@@ -9,14 +9,37 @@ import { notifyResidentsComplaintStatusChanged } from "../../services/complaintS
 
 const router = Router();
 
+/** Valid complaint status transitions (state machine). */
+const VALID_TRANSITIONS: Record<ComplaintStatus, ComplaintStatus[]> = {
+  OPEN: [ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED],
+  IN_PROGRESS: [ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED, ComplaintStatus.OPEN],
+  RESOLVED: [ComplaintStatus.CLOSED, ComplaintStatus.OPEN],
+  CLOSED: [ComplaintStatus.OPEN], // Allow re-opening
+};
+
+/** Default SLA hours per priority level. */
+const SLA_HOURS: Record<ComplaintPriority, number> = {
+  LOW: 168, // 7 days
+  MEDIUM: 72, // 3 days
+  HIGH: 24, // 1 day
+  URGENT: 6, // 6 hours
+};
+
+function computeSlaDeadline(priority: ComplaintPriority, from: Date = new Date()): Date {
+  return new Date(from.getTime() + SLA_HOURS[priority] * 3600_000);
+}
+
 const createComplaintSchema = z.object({
   villaId: z.string().cuid(),
   title: z.string().min(3).max(200),
-  description: z.string().min(10)
+  description: z.string().min(10),
+  category: z.string().max(100).optional(),
+  priority: z.nativeEnum(ComplaintPriority).optional(),
 });
 
 const updateComplaintSchema = z.object({
-  status: z.nativeEnum(ComplaintStatus)
+  status: z.nativeEnum(ComplaintStatus),
+  priority: z.nativeEnum(ComplaintPriority).optional(),
 });
 
 router.use(requireAuth);
@@ -58,6 +81,7 @@ router.get("/", async (req, res, next) => {
 
 router.post(
   "/",
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   validateBody(createComplaintSchema),
   async (req, res, next) => {
     try {
@@ -74,13 +98,17 @@ router.post(
         return res.status(404).json({ message: "Villa not found" });
       }
 
+      const priority = body.priority ?? ComplaintPriority.MEDIUM;
       const complaint = await prisma.complaint.create({
         data: {
           societyId: req.auth!.societyId,
           villaId: body.villaId,
           residentId: req.auth!.userId,
           title: body.title,
-          description: body.description
+          description: body.description,
+          category: body.category?.trim() || "General",
+          priority,
+          slaDeadline: computeSlaDeadline(priority),
         },
         include: {
           villa: {
@@ -105,7 +133,7 @@ router.patch(
   validateBody(updateComplaintSchema),
   async (req, res, next) => {
     try {
-      const { status } = req.body as z.infer<typeof updateComplaintSchema>;
+      const { status, priority } = req.body as z.infer<typeof updateComplaintSchema>;
       const { id } = req.params;
       const societyId = req.auth!.societyId;
 
@@ -117,15 +145,30 @@ router.patch(
         return res.status(404).json({ message: "Complaint not found" });
       }
 
-      if (existing.status !== status) {
-        await prisma.complaint.update({
-          where: { id },
-          data: {
-            status,
-            ...(status === "RESOLVED" && !existing.resolvedAt ? { resolvedAt: new Date() } : {}),
-          },
-        });
+      // Validate status transition
+      if (status !== existing.status) {
+        const allowed = VALID_TRANSITIONS[existing.status as ComplaintStatus] ?? [];
+        if (!allowed.includes(status)) {
+          return res.status(400).json({
+            message: `Cannot transition from ${existing.status} to ${status}`,
+          });
+        }
+      }
 
+      const data: Record<string, unknown> = {};
+      if (status !== existing.status) data.status = status;
+      if (status === "RESOLVED" && !existing.resolvedAt) data.resolvedAt = new Date();
+      if (priority && priority !== existing.priority) {
+        data.priority = priority;
+        // Recompute SLA from original creation time with new priority
+        data.slaDeadline = computeSlaDeadline(priority, existing.createdAt);
+      }
+
+      if (Object.keys(data).length > 0) {
+        await prisma.complaint.update({ where: { id }, data });
+      }
+
+      if (existing.status !== status) {
         void notifyResidentsComplaintStatusChanged({
           complaintId: id,
           title: existing.title,
@@ -137,7 +180,7 @@ router.patch(
         });
       }
 
-      return res.json({ message: "Complaint status updated" });
+      return res.json({ message: "Complaint updated" });
     } catch (error) {
       next(error);
     }

@@ -166,7 +166,7 @@ router.delete('/categories/:id', async (req, res, next) => {
       return res.status(404).json({ error: 'Category not found' });
     }
 
-    const count = await prisma.expense.count({ where: { categoryId: id } });
+    const count = await prisma.expense.count({ where: { categoryId: id, deletedAt: null } });
     if (count > 0) {
       return res.status(400).json({
         error: 'Cannot delete category with existing expenses',
@@ -245,7 +245,7 @@ router.post(
       const body = req.body as z.infer<typeof addAttachmentsSchema>;
 
       const expense = await prisma.expense.findFirst({
-        where: { id, societyId },
+        where: { id, societyId, deletedAt: null },
         include: { attachments: { select: { id: true } } },
       });
       if (!expense) {
@@ -292,7 +292,7 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
     const { id, attachmentId } = req.params;
 
     const expense = await prisma.expense.findFirst({
-      where: { id, societyId },
+      where: { id, societyId, deletedAt: null },
       select: { id: true },
     });
     if (!expense) {
@@ -339,7 +339,7 @@ router.get('/', async (req, res, next) => {
     const statusParam = typeof status === "string" ? status : undefined;
     const paymentModeParam = typeof paymentMode === "string" ? paymentMode : undefined;
 
-    const where: Prisma.ExpenseWhereInput = { societyId };
+    const where: Prisma.ExpenseWhereInput = { societyId, deletedAt: null };
 
     if (categoryIdParam) where.categoryId = categoryIdParam;
     if (financialYearIdParam) where.financialYearId = financialYearIdParam;
@@ -400,7 +400,7 @@ router.get('/:id', async (req, res, next) => {
     const { id } = req.params;
 
     const expense = await prisma.expense.findFirst({
-      where: { id, societyId },
+      where: { id, societyId, deletedAt: null },
       include: {
         category: true,
         attachments: true,
@@ -518,7 +518,7 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
 
     // Tenant scope: the existing expense must belong to this society.
     const existing = await prisma.expense.findFirst({
-      where: { id, societyId },
+      where: { id, societyId, deletedAt: null },
     });
     if (!existing) {
       return res.status(404).json({ error: 'Expense not found' });
@@ -557,9 +557,9 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       financialYearId = fy?.id ?? null;
     }
 
-    const amount = body.amount ?? existing.amount;
-    const gstAmount = body.gstAmount ?? existing.gstAmount ?? 0;
-    const tdsAmount = body.tdsAmount ?? existing.tdsAmount ?? 0;
+    const amount = Number(body.amount ?? existing.amount);
+    const gstAmount = Number(body.gstAmount ?? existing.gstAmount ?? 0);
+    const tdsAmount = Number(body.tdsAmount ?? existing.tdsAmount ?? 0);
     const netAmount = amount + gstAmount - tdsAmount;
 
     const expense = await prisma.expense.update({
@@ -620,16 +620,16 @@ router.delete('/:id', async (req, res, next) => {
     const societyId = req.auth!.societyId;
     const { id } = req.params;
 
-    // Capture month/year before delete for summary recalculation, scoped to society.
+    // Capture month/year before soft-delete for summary recalculation, scoped to society.
     const existing = await prisma.expense.findFirst({
-      where: { id, societyId },
+      where: { id, societyId, deletedAt: null },
       select: { id: true, month: true, year: true },
     });
     if (!existing) {
       return res.status(404).json({ error: 'Expense not found' });
     }
 
-    await prisma.expense.delete({ where: { id: existing.id } });
+    await prisma.expense.update({ where: { id: existing.id }, data: { deletedAt: new Date() } });
 
     if (existing.month && existing.year) {
       await updateMonthlySummary(societyId, existing.month, existing.year);
@@ -722,10 +722,10 @@ router.get('/summary/yearly', async (req, res) => {
       })
     );
 
-    const yearlyTotal = summaries.reduce((sum, s) => sum + s.totalExpenses, 0);
-    const yearlyGST = summaries.reduce((sum, s) => sum + s.totalGST, 0);
-    const yearlyTDS = summaries.reduce((sum, s) => sum + s.totalTDS, 0);
-    const yearlyNet = summaries.reduce((sum, s) => sum + s.netAmount, 0);
+    const yearlyTotal = summaries.reduce((sum, s) => sum + Number(s.totalExpenses), 0);
+    const yearlyGST = summaries.reduce((sum, s) => sum + Number(s.totalGST), 0);
+    const yearlyTDS = summaries.reduce((sum, s) => sum + Number(s.totalTDS), 0);
+    const yearlyNet = summaries.reduce((sum, s) => sum + Number(s.netAmount), 0);
     const yearlyCount = summaries.reduce((sum, s) => sum + s.expenseCount, 0);
 
     res.json({
@@ -755,7 +755,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { month, year, financialYearId } = req.query;
 
-    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED' };
+    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED', deletedAt: null };
     if (financialYearId) {
       where.financialYearId = financialYearId as string;
     }
@@ -869,7 +869,7 @@ router.get('/analytics/top-categories', async (req, res) => {
     const societyId = req.auth!.societyId;
     const { year, financialYearId, limit = 10 } = req.query;
 
-    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED' };
+    const where: Prisma.ExpenseWhereInput = { societyId, status: 'APPROVED', deletedAt: null };
     if (financialYearId) {
       where.financialYearId = financialYearId as string;
     } else if (year) {
@@ -923,7 +923,7 @@ async function updateMonthlySummary(societyId: string, month: number, year: numb
 }
 
 async function calculateAndSaveMonthlySummary(societyId: string, month: number, year: number) {
-  const filterWhere = { societyId, month, year, status: 'APPROVED' as const };
+  const filterWhere = { societyId, month, year, status: 'APPROVED' as const, deletedAt: null as Date | null };
 
   // Server-side aggregation: totals via aggregate(), breakdown via groupBy()
   const [aggregates, categoryGrouped] = await Promise.all([
@@ -939,10 +939,10 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
     }),
   ]);
 
-  const totalExpenses = aggregates._sum.amount ?? 0;
-  const totalGST = aggregates._sum.gstAmount ?? 0;
-  const totalTDS = aggregates._sum.tdsAmount ?? 0;
-  const netAmount = aggregates._sum.netAmount ?? 0;
+  const totalExpenses = Number(aggregates._sum.amount ?? 0);
+  const totalGST = Number(aggregates._sum.gstAmount ?? 0);
+  const totalTDS = Number(aggregates._sum.tdsAmount ?? 0);
+  const netAmount = Number(aggregates._sum.netAmount ?? 0);
   const expenseCount = aggregates._count.id;
 
   // Build category breakdown keyed by category name
@@ -955,7 +955,7 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
     });
     const nameMap = new Map(categories.map(c => [c.id, c.name]));
     categoryBreakdown = Object.fromEntries(
-      categoryGrouped.map(g => [nameMap.get(g.categoryId) ?? 'Unknown', g._sum.amount ?? 0])
+      categoryGrouped.map(g => [nameMap.get(g.categoryId) ?? 'Unknown', Number(g._sum.amount ?? 0)])
     );
   }
 

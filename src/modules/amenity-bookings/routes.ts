@@ -1,6 +1,7 @@
 import { BookingStatus, Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -24,6 +25,7 @@ router.use(requireAuth);
 // List bookings (all for admin, own for residents)
 router.get("/", async (req, res, next) => {
   try {
+    const pagination = getPagination(req);
     const whereClause: Prisma.AmenityBookingWhereInput = {
       societyId: req.auth!.societyId
     };
@@ -33,28 +35,32 @@ router.get("/", async (req, res, next) => {
       whereClause.residentId = req.auth!.userId;
     }
 
-    const bookings = await prisma.amenityBooking.findMany({
-      where: whereClause,
-      include: {
-        amenity: {
-          select: {
-            id: true,
-            name: true,
-            type: true
+    const [bookings, total] = await Promise.all([
+      prisma.amenityBooking.findMany({
+        where: whereClause,
+        include: {
+          amenity: {
+            select: {
+              id: true,
+              name: true,
+              type: true
+            }
+          },
+          resident: {
+            select: {
+              id: true,
+              name: true
+            }
           }
         },
-        resident: {
-          select: {
-            id: true,
-            name: true
-          }
-        }
-      },
-      orderBy: { startTime: "desc" },
-      take: 100
-    });
+        orderBy: { startTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.amenityBooking.count({ where: whereClause }),
+    ]);
 
-    return res.json({ bookings });
+    return res.json({ bookings, ...paginationMeta(total, bookings.length, pagination) });
   } catch (error) {
     next(error);
   }
@@ -81,71 +87,82 @@ router.post(
         return res.status(404).json({ message: "Amenity not found or inactive" });
       }
 
-      // Check for conflicts
       const startTime = new Date(body.startTime);
       const endTime = new Date(body.endTime);
 
-      const conflict = await prisma.amenityBooking.findFirst({
-        where: {
-          amenityId: body.amenityId,
-          status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
-          OR: [
-            {
-              AND: [
-                { startTime: { lte: startTime } },
-                { endTime: { gt: startTime } }
-              ]
-            },
-            {
-              AND: [
-                { startTime: { lt: endTime } },
-                { endTime: { gte: endTime } }
-              ]
-            }
-          ]
-        }
-      });
-
-      if (conflict) {
-        return res.status(400).json({ message: "Time slot already booked" });
-      }
-
-      // Calculate price if applicable
+      // Calculate price outside transaction (read-only)
       let totalPrice = null;
       if (amenity.pricePerHour) {
         const hours = (endTime.getTime() - startTime.getTime()) / (1000 * 60 * 60);
         totalPrice = new Prisma.Decimal(Number(amenity.pricePerHour) * hours);
       }
 
-      const booking = await prisma.amenityBooking.create({
-        data: {
-          societyId: req.auth!.societyId,
-          amenityId: body.amenityId,
-          residentId: req.auth!.userId,
-          startTime,
-          endTime,
-          totalPrice,
-          notes: body.notes
-        },
-        include: {
-          amenity: {
-            select: {
-              id: true,
-              name: true,
-              type: true
-            }
-          },
-          resident: {
-            select: {
-              id: true,
-              name: true
-            }
+      // Serializable transaction: conflict check + create are atomic,
+      // preventing double-booking from concurrent requests.
+      const booking = await prisma.$transaction(
+        async (tx) => {
+          const conflict = await tx.amenityBooking.findFirst({
+            where: {
+              amenityId: body.amenityId,
+              status: { in: [BookingStatus.PENDING, BookingStatus.CONFIRMED] },
+              OR: [
+                // New slot starts inside an existing booking
+                {
+                  AND: [
+                    { startTime: { lte: startTime } },
+                    { endTime: { gt: startTime } },
+                  ],
+                },
+                // New slot ends inside an existing booking
+                {
+                  AND: [
+                    { startTime: { lt: endTime } },
+                    { endTime: { gte: endTime } },
+                  ],
+                },
+                // New slot fully contains an existing booking
+                {
+                  AND: [
+                    { startTime: { gte: startTime } },
+                    { endTime: { lte: endTime } },
+                  ],
+                },
+              ],
+            },
+          });
+
+          if (conflict) {
+            throw Object.assign(new Error("Time slot already booked"), { statusCode: 400 });
           }
-        }
-      });
+
+          return tx.amenityBooking.create({
+            data: {
+              societyId: req.auth!.societyId,
+              amenityId: body.amenityId,
+              residentId: req.auth!.userId,
+              startTime,
+              endTime,
+              totalPrice,
+              notes: body.notes,
+            },
+            include: {
+              amenity: {
+                select: { id: true, name: true, type: true },
+              },
+              resident: {
+                select: { id: true, name: true },
+              },
+            },
+          });
+        },
+        { isolationLevel: "Serializable" },
+      );
 
       return res.status(201).json({ booking });
     } catch (error) {
+      if (error instanceof Error && (error as { statusCode?: number }).statusCode === 400) {
+        return res.status(400).json({ message: error.message });
+      }
       next(error);
     }
   }
@@ -214,7 +231,7 @@ router.patch(
 );
 
 // Cancel booking (resident can cancel own, admin can cancel any)
-router.delete("/:id", async (req, res, next) => {
+router.delete("/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { id } = req.params;
     const societyId = req.auth!.societyId;

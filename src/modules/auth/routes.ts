@@ -12,8 +12,16 @@ import {
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
+import crypto from "crypto";
 import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
+import {
+  throttleKey,
+  checkLoginThrottle,
+  recordLoginFailure,
+  clearLoginThrottle,
+} from "../../lib/loginThrottle";
+import { sendPasswordResetEmail } from "../../services/email.service";
 
 const router = Router();
 
@@ -30,6 +38,16 @@ const loginRateLimiter = rateLimit({
   legacyHeaders: false,
   message: {
     message: "Too many login attempts. Please wait a few minutes and try again.",
+  },
+});
+
+const refreshRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: {
+    message: "Too many token refresh attempts. Please try again later.",
   },
 });
 
@@ -210,9 +228,56 @@ async function serializeAuthUser(user: {
   };
 }
 
-/** Client clears JWT locally; backend is stateless (204). */
-router.post("/logout", (_req, res) => {
-  res.status(204).send();
+/**
+ * POST /auth/logout — revoke the caller's refresh tokens.
+ *
+ * Accepts an optional `refreshToken` in the body.  If provided, only that
+ * single token is revoked (single-device logout).  Otherwise, ALL of the
+ * user's tokens are revoked (logout everywhere).
+ *
+ * The endpoint is lenient: if the token isn't found or is already revoked
+ * the request still succeeds with 204 so clients can fire-and-forget.
+ */
+const logoutSchema = z
+  .object({ refreshToken: z.string().optional() })
+  .optional();
+
+router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
+  try {
+    // Best-effort: extract userId from the Authorization header if present.
+    let userId: string | null = null;
+    const authHeader = req.headers.authorization;
+    if (authHeader?.startsWith("Bearer ")) {
+      try {
+        const jwt = await import("jsonwebtoken");
+        const payload = jwt.default.decode(authHeader.slice(7)) as { userId?: string } | null;
+        userId = payload?.userId ?? null;
+      } catch {
+        // Token may be expired — that's fine, we still try.
+      }
+    }
+
+    const body = (req.body ?? {}) as { refreshToken?: string };
+
+    if (body.refreshToken) {
+      // Revoke the specific refresh token.
+      const hashed = hashRefreshToken(body.refreshToken);
+      await prisma.refreshToken.updateMany({
+        where: { token: hashed, revoked: false },
+        data: { revoked: true },
+      });
+    } else if (userId) {
+      // No specific token provided — revoke ALL tokens for this user.
+      await prisma.refreshToken.updateMany({
+        where: { userId, revoked: false },
+        data: { revoked: true },
+      });
+    }
+
+    return res.status(204).send();
+  } catch (error) {
+    next(error);
+  }
 });
 
 /**
@@ -409,6 +474,14 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
       req.body as z.infer<typeof superAdminLoginSchema>;
     const identifier = username.trim();
 
+    const tKey = throttleKey(null, identifier);
+    const lockSeconds = checkLoginThrottle(tKey);
+    if (lockSeconds != null) {
+      return res.status(429).json({
+        message: `Account temporarily locked. Try again in ${lockSeconds} seconds.`,
+      });
+    }
+
     let user = await prisma.user.findFirst({
       where: {
         role: UserRole.SUPER_ADMIN,
@@ -427,17 +500,20 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
     }
 
     if (!user) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
     if (!user.isActive) {
       return res.status(401).json({ message: "Account is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
+    const passwordOk = await bcrypt.compare(password, user.passwordHash);
     if (!passwordOk) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
     return res.json(await serializeAuthUser(user));
   } catch (error) {
@@ -462,6 +538,14 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
       req.body as z.infer<typeof adminLoginSchema>;
     const identifier = username.trim();
 
+    const tKey = throttleKey(societyId, identifier);
+    const lockSeconds = checkLoginThrottle(tKey);
+    if (lockSeconds != null) {
+      return res.status(429).json({
+        message: `Account temporarily locked. Try again in ${lockSeconds} seconds.`,
+      });
+    }
+
     const candidates = await prisma.user.findMany({
       where: {
         societyId,
@@ -472,6 +556,7 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
     });
 
     if (candidates.length === 0) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
     if (candidates.length > 1) {
@@ -485,11 +570,13 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
       return res.status(401).json({ message: "Account is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
+    const passwordOk = await bcrypt.compare(password, user.passwordHash);
     if (!passwordOk) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
     return res.json(await serializeAuthUser(user));
   } catch (error) {
@@ -514,6 +601,14 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
       req.body as z.infer<typeof tenantLoginSchema>;
     const identifier = username.trim();
 
+    const tKey = throttleKey(societyId, identifier);
+    const lockSeconds = checkLoginThrottle(tKey);
+    if (lockSeconds != null) {
+      return res.status(429).json({
+        message: `Account temporarily locked. Try again in ${lockSeconds} seconds.`,
+      });
+    }
+
     const candidates = await prisma.user.findMany({
       where: {
         societyId,
@@ -524,6 +619,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
     });
 
     if (candidates.length === 0) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
     if (candidates.length > 1) {
@@ -541,11 +637,13 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
       return res.status(403).json({ message: "Society is inactive" });
     }
 
-    const passwordOk = await bcrypt.compare(password.trim(), user.passwordHash);
+    const passwordOk = await bcrypt.compare(password, user.passwordHash);
     if (!passwordOk) {
+      recordLoginFailure(tKey);
       return res.status(401).json({ message: "Invalid credentials" });
     }
 
+    clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
     return res.json(await serializeAuthUser(user));
   } catch (error) {
@@ -559,7 +657,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
  */
 const refreshSchema = z.object({ refreshToken: z.string().min(1) });
 
-router.post("/refresh", validateBody(refreshSchema), async (req, res, next) => {
+router.post("/refresh", refreshRateLimiter, validateBody(refreshSchema), async (req, res, next) => {
   try {
     const { refreshToken: rawToken } = req.body as z.infer<typeof refreshSchema>;
     const hashed = hashRefreshToken(rawToken);
@@ -593,5 +691,133 @@ router.post("/refresh", validateBody(refreshSchema), async (req, res, next) => {
     next(error);
   }
 });
+
+// ---------------------------------------------------------------------------
+// Password reset
+// ---------------------------------------------------------------------------
+
+const RESET_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 1 hour
+
+const requestPasswordResetSchema = z.object({
+  email: z.string().email(),
+  societyId: z.string().min(1),
+});
+
+/**
+ * POST /auth/request-password-reset — send a password reset email.
+ *
+ * Always returns 200 to avoid user enumeration. If the email/society combo
+ * doesn't match a user, no email is sent.
+ */
+router.post(
+  "/request-password-reset",
+  loginRateLimiter,
+  validateBody(requestPasswordResetSchema),
+  async (req, res, next) => {
+    try {
+      const { email, societyId } = req.body as z.infer<typeof requestPasswordResetSchema>;
+
+      // Always respond the same to prevent user enumeration.
+      const ok = { message: "If an account with that email exists, a reset link has been sent." };
+
+      const user = await prisma.user.findFirst({
+        where: {
+          email: { equals: email.trim(), mode: "insensitive" },
+          societyId,
+          isActive: true,
+        },
+        select: { id: true, name: true, email: true },
+      });
+
+      if (!user) {
+        return res.json(ok);
+      }
+
+      // Invalidate any previous unused tokens for this user.
+      await prisma.passwordResetToken.updateMany({
+        where: { userId: user.id, usedAt: null },
+        data: { expiresAt: new Date(0) },
+      });
+
+      const rawToken = crypto.randomBytes(32).toString("hex");
+      const hashed = crypto.createHash("sha256").update(rawToken).digest("hex");
+
+      await prisma.passwordResetToken.create({
+        data: {
+          token: hashed,
+          userId: user.id,
+          expiresAt: new Date(Date.now() + RESET_TOKEN_EXPIRY_MS),
+        },
+      });
+
+      const frontendUrl = (process.env.FRONTEND_URL || "http://localhost:3000").replace(/\/+$/, "");
+      const resetUrl = `${frontendUrl}/reset-password?token=${rawToken}`;
+
+      await sendPasswordResetEmail({
+        to: user.email,
+        name: user.name,
+        resetUrl,
+      });
+
+      return res.json(ok);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+const resetPasswordSchema = z.object({
+  token: z.string().min(1),
+  password: passwordSchema,
+});
+
+/**
+ * POST /auth/reset-password — set a new password using a valid reset token.
+ */
+router.post(
+  "/reset-password",
+  validateBody(resetPasswordSchema),
+  async (req, res, next) => {
+    try {
+      const { token: rawToken, password } = req.body as z.infer<typeof resetPasswordSchema>;
+      const hashed = crypto.createHash("sha256").update(rawToken).digest("hex");
+
+      const stored = await prisma.passwordResetToken.findUnique({
+        where: { token: hashed },
+        include: { user: { select: { id: true, isActive: true } } },
+      });
+
+      if (!stored || stored.usedAt || stored.expiresAt <= new Date()) {
+        return res.status(400).json({ message: "Invalid or expired reset token" });
+      }
+
+      if (!stored.user.isActive) {
+        return res.status(400).json({ message: "Account is inactive" });
+      }
+
+      const passwordHash = await bcrypt.hash(password, 10);
+
+      await prisma.$transaction([
+        prisma.user.update({
+          where: { id: stored.user.id },
+          data: { passwordHash },
+        }),
+        prisma.passwordResetToken.update({
+          where: { id: stored.id },
+          data: { usedAt: new Date() },
+        }),
+        // Revoke all refresh tokens to force re-login on all devices.
+        prisma.refreshToken.updateMany({
+          where: { userId: stored.user.id, revoked: false },
+          data: { revoked: true },
+        }),
+      ]);
+
+      return res.json({ message: "Password has been reset successfully" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 export default router;

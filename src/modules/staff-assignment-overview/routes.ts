@@ -124,8 +124,10 @@ router.get("/villa-coverage", async (req, res, next) => {
       orderBy: { villaNumber: "asc" },
     });
 
+    type StaffAssignmentWithStaff = (typeof villas)[number]["staffAssignments"][number];
+
     const villasCoverage = villas.map((v) => {
-      const activeStaff = v.staffAssignments.filter((a: any) => a.staff.isActive);
+      const activeStaff = v.staffAssignments.filter((a: StaffAssignmentWithStaff) => a.staff.isActive);
       return {
         id: v.id,
         villaNumber: v.villaNumber,
@@ -134,7 +136,7 @@ router.get("/villa-coverage", async (req, res, next) => {
         hasActiveResident: v.users.length > 0,
         residentCount: v.users.length,
         staffCount: activeStaff.length,
-        staff: activeStaff.map((a: any) => ({
+        staff: activeStaff.map((a: StaffAssignmentWithStaff) => ({
           staffId: a.staff.id,
           name: a.staff.name,
           type: a.staff.type,

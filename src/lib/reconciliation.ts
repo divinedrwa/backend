@@ -38,7 +38,7 @@ export async function reconcileSocietyLedger(
 
   try {
     // 1. Get society-level snapshot
-    const societySnapshot = await computeSocietyMoneySnapshot(db, societyId);
+    const _societySnapshot = await computeSocietyMoneySnapshot(db, societyId);
 
     // 2. Get all villa snapshots with cycle info
     const villaSnapshots = await db.villaMaintenanceSnapshot.findMany({

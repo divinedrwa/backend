@@ -63,7 +63,7 @@ router.get("/my-staff", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (r
     }));
 
     // Group by type
-    const byType = staff.reduce((acc: any, s) => {
+    const byType = staff.reduce<Record<string, number>>((acc, s) => {
       acc[s.type] = (acc[s.type] || 0) + 1;
       return acc;
     }, {});

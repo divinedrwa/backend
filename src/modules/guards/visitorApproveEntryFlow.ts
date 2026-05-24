@@ -1,4 +1,4 @@
-import type { PrismaClient } from "@prisma/client";
+import type { PrismaClient, VisitorStatus } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import {
   ensureBillingAccountForProperty,
@@ -60,7 +60,19 @@ export async function runVisitorApproveEntry(
     };
   }
 
-  if (preApproved.isUsed) {
+  // For recurring passes, check maxUses instead of isUsed
+  if (preApproved.isRecurring) {
+    if (preApproved.maxUses && preApproved.usedCount >= preApproved.maxUses) {
+      return {
+        status: 409,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "Recurring pass has reached its maximum uses",
+        },
+      };
+    }
+  } else if (preApproved.isUsed) {
     return {
       status: 409,
       body: {
@@ -84,16 +96,30 @@ export async function runVisitorApproveEntry(
 
   try {
     const result = await db.$transaction(async (tx) => {
-      const consume = await tx.preApprovedVisitor.updateMany({
-        where: {
-          id: preApproved.id,
-          isUsed: false,
-          isActive: true,
-        },
-        data: { isUsed: true, usedAt: now },
-      });
-      if (consume.count !== 1) {
-        throw new Error(OTP_ALREADY_CONSUMED);
+      if (preApproved.isRecurring) {
+        const consume = await tx.preApprovedVisitor.updateMany({
+          where: {
+            id: preApproved.id,
+            isActive: true,
+            ...(preApproved.maxUses ? { usedCount: { lt: preApproved.maxUses } } : {}),
+          },
+          data: { usedCount: { increment: 1 }, usedAt: now },
+        });
+        if (consume.count !== 1) {
+          throw new Error(OTP_ALREADY_CONSUMED);
+        }
+      } else {
+        const consume = await tx.preApprovedVisitor.updateMany({
+          where: {
+            id: preApproved.id,
+            isUsed: false,
+            isActive: true,
+          },
+          data: { isUsed: true, usedAt: now },
+        });
+        if (consume.count !== 1) {
+          throw new Error(OTP_ALREADY_CONSUMED);
+        }
       }
 
       const visitor = await tx.visitor.create({
@@ -106,8 +132,9 @@ export async function runVisitorApproveEntry(
           purpose: (p.purpose || preApproved.purpose || "Pre-approved visitor").trim(),
           vehicleNumber: p.vehicleNumber?.trim() || null,
           checkInTime: now,
-          status: "CHECKED_IN",
+          status: "CHECKED_IN" as VisitorStatus,
           createdBy: p.userId,
+          preApprovedId: preApproved.id,
         },
       });
 
@@ -221,7 +248,18 @@ export async function runVisitorAdmitPreApprovedById(
     };
   }
 
-  if (preApproved.isUsed) {
+  if (preApproved.isRecurring) {
+    if (preApproved.maxUses && preApproved.usedCount >= preApproved.maxUses) {
+      return {
+        status: 409,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "Recurring pass has reached its maximum uses",
+        },
+      };
+    }
+  } else if (preApproved.isUsed) {
     return {
       status: 409,
       body: {
@@ -247,16 +285,30 @@ export async function runVisitorAdmitPreApprovedById(
 
   try {
     const result = await db.$transaction(async (tx) => {
-      const consume = await tx.preApprovedVisitor.updateMany({
-        where: {
-          id: preApproved.id,
-          isUsed: false,
-          isActive: true,
-        },
-        data: { isUsed: true, usedAt: now },
-      });
-      if (consume.count !== 1) {
-        throw new Error(OTP_ALREADY_CONSUMED);
+      if (preApproved.isRecurring) {
+        const consume = await tx.preApprovedVisitor.updateMany({
+          where: {
+            id: preApproved.id,
+            isActive: true,
+            ...(preApproved.maxUses ? { usedCount: { lt: preApproved.maxUses } } : {}),
+          },
+          data: { usedCount: { increment: 1 }, usedAt: now },
+        });
+        if (consume.count !== 1) {
+          throw new Error(OTP_ALREADY_CONSUMED);
+        }
+      } else {
+        const consume = await tx.preApprovedVisitor.updateMany({
+          where: {
+            id: preApproved.id,
+            isUsed: false,
+            isActive: true,
+          },
+          data: { isUsed: true, usedAt: now },
+        });
+        if (consume.count !== 1) {
+          throw new Error(OTP_ALREADY_CONSUMED);
+        }
       }
 
       const visitor = await tx.visitor.create({
@@ -269,8 +321,9 @@ export async function runVisitorAdmitPreApprovedById(
           purpose: (preApproved.purpose || "Pre-approved visitor").trim(),
           vehicleNumber: null,
           checkInTime: now,
-          status: "CHECKED_IN",
+          status: "CHECKED_IN" as VisitorStatus,
           createdBy: p.userId,
+          preApprovedId: preApproved.id,
         },
       });
 

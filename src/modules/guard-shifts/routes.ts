@@ -105,7 +105,7 @@ router.get("/", async (req, res, next) => {
 router.get("/my-shifts", requireRole(UserRole.GUARD), async (req, res, next) => {
   try {
     const pagination = getPagination(req);
-    const daysBack = parseInt(req.query.days as string, 10) || 7;
+    const daysBack = Math.min(Math.max(parseInt(req.query.days as string, 10) || 7, 1), 365);
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - daysBack);
 
@@ -180,6 +180,23 @@ router.post(
 
       if (!gate) {
         return res.status(404).json({ message: "Gate not found" });
+      }
+
+      // Check for overlapping shifts for the same guard
+      const overlapping = await prisma.guardShift.findFirst({
+        where: {
+          guardId: body.guardId,
+          societyId: req.auth!.societyId,
+          OR: [
+            { AND: [{ startTime: { lte: startTime } }, { endTime: { gt: startTime } }] },
+            { AND: [{ startTime: { lt: endTime } }, { endTime: { gte: endTime } }] },
+            { AND: [{ startTime: { gte: startTime } }, { endTime: { lte: endTime } }] },
+          ],
+        },
+      });
+
+      if (overlapping) {
+        return res.status(409).json({ message: "Guard already has an overlapping shift during this time" });
       }
 
       const shift = await prisma.guardShift.create({

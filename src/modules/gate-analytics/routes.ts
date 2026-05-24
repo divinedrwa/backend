@@ -34,57 +34,39 @@ router.get("/overview", async (req, res, next) => {
     const startOfDay = new Date();
     startOfDay.setHours(0, 0, 0, 0);
 
-    const visitorCounts = await Promise.all(
-      gates.map(async (gate) => {
-        const count = await prisma.visitor.count({
-          where: {
-            societyId,
-            gateId: gate.id,
-            checkInAt: {
-              gte: startOfDay,
-            },
-          },
-        });
+    // Use groupBy to get all gate counts in 2 queries instead of 2N
+    const [totalByGate, activeByGate] = await Promise.all([
+      prisma.visitor.groupBy({
+        by: ["gateId"],
+        where: { societyId, checkInAt: { gte: startOfDay } },
+        _count: true,
+      }),
+      prisma.visitor.groupBy({
+        by: ["gateId"],
+        where: { societyId, checkInAt: { gte: startOfDay }, checkOutAt: null },
+        _count: true,
+      }),
+    ]);
 
-        const activeCount = await prisma.visitor.count({
-          where: {
-            societyId,
-            gateId: gate.id,
-            checkInAt: {
-              gte: startOfDay,
-            },
-            checkOutAt: null,
-          },
-        });
+    const totalMap = new Map(totalByGate.map((r) => [r.gateId, r._count]));
+    const activeMap = new Map(activeByGate.map((r) => [r.gateId, r._count]));
 
-        return {
-          gateId: gate.id,
-          gateName: gate.name,
-          todayTotal: count,
-          activeNow: activeCount,
-        };
-      })
-    );
-
-    const gateOverview = gates.map((gate) => {
-      const stats = visitorCounts.find((v) => v.gateId === gate.id);
-      return {
-        id: gate.id,
-        name: gate.name,
-        location: gate.location,
-        isActive: gate.isActive,
-        assignedGuard: gate.assignedGuard
-          ? {
-              name: gate.assignedGuard.name,
-              username: gate.assignedGuard.username,
-              phone: gate.assignedGuard.phone,
-              isActive: gate.assignedGuard.isActive,
-            }
-          : null,
-        todayVisitors: stats?.todayTotal || 0,
-        activeVisitors: stats?.activeNow || 0,
-      };
-    });
+    const gateOverview = gates.map((gate) => ({
+      id: gate.id,
+      name: gate.name,
+      location: gate.location,
+      isActive: gate.isActive,
+      assignedGuard: gate.assignedGuard
+        ? {
+            name: gate.assignedGuard.name,
+            username: gate.assignedGuard.username,
+            phone: gate.assignedGuard.phone,
+            isActive: gate.assignedGuard.isActive,
+          }
+        : null,
+      todayVisitors: totalMap.get(gate.id) || 0,
+      activeVisitors: activeMap.get(gate.id) || 0,
+    }));
 
     return res.json({ gates: gateOverview });
   } catch (error) {

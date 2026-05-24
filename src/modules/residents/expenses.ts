@@ -50,6 +50,7 @@ router.get("/society-expenses", async (req, res, next) => {
     const where: Prisma.ExpenseWhereInput = {
       societyId,
       status: "APPROVED",
+      deletedAt: null,
     };
 
     if (typeof categoryId === "string" && categoryId) {
@@ -127,7 +128,7 @@ router.get("/society-expenses/:id", async (req, res, next) => {
     const { id } = req.params;
 
     const expense = await prisma.expense.findFirst({
-      where: { id, societyId, status: "APPROVED" },
+      where: { id, societyId, status: "APPROVED", deletedAt: null },
       include: {
         category: {
           select: {

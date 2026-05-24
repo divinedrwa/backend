@@ -1,6 +1,7 @@
 import {
   NotificationCategory,
   UserRole,
+  VisitorStatus,
   VisitorMultiVillaApprovalMode,
   VisitorVillaApprovalStatus,
 } from "@prisma/client";
@@ -9,10 +10,10 @@ import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 
 /** Waiting at gate for resident decision(s). */
-export const VISITOR_PENDING_APPROVAL = "PENDING_APPROVAL";
+export const VISITOR_PENDING_APPROVAL = VisitorStatus.PENDING_APPROVAL;
 /** Resident(s) approved — guard may complete physical entry. */
-export const VISITOR_APPROVED_FOR_ENTRY = "APPROVED";
-export const VISITOR_REJECTED = "REJECTED";
+export const VISITOR_APPROVED_FOR_ENTRY = VisitorStatus.APPROVED;
+export const VISITOR_REJECTED = VisitorStatus.DENIED;
 
 const visitorWithVillas = {
   villaVisits: {
@@ -407,7 +408,7 @@ export async function recomputeVisitorAggregateApproval(
     rows.length > 0 && rows.every((r) => r.approvalStatus === VisitorVillaApprovalStatus.APPROVED);
   const nonePending = rows.every((r) => r.approvalStatus !== VisitorVillaApprovalStatus.PENDING);
 
-  let next: string | null = null;
+  let next: VisitorStatus | null = null;
   if (mode === VisitorMultiVillaApprovalMode.ANY_ONE_APPROVAL) {
     if (anyApproved) next = VISITOR_APPROVED_FOR_ENTRY;
     else if (nonePending && !anyApproved) next = VISITOR_REJECTED;
@@ -434,7 +435,7 @@ export async function recomputeVisitorAggregateApproval(
     include: visitorWithVillas,
   });
 
-  const transitioned = prev === VISITOR_PENDING_APPROVAL && next !== prev;
+  const transitioned = prev === VISITOR_PENDING_APPROVAL && next !== null;
 
   if (transitioned && (next === VISITOR_APPROVED_FOR_ENTRY || next === VISITOR_REJECTED)) {
     await notifyGuardsVisitorApprovalOutcome({

@@ -1,10 +1,16 @@
 import { Router } from "express";
 import { z } from "zod";
+import { UserRole } from "@prisma/client";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { requireAuth } from "../../middlewares/auth";
+import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
 const router = Router();
+
+function maskAccountNumber(acct: string): string {
+  return acct.length > 4 ? "****" + acct.slice(-4) : "****";
+}
 
 // Validation schemas
 const createBankAccountSchema = z.object({
@@ -25,30 +31,38 @@ const updateBankAccountSchema = z.object({
 });
 
 // GET /api/bank-accounts - List all bank accounts
-router.get("/", requireAuth, async (req, res, next) => {
+router.get("/", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
 
-    const accounts = await prisma.bankAccount.findMany({
-      where: { societyId },
-      include: {
-        _count: {
-          select: {
-            maintenancePayments: true,
+    const pagination = getPagination(req);
+    const where = { societyId };
+    const [accounts, total] = await Promise.all([
+      prisma.bankAccount.findMany({
+        where,
+        include: {
+          _count: {
+            select: {
+              maintenancePayments: true,
+            },
           },
         },
-      },
-      orderBy: { createdAt: "desc" },
-    });
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.bankAccount.count({ where }),
+    ]);
 
-    return res.json({ accounts });
+    const masked = accounts.map((a) => ({ ...a, accountNumber: maskAccountNumber(a.accountNumber) }));
+    return res.json({ accounts: masked, ...paginationMeta(total, accounts.length, pagination) });
   } catch (error) {
     next(error);
   }
 });
 
 // GET /api/bank-accounts/:id - Get bank account details
-router.get("/:id", requireAuth, async (req, res, next) => {
+router.get("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { id } = req.params;
@@ -84,6 +98,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
     return res.json({
       account: {
         ...account,
+        accountNumber: maskAccountNumber(account.accountNumber),
         totalReceived,
       },
     });
@@ -93,7 +108,7 @@ router.get("/:id", requireAuth, async (req, res, next) => {
 });
 
 // POST /api/bank-accounts - Create new bank account
-router.post("/", requireAuth, validateBody(createBankAccountSchema), async (req, res, next) => {
+router.post("/", requireAuth, requireRole(UserRole.ADMIN), validateBody(createBankAccountSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
 
@@ -111,7 +126,7 @@ router.post("/", requireAuth, validateBody(createBankAccountSchema), async (req,
 });
 
 // PATCH /api/bank-accounts/:id - Update bank account
-router.patch("/:id", requireAuth, validateBody(updateBankAccountSchema), async (req, res, next) => {
+router.patch("/:id", requireAuth, requireRole(UserRole.ADMIN), validateBody(updateBankAccountSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { id } = req.params;
@@ -136,7 +151,7 @@ router.patch("/:id", requireAuth, validateBody(updateBankAccountSchema), async (
 });
 
 // DELETE /api/bank-accounts/:id - Delete bank account
-router.delete("/:id", requireAuth, async (req, res, next) => {
+router.delete("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const { id } = req.params;

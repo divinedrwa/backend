@@ -1,7 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import rateLimit from "express-rate-limit";
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
@@ -11,6 +11,21 @@ import { validateBody } from "../../middlewares/validate";
 import { recordPaymentAndSyncLedgers } from "./record-payment";
 
 const router = Router();
+
+/** Mask account numbers in a payment's included bankAccount relation. */
+function maskPaymentBankAccount<T extends { bankAccount?: { accountNumber?: string } | null }>(payment: T): T {
+  if (payment.bankAccount?.accountNumber) {
+    const acct = payment.bankAccount.accountNumber;
+    return {
+      ...payment,
+      bankAccount: {
+        ...payment.bankAccount,
+        accountNumber: acct.length > 4 ? "****" + acct.slice(-4) : "****",
+      },
+    };
+  }
+  return payment;
+}
 
 // 🔥 Rate limiting for payment operations
 const paymentRateLimiter = rateLimit({
@@ -55,7 +70,7 @@ router.post(
   requireAuth,
   requireRole(UserRole.ADMIN, UserRole.RESIDENT),
   validateBody(recordPaymentSchema),
-  async (req, res, next) => {
+  async (req, res, _next) => {
   try {
     const { societyId, userId } = req.auth!;
     const { villaId, month, year, amount, paymentDate, paymentMode, transactionId, bankAccountId, remarks, idempotencyKey } = req.body;
@@ -81,7 +96,7 @@ router.post(
       if (existing) {
         logger.info(`[Idempotency] Returning existing payment for key: ${idempotencyKey}`);
         return res.status(200).json({
-          payment: existing,
+          payment: maskPaymentBankAccount(existing),
           note: 'Payment already recorded (idempotent)',
         });
       }
@@ -98,6 +113,12 @@ router.post(
 
     // Residents can only pay for their own villa
     if (req.auth?.role === UserRole.RESIDENT) {
+      // Residents cannot self-record CASH or CHEQUE payments — admin must confirm receipt
+      if (paymentMode === "CASH" || paymentMode === "CHEQUE") {
+        return res.status(403).json({
+          message: "Cash and cheque payments must be recorded by an admin after verification",
+        });
+      }
       const resident = await prisma.user.findFirst({
         where: { id: userId, societyId },
         select: { villaId: true },
@@ -129,7 +150,7 @@ router.post(
       isolationLevel: 'Serializable', // Highest isolation
     });
 
-    return res.status(201).json({ payment: result.payment });
+    return res.status(201).json({ payment: maskPaymentBankAccount(result.payment) });
   } catch (error: unknown) {
     logger.error({ err: error }, '[Payment] Recording failed');
     
@@ -163,11 +184,11 @@ router.get("/payments", requireAuth, requireRole(UserRole.ADMIN), async (req, re
     const { societyId } = req.auth!;
     const { month, year, villaId } = req.query;
 
-    const where: any = { societyId };
-    
+    const where: Prisma.MaintenancePaymentWhereInput = { societyId };
+
     if (month) where.month = parseInt(month as string);
     if (year) where.year = parseInt(year as string);
-    if (villaId) where.villaId = villaId;
+    if (villaId) where.villaId = villaId as string;
 
     const pagination = getPagination(req);
     const [payments, total] = await Promise.all([
@@ -334,33 +355,45 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
       },
     });
 
-    const villaWise = await Promise.all(
-      allVillas.map(async (villa) => {
-        const pendingBills = await prisma.maintenance.findMany({
-          where: {
-            villaId: villa.id,
-            status: { in: ["PENDING", "OVERDUE"] },
-          },
-          orderBy: { dueDate: "asc" },
-        });
+    // Batch-fetch all pending bills and last payments to avoid N+1 per villa
+    const [allPendingBills, allLastPayments] = await Promise.all([
+      prisma.maintenance.findMany({
+        where: {
+          societyId,
+          status: { in: ["PENDING", "OVERDUE"] },
+        },
+        orderBy: { dueDate: "asc" },
+      }),
+      prisma.maintenancePayment.findMany({
+        where: { societyId },
+        orderBy: { paymentDate: "desc" },
+        distinct: ["villaId"],
+        select: { villaId: true, paymentDate: true },
+      }),
+    ]);
 
-        const lastPayment = await prisma.maintenancePayment.findFirst({
-          where: { villaId: villa.id },
-          orderBy: { paymentDate: "desc" },
-        });
-
-        const totalDue = pendingBills.reduce((sum, bill) => sum + Number(bill.amount), 0);
-
-        return {
-          villaNumber: villa.villaNumber,
-          ownerName: villa.ownerName,
-          pendingMonths: pendingBills.length,
-          totalDue,
-          lastPayment: lastPayment?.paymentDate,
-          oldestPending: pendingBills[0]?.dueDate,
-        };
-      })
+    const pendingByVilla = new Map<string, typeof allPendingBills>();
+    for (const bill of allPendingBills) {
+      const arr = pendingByVilla.get(bill.villaId) ?? [];
+      arr.push(bill);
+      pendingByVilla.set(bill.villaId, arr);
+    }
+    const lastPaymentByVilla = new Map(
+      allLastPayments.map((p) => [p.villaId, p.paymentDate])
     );
+
+    const villaWise = allVillas.map((villa) => {
+      const bills = pendingByVilla.get(villa.id) ?? [];
+      const totalDue = bills.reduce((sum, bill) => sum + Number(bill.amount), 0);
+      return {
+        villaNumber: villa.villaNumber,
+        ownerName: villa.ownerName,
+        pendingMonths: bills.length,
+        totalDue,
+        lastPayment: lastPaymentByVilla.get(villa.id) ?? null,
+        oldestPending: bills[0]?.dueDate ?? null,
+      };
+    });
 
     // Sort by pending amount
     villaWise.sort((a, b) => b.totalDue - a.totalDue);
@@ -501,8 +534,8 @@ router.post(
       });
     }
 
-    // Create bills for all villas
-    const bills = await Promise.all(
+    // Create bills for all villas atomically — partial failure leaves no orphans
+    const bills = await prisma.$transaction(
       villas.map((villa) =>
         prisma.maintenance.create({
           data: {
@@ -534,20 +567,24 @@ router.get("/villa/:villaId", requireAuth, requireRole(UserRole.ADMIN), async (r
     const { societyId } = req.auth!;
     const { villaId } = req.params;
 
-    const payments = await prisma.maintenancePayment.findMany({
-      where: {
-        villaId,
-        societyId,
-      },
-      include: {
-        bankAccount: {
-          select: {
-            bankName: true,
+    const pagination = getPagination(req);
+    const paymentWhere = { villaId, societyId };
+    const [payments, total] = await Promise.all([
+      prisma.maintenancePayment.findMany({
+        where: paymentWhere,
+        include: {
+          bankAccount: {
+            select: {
+              bankName: true,
+            },
           },
         },
-      },
-      orderBy: { paymentDate: "desc" },
-    });
+        orderBy: { paymentDate: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.maintenancePayment.count({ where: paymentWhere }),
+    ]);
 
     const pending = await prisma.maintenance.findMany({
       where: {
@@ -558,7 +595,7 @@ router.get("/villa/:villaId", requireAuth, requireRole(UserRole.ADMIN), async (r
       orderBy: { dueDate: "asc" },
     });
 
-    return res.json({ payments, pending });
+    return res.json({ payments, pending, ...paginationMeta(total, payments.length, pagination) });
   } catch (error) {
     next(error);
   }

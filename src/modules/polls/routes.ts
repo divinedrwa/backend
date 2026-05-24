@@ -1,6 +1,7 @@
 import { PollStatus, Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -13,6 +14,9 @@ const createPollSchema = z.object({
   startDate: z.string().datetime(),
   endDate: z.string().datetime(),
   options: z.array(z.string().min(1).max(200)).min(2)
+}).refine((d) => new Date(d.endDate) > new Date(d.startDate), {
+  message: "End date must be after start date",
+  path: ["endDate"],
 });
 
 const voteSchema = z.object({
@@ -24,26 +28,33 @@ router.use(requireAuth);
 // List polls
 router.get("/", async (req, res, next) => {
   try {
-    const polls = await prisma.poll.findMany({
-      where: { societyId: req.auth!.societyId },
-      include: {
-        options: {
-          select: {
-            id: true,
-            optionText: true,
-            _count: {
-              select: { votes: true }
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [polls, total] = await Promise.all([
+      prisma.poll.findMany({
+        where,
+        include: {
+          options: {
+            select: {
+              id: true,
+              optionText: true,
+              _count: {
+                select: { votes: true }
+              }
             }
+          },
+          _count: {
+            select: { votes: true }
           }
         },
-        _count: {
-          select: { votes: true }
-        }
-      },
-      orderBy: { createdAt: "desc" }
-    });
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.poll.count({ where }),
+    ]);
 
-    return res.json({ polls });
+    return res.json({ polls, ...paginationMeta(total, polls.length, pagination) });
   } catch (error) {
     next(error);
   }

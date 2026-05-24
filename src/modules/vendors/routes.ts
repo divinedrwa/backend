@@ -5,6 +5,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -143,6 +144,14 @@ router.delete(
       if (vendor.count === 0) {
         return res.status(404).json({ message: "Vendor not found" });
       }
+
+      auditFromRequest(req, {
+        societyId: req.auth!.societyId,
+        adminId: req.auth!.userId,
+        action: "VENDOR_DELETE",
+        entityType: "Vendor",
+        entityId: id,
+      });
 
       return res.json({ message: "Vendor deleted" });
     } catch (error) {

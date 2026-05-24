@@ -1,6 +1,7 @@
 import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -24,20 +25,27 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    const gates = await prisma.gate.findMany({
-      where: { societyId: req.auth!.societyId },
-      orderBy: { name: "asc" },
-      include: {
-        assignedGuard: {
-          select: {
-            id: true,
-            name: true,
-            phone: true
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [gates, total] = await Promise.all([
+      prisma.gate.findMany({
+        where,
+        orderBy: { name: "asc" },
+        include: {
+          assignedGuard: {
+            select: {
+              id: true,
+              name: true,
+              phone: true
+            }
           }
-        }
-      }
-    });
-    return res.json({ gates });
+        },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.gate.count({ where }),
+    ]);
+    return res.json({ gates, ...paginationMeta(total, gates.length, pagination) });
   } catch (error) {
     next(error);
   }

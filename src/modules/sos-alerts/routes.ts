@@ -1,4 +1,5 @@
 import { Router } from "express";
+import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
@@ -59,8 +60,17 @@ function villaLabelFromAlert(a: {
     : a.villa.villaNumber;
 }
 
+/** SOS rate limit: 5 per 15 min per IP to prevent accidental spam. */
+const sosRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  limit: 5,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { message: "Too many SOS alerts. Please wait before sending another." },
+});
+
 // POST /api/sos-alerts - Trigger SOS (residents)
-router.post("/", requireAuth, validateBody(createSOSSchema), async (req, res, next) => {
+router.post("/", requireAuth, sosRateLimiter, validateBody(createSOSSchema), async (req, res, next) => {
   try {
     const { userId, societyId, villaId } = req.auth!;
     const { emergencyType, message, location, latitude, longitude } = req.body;
@@ -103,14 +113,14 @@ router.post("/", requireAuth, validateBody(createSOSSchema), async (req, res, ne
       include: alertInclude,
     });
 
-    const vl = villaLabelFromAlert(alert as any);
+    const vl = villaLabelFromAlert(alert);
 
     void notifySocietyRoles({
       societyId,
       roles: [UserRole.GUARD, UserRole.ADMIN],
       category: NotificationCategory.SOS,
       title: `🚨 SOS: ${emergencyType}`,
-      body: `${alert.user.name} · ${vl}${message ? ` · ${message}` : ""}`,
+      body: `${alert.user?.name ?? "Unknown resident"} · ${vl}${message ? ` · ${message}` : ""}`,
       data: {
         alertId: alert.id,
         villaId,
@@ -243,13 +253,15 @@ router.patch(
         include: alertInclude,
       });
 
-      void notifyResidentSosUpdate({
-        alertId: id,
-        residentUserId: alert.triggeredBy,
-        title: "Help is on the way",
-        body: "A guard has acknowledged your SOS.",
-        extraData: { sosStatus: SOSStatus.ACKNOWLEDGED },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId: id,
+          residentUserId: alert.triggeredBy,
+          title: "Help is on the way",
+          body: "A guard has acknowledged your SOS.",
+          extraData: { sosStatus: SOSStatus.ACKNOWLEDGED },
+        }).catch(() => undefined);
+      }
 
       return res.json({
         alert: updatedAlert,
@@ -295,13 +307,15 @@ router.patch(
         include: alertInclude,
       });
 
-      void notifyResidentSosUpdate({
-        alertId: id,
-        residentUserId: alert.triggeredBy,
-        title: "Response in progress",
-        body: "Emergency responders are attending your SOS.",
-        extraData: { sosStatus: SOSStatus.IN_PROGRESS },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId: id,
+          residentUserId: alert.triggeredBy,
+          title: "Response in progress",
+          body: "Emergency responders are attending your SOS.",
+          extraData: { sosStatus: SOSStatus.IN_PROGRESS },
+        }).catch(() => undefined);
+      }
 
       return res.json({
         alert: updatedAlert,
@@ -359,13 +373,15 @@ router.patch(
         include: alertInclude,
       });
 
-      void notifyResidentSosUpdate({
-        alertId: id,
-        residentUserId: alert.triggeredBy,
-        title: "SOS resolved",
-        body: "Your emergency alert has been closed by security.",
-        extraData: { sosStatus: SOSStatus.RESOLVED },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId: id,
+          residentUserId: alert.triggeredBy,
+          title: "SOS resolved",
+          body: "Your emergency alert has been closed by security.",
+          extraData: { sosStatus: SOSStatus.RESOLVED },
+        }).catch(() => undefined);
+      }
 
       return res.json({
         alert: updatedAlert,

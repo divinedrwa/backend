@@ -2,6 +2,7 @@ import { randomBytes } from "crypto";
 import { Router } from "express";
 import { z } from "zod";
 import { InvitationStatus, SocietyStatus, UserRole } from "@prisma/client";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -241,29 +242,35 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         : {}),
     };
 
-    const invitations = await prisma.invitation.findMany({
-      where,
-      orderBy: { createdAt: "desc" },
-      select: {
-        id: true,
-        role: true,
-        phone: true,
-        email: true,
-        villaId: true,
-        status: true,
-        expiresAt: true,
-        createdAt: true,
-        acceptedAt: true,
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
+    const pagination = getPagination(req);
+    const [invitations, total] = await Promise.all([
+      prisma.invitation.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        select: {
+          id: true,
+          role: true,
+          phone: true,
+          email: true,
+          villaId: true,
+          status: true,
+          expiresAt: true,
+          createdAt: true,
+          acceptedAt: true,
+          villa: {
+            select: {
+              villaNumber: true,
+              block: true,
+            },
           },
         },
-      },
-    });
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.invitation.count({ where }),
+    ]);
 
-    res.json({ invitations });
+    res.json({ invitations, ...paginationMeta(total, invitations.length, pagination) });
   } catch (e) {
     next(e);
   }

@@ -72,6 +72,15 @@ enum PaymentMode {
   BANK_TRANSFER
   CHEQUE
   ONLINE
+  PHONEPE
+}
+
+enum PaymentMethodType {
+  BANK_TRANSFER
+  UPI_VPA
+  UPI_QR
+  RAZORPAY
+  PHONEPE
 }
 
 enum SOSType {
@@ -179,6 +188,16 @@ model Society {
   /// Optional URL to a custom UPI QR code image uploaded by the admin (e.g. from their bank app).
   upiQrCodeUrl String?
 
+  /// Late-fee config: percentage of monthly maintenance applied after grace period.
+  /// 0 = disabled. Typical: 1-5%. Mutually exclusive with lateFeeFixedAmount.
+  lateFeePercentage Float @default(0)
+
+  /// Late-fee config: fixed amount (INR) applied after grace period. 0 = disabled.
+  lateFeeFixedAmount Float @default(0)
+
+  /// Grace period days after the maintenance due date before late fee kicks in.
+  maintenanceGracePeriodDays Int @default(15)
+
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
@@ -191,6 +210,11 @@ model Society {
   reconciliationAlerts ReconciliationAlert[]
   upiPaymentSubmissions UpiPaymentSubmission[]
   specialProjects       SpecialProject[]
+  paymentMethods        PaymentMethod[]
+  vendorContracts       VendorContract[]
+  assets                Asset[]
+  meetings              Meeting[]
+  staffAttendance       StaffAttendance[]
 
   @@index([status])
 }
@@ -343,15 +367,20 @@ model User {
   upiSubmissions        UpiPaymentSubmission[] @relation("UpiSubmitter")
   upiVerifications      UpiPaymentSubmission[] @relation("UpiVerifier")
   refreshTokens         RefreshToken[]
+  passwordResetTokens   PasswordResetToken[]
   specialProjectsCreated SpecialProject[]     @relation("SpecialProjectCreator")
   projectPaymentsMarked  ProjectPayment[]     @relation("ProjectPaymentMarker")
   projectExpensesCreated ProjectExpense[]      @relation("ProjectExpenseCreator")
+  vendorContractsCreated VendorContract[]      @relation("VendorContractCreator")
+  meetingsCreated        Meeting[]             @relation("MeetingCreator")
+  staffAttendanceMarked  StaffAttendance[]     @relation("StaffAttendanceMarker")
 
   @@index([societyId])
   @@index([villaId])
   @@index([unitId])
   @@index([username])
   @@index([residentType])
+  @@index([societyId, role, isActive])
 }
 
 model Villa {
@@ -492,6 +521,7 @@ model MaintenancePayment {
   @@index([maintenanceCollectionCycleId])
   @@index([villaMaintenanceSnapshotId])
   @@index([idempotencyKey])
+  @@index([villaId, month, year])
 }
 
 // ==========================================
@@ -565,6 +595,8 @@ model VillaMaintenanceSnapshot {
   villa          Villa                          @relation(fields: [villaId], references: [id], onDelete: Cascade)
   expectedAmount Decimal                        @db.Decimal(12, 2)
   paidAmount     Decimal                        @db.Decimal(12, 2) @default(0)
+  lateFeeAmount  Decimal                        @db.Decimal(12, 2) @default(0)
+  lateFeeAppliedAt DateTime?
   status         VillaMaintenanceSnapshotStatus @default(PENDING)
   breakdown      Json?
   createdAt      DateTime                       @default(now())
@@ -598,19 +630,28 @@ enum ComplaintStatus {
   CLOSED
 }
 
+enum ComplaintPriority {
+  LOW
+  MEDIUM
+  HIGH
+  URGENT
+}
+
 model Complaint {
-  id          String          @id @default(cuid())
+  id          String             @id @default(cuid())
   societyId   String
   villaId     String
-  residentId  String?         // Who filed the complaint (for mobile API)
+  residentId  String?            // Who filed the complaint (for mobile API)
   title       String
-  description String          @db.Text
-  category    String?         @default("General")
-  status      ComplaintStatus @default(OPEN)
-  adminNotes  String?         @db.Text
+  description String             @db.Text
+  category    String?            @default("General")
+  priority    ComplaintPriority  @default(MEDIUM)
+  status      ComplaintStatus    @default(OPEN)
+  adminNotes  String?            @db.Text
+  slaDeadline DateTime?
   resolvedAt  DateTime?
-  createdAt   DateTime        @default(now())
-  updatedAt   DateTime        @updatedAt
+  createdAt   DateTime           @default(now())
+  updatedAt   DateTime           @updatedAt
 
   society  Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
   villa    Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
@@ -621,6 +662,8 @@ model Complaint {
   @@index([residentId])
   @@index([status])
   @@index([category])
+  @@index([societyId, createdAt])
+  @@index([slaDeadline])
 }
 
 enum VendorCategory {
@@ -645,10 +688,115 @@ model Vendor {
   createdAt   DateTime       @default(now())
   updatedAt   DateTime       @updatedAt
 
-  society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  society   Society          @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  contracts VendorContract[]
 
   @@index([societyId])
   @@index([isApproved])
+}
+
+enum ContractStatus {
+  DRAFT
+  ACTIVE
+  EXPIRED
+  TERMINATED
+  RENEWED
+}
+
+model VendorContract {
+  id              String         @id @default(cuid())
+  societyId       String
+  society         Society        @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  vendorId        String
+  vendor          Vendor         @relation(fields: [vendorId], references: [id], onDelete: Cascade)
+  title           String
+  description     String?        @db.Text
+  status          ContractStatus @default(DRAFT)
+  startDate       DateTime
+  endDate         DateTime
+  amount          Decimal        @db.Decimal(12, 2)
+  paymentTerms    String?
+  autoRenew       Boolean        @default(false)
+  documentUrl     String?
+  notes           String?        @db.Text
+  createdById     String
+  createdBy       User           @relation("VendorContractCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([societyId])
+  @@index([vendorId])
+  @@index([societyId, status])
+  @@index([endDate])
+}
+
+enum AssetCondition {
+  NEW
+  GOOD
+  FAIR
+  POOR
+  DECOMMISSIONED
+}
+
+model Asset {
+  id              String         @id @default(cuid())
+  societyId       String
+  society         Society        @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  name            String
+  category        String
+  location        String?
+  serialNumber    String?
+  purchaseDate    DateTime?
+  purchaseValue   Decimal?       @db.Decimal(12, 2)
+  currentValue    Decimal?       @db.Decimal(12, 2)
+  condition       AssetCondition @default(GOOD)
+  warrantyExpiry  DateTime?
+  assignedTo      String?
+  notes           String?        @db.Text
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @updatedAt
+
+  @@index([societyId])
+  @@index([societyId, category])
+  @@index([condition])
+}
+
+enum MeetingType {
+  AGM
+  SGM
+  COMMITTEE
+  GENERAL
+}
+
+enum MeetingStatus {
+  SCHEDULED
+  IN_PROGRESS
+  COMPLETED
+  CANCELLED
+}
+
+model Meeting {
+  id            String        @id @default(cuid())
+  societyId     String
+  society       Society       @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  title         String
+  type          MeetingType   @default(GENERAL)
+  status        MeetingStatus @default(SCHEDULED)
+  scheduledAt   DateTime
+  endedAt       DateTime?
+  location      String?
+  agenda        String?       @db.Text
+  minutes       String?       @db.Text
+  attendeeCount Int?
+  documentUrl   String?
+  createdById   String
+  createdBy     User          @relation("MeetingCreator", fields: [createdById], references: [id], onDelete: Restrict)
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([societyId])
+  @@index([societyId, type])
+  @@index([scheduledAt])
 }
 
 /// Notice board categories — must match `divine_app` NoticeCategory.value (GENERAL, MAINTENANCE, …).
@@ -686,6 +834,7 @@ model Notice {
 
   @@index([societyId])
   @@index([category])
+  @@index([societyId, createdAt])
 }
 
 model NoticeRecipient {
@@ -712,14 +861,17 @@ model Visitor {
   checkInTime   DateTime    @default(now()) // Alias for mobile API compatibility
   checkOutAt    DateTime?
   checkOutTime  DateTime?   // Alias for mobile API compatibility
-  status        String      @default("CHECKED_IN") // Added for mobile API
-  createdBy     String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
+  status        VisitorStatus @default(CHECKED_IN)
+  createdBy       String?
+  /// Link back to the pre-approval that was consumed to admit this visitor (audit trail).
+  preApprovedId   String?   @unique
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
 
-  society     Society        @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  gate        Gate?          @relation(fields: [gateId], references: [id], onDelete: SetNull)
-  villaVisits VisitorVilla[]
+  society        Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  gate           Gate?                @relation(fields: [gateId], references: [id], onDelete: SetNull)
+  preApproved    PreApprovedVisitor?  @relation(fields: [preApprovedId], references: [id], onDelete: SetNull)
+  villaVisits    VisitorVilla[]
 
   @@index([societyId])
   @@index([gateId])
@@ -728,6 +880,7 @@ model Visitor {
   @@index([status])
   @@index([societyId, checkOutAt])
   @@index([societyId, status])
+  @@index([societyId, checkInAt])
 }
 
 model VisitorVilla {
@@ -768,6 +921,15 @@ enum VisitorType {
   OTHER
 }
 
+enum VisitorStatus {
+  PENDING_APPROVAL
+  APPROVED
+  CHECKED_IN
+  CHECKED_OUT
+  DENIED
+  CANCELLED
+}
+
 /// Per–villa-unit response when a guard requests resident approval for entry.
 enum VisitorVillaApprovalStatus {
   PENDING
@@ -798,6 +960,7 @@ model Parcel {
   trackingNumber  String?      // Added for mobile API
   senderName      String?      // Added for mobile API
   description     String
+  photoUrl        String?
   status          ParcelStatus @default(PENDING)
   receivedAt      DateTime     @default(now())
   collectedAt     DateTime?
@@ -811,6 +974,7 @@ model Parcel {
   @@index([societyId])
   @@index([villaId])
   @@index([status])
+  @@index([societyId, receivedAt])
 }
 
 // Gate Management for Guard Assignment (1 Guard per Gate)
@@ -834,6 +998,7 @@ model Gate {
   visitors                Visitor[]
 
   @@index([societyId])
+  @@index([societyId, isActive])
 }
 
 enum ShiftType {
@@ -937,6 +1102,7 @@ model Amenity {
   bookings AmenityBooking[]
 
   @@index([societyId])
+  @@index([societyId, isActive])
 }
 
 enum BookingStatus {
@@ -967,6 +1133,8 @@ model AmenityBooking {
   @@index([societyId])
   @@index([amenityId])
   @@index([residentId])
+  @@index([amenityId, status, startTime])
+  @@index([residentId, status, startTime])
 }
 
 enum StaffType {
@@ -994,8 +1162,10 @@ model Staff {
 
   society     Society           @relation(fields: [societyId], references: [id], onDelete: Cascade)
   assignments StaffAssignment[]
+  attendance  StaffAttendance[]
 
   @@index([societyId])
+  @@index([societyId, isActive])
   @@index([phone])
 }
 
@@ -1017,6 +1187,27 @@ model StaffAssignment {
   @@index([staffId])
   @@index([villaId])
   @@index([isActive])
+}
+
+model StaffAttendance {
+  id          String   @id @default(cuid())
+  staffId     String
+  staff       Staff    @relation(fields: [staffId], references: [id], onDelete: Cascade)
+  societyId   String
+  society     Society  @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  date        DateTime @db.Date
+  checkIn     DateTime
+  checkOut    DateTime?
+  markedById  String
+  markedBy    User     @relation("StaffAttendanceMarker", fields: [markedById], references: [id], onDelete: Restrict)
+  notes       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([staffId, date])
+  @@index([societyId])
+  @@index([staffId, date])
+  @@index([date])
 }
 
 enum VehicleType {
@@ -1065,18 +1256,27 @@ model PreApprovedVisitor {
   isActive     Boolean     @default(true)   // Added for mobile API
   approvedById String?                      // Added for mobile API
   usedAt       DateTime?
+  /// Recurring pass: allows multiple uses within the validity window.
+  isRecurring  Boolean     @default(false)
+  /// Max uses for recurring pass. NULL = unlimited within validity period.
+  maxUses      Int?
+  /// Number of times this pass has been used (incremented on each check-in).
+  usedCount    Int         @default(0)
   createdAt    DateTime    @default(now())
   updatedAt    DateTime    @updatedAt
 
-  society      Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  villa        Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
-  approvedBy   User?   @relation("ApprovedVisitors", fields: [approvedById], references: [id], onDelete: SetNull)
+  society      Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  villa        Villa     @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  approvedBy   User?     @relation("ApprovedVisitors", fields: [approvedById], references: [id], onDelete: SetNull)
+  /// Visitor row created when this pre-approval was consumed (reverse of Visitor.preApprovedId).
+  admittedVisitor Visitor?
 
   @@index([societyId])
   @@index([villaId])
   @@index([otp])
   @@index([isActive])
   @@index([approvedById])
+  @@index([societyId, otp, isActive, isUsed])
 }
 
 enum PollStatus {
@@ -1102,6 +1302,7 @@ model Poll {
   votes       PollVote[]
 
   @@index([societyId])
+  @@index([societyId, status])
 }
 
 model PollOption {
@@ -1307,12 +1508,37 @@ model BankAccount {
   @@index([societyId])
 }
 
+// Unified Payment Methods (per-society configuration for all payment types)
+model PaymentMethod {
+  id                  String            @id @default(cuid())
+  societyId           String
+  society             Society           @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  type                PaymentMethodType
+  isEnabled           Boolean           @default(true)
+  displayName         String
+  sortOrder           Int               @default(0)
+  /// Type-specific configuration as JSON. Shape depends on `type`:
+  /// BANK_TRANSFER: { bankName, accountNumber, ifscCode, accountHolderName, accountType }
+  /// UPI_VPA: { vpa }
+  /// UPI_QR: { qrCodeUrl }
+  /// RAZORPAY: { keyId, keySecret, webhookSecret?, currency? }
+  /// PHONEPE: { merchantId, saltKey, saltIndex, environment }
+  config              Json              @default("{}")
+  /// If this row was migrated from a BankAccount row, stores the original id.
+  legacyBankAccountId String?           @unique
+  createdAt           DateTime          @default(now())
+  updatedAt           DateTime          @updatedAt
+
+  @@index([societyId, isEnabled])
+  @@index([societyId, type])
+}
+
 // SOS / Emergency Alerts
 model SOSAlert {
   id              String    @id @default(cuid())
   societyId       String
   villaId         String
-  triggeredBy     String
+  triggeredBy     String?
   emergencyType   SOSType
   message         String?
   location        String?
@@ -1334,7 +1560,7 @@ model SOSAlert {
 
   society       Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
   villa         Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
-  user          User    @relation(fields: [triggeredBy], references: [id], onDelete: Cascade)
+  user          User?   @relation(fields: [triggeredBy], references: [id], onDelete: SetNull)
   assignedGuard User?   @relation("SosAssignedGuard", fields: [assignedGuardId], references: [id], onDelete: SetNull)
 
   @@index([societyId])
@@ -1342,6 +1568,7 @@ model SOSAlert {
   @@index([status])
   @@index([createdAt])
   @@index([assignedGuardId])
+  @@index([societyId, status])
 }
 
 // Water Supply Tracking
@@ -1480,7 +1707,7 @@ model Expense {
   
   title           String
   description     String?
-  amount          Float
+  amount          Decimal  @db.Decimal(12, 2)
   paymentDate     DateTime
   paymentMode     PaymentMode
   paymentRef      String?
@@ -1493,11 +1720,11 @@ model Expense {
   year            Int?
   financialYearId String?
   financialYear   FinancialYear? @relation(fields: [financialYearId], references: [id])
-  gstAmount       Float?    @default(0)
+  gstAmount       Decimal?  @db.Decimal(12, 2) @default(0)
   gstPercentage   Float?    @default(0)
-  tdsAmount       Float?    @default(0)
+  tdsAmount       Decimal?  @db.Decimal(12, 2) @default(0)
   tdsPercentage   Float?    @default(0)
-  netAmount       Float
+  netAmount       Decimal   @db.Decimal(12, 2)
   status          ExpenseStatus @default(APPROVED)
   approvedBy      String?
   approvedAt      DateTime?
@@ -1507,10 +1734,11 @@ model Expense {
   
   attachments     ExpenseAttachment[]
   
+  deletedAt       DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   createdBy       String?
-  
+
   @@index([societyId])
   @@index([categoryId])
   @@index([paymentDate])
@@ -1541,10 +1769,10 @@ model MonthlyExpenseSummary {
   society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
   month           Int
   year            Int
-  totalExpenses   Float     @default(0)
-  totalGST        Float     @default(0)
-  totalTDS        Float     @default(0)
-  netAmount       Float     @default(0)
+  totalExpenses   Decimal   @db.Decimal(12, 2) @default(0)
+  totalGST        Decimal   @db.Decimal(12, 2) @default(0)
+  totalTDS        Decimal   @db.Decimal(12, 2) @default(0)
+  netAmount       Decimal   @db.Decimal(12, 2) @default(0)
   expenseCount    Int       @default(0)
   categoryBreakdown Json?
   lastCalculated  DateTime  @default(now())
@@ -1563,9 +1791,9 @@ model ExpenseBudget {
   category        ExpenseCategory? @relation(fields: [categoryId], references: [id])
   month           Int?
   year            Int
-  budgetAmount    Float
-  spentAmount     Float     @default(0)
-  remainingAmount Float     @default(0)
+  budgetAmount    Decimal   @db.Decimal(12, 2)
+  spentAmount     Decimal   @db.Decimal(12, 2) @default(0)
+  remainingAmount Decimal   @db.Decimal(12, 2) @default(0)
   alertThreshold  Float?    @default(80)
   alertSent       Boolean   @default(false)
   createdAt       DateTime  @default(now())
@@ -1581,7 +1809,7 @@ model AdditionalFund {
   societyId    String
   society      Society                   @relation(fields: [societyId], references: [id], onDelete: Cascade)
   title        String
-  amount       Float
+  amount       Decimal  @db.Decimal(12, 2)
   receivedDate DateTime
   month        Int?
   year         Int?
@@ -1635,8 +1863,8 @@ model BillingCycle {
 
 model UserCyclePayment {
   id                         String                     @id @default(cuid())
-  userId                     String
-  user                       User                       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userId                     String?
+  user                       User?                      @relation(fields: [userId], references: [id], onDelete: SetNull)
   cycleId                    String
   cycle                      BillingCycle               @relation(fields: [cycleId], references: [id], onDelete: Cascade)
   amountPaid                 Decimal                    @db.Decimal(12, 2)
@@ -1662,7 +1890,7 @@ model BillingLateFeeWaiver {
   cycleId   String
   cycle     BillingCycle @relation(fields: [cycleId], references: [id], onDelete: Cascade)
   userId    String
-  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user      User     @relation(fields: [userId], references: [id], onDelete: Restrict)
   createdAt DateTime @default(now())
   remark    String?
 
@@ -1701,6 +1929,8 @@ model AdminAuditLog {
   entityType String
   entityId   String?
   metadata   Json?
+  ipAddress  String?
+  userAgent  String?
   createdAt  DateTime  @default(now())
 
   @@index([societyId, createdAt])
@@ -1791,6 +2021,19 @@ model RefreshToken {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   revoked   Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  @@index([userId])
+  @@index([userId, revoked])
+}
+
+model PasswordResetToken {
+  id        String   @id @default(cuid())
+  token     String   @unique
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  expiresAt DateTime
+  usedAt    DateTime?
   createdAt DateTime @default(now())
 
   @@index([userId])

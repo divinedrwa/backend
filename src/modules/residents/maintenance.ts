@@ -10,7 +10,7 @@ const router = Router();
 
 router.use(requireAuth);
 
-function parseMonthYear(query: any) {
+function parseMonthYear(query: Record<string, unknown>) {
   const now = new Date();
   const rawM = query?.month;
   const rawY = query?.year;
@@ -236,6 +236,7 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
             where: {
               societyId,
               status: "APPROVED",
+              deletedAt: null,
               OR: periodFilters,
             },
             include: {
@@ -372,6 +373,7 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
             where: {
               societyId,
               status: "APPROVED",
+              deletedAt: null,
               OR: periodFilters,
             },
             include: {
@@ -748,7 +750,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     const useCycleResidents = cycleCore != null && !("error" in cycleCore);
     const residents = useCycleResidents
       ? cycleCore.residents
-          .filter((r) => !(r as any).isExcluded)
+          .filter((r) => !r.isExcluded)
           .map((resident) => ({
           residentId: resident.villaId,
           name: resident.ownerName ?? "Unknown",

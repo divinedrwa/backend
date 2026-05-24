@@ -4,7 +4,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole, NotificationCategory } from "@prisma/client";
+import { UserRole, NotificationCategory, VisitorStatus } from "@prisma/client";
 import { resolveGuardLogRange } from "./guardLogRange";
 import { runVisitorApproveEntry, runVisitorAdmitPreApprovedById } from "./visitorApproveEntryFlow";
 import {
@@ -239,7 +239,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         vehicleNumber,
         photo,
         checkInTime: new Date(),
-        status: awaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN",
+        status: awaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN" as VisitorStatus,
         createdBy: userId,
       },
     });
@@ -365,7 +365,7 @@ router.get(["/visitors-today", "/my-visitors"], requireRole(UserRole.GUARD), asy
       where: {
         societyId,
         checkInTime: { gte: range.start, lte: range.endInclusive },
-        ...(status && { status: status as any }),
+        ...(status && { status: status as VisitorStatus }),
       },
       include: {
         villaVisits: {
@@ -450,7 +450,7 @@ router.post(
 
       const updated = await prisma.visitor.update({
         where: { id: visitorId },
-        data: { status: "CHECKED_IN" },
+        data: { status: "CHECKED_IN" as VisitorStatus },
         include: {
           villaVisits: {
             include: {
@@ -480,7 +480,7 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
       where: {
         societyId,
         checkOutTime: null,
-        status: { in: [VISITOR_PENDING_APPROVAL, VISITOR_APPROVED_FOR_ENTRY, "CHECKED_IN"] },
+        status: { in: [VISITOR_PENDING_APPROVAL, VISITOR_APPROVED_FOR_ENTRY, VisitorStatus.CHECKED_IN] },
       },
       include: {
         villaVisits: {

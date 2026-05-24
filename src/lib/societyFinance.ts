@@ -194,7 +194,7 @@ export async function computeSocietyMoneySnapshot(
   //    The latest paidAt wins for monthly attribution.
   const ucpByKey = new Map<string, { max: number; latest: Date | null }>();
   for (const ucp of userCyclePayments) {
-    const villaId = ucp.user.villaId;
+    const villaId = ucp.user?.villaId;
     if (!villaId) continue;
     const mcId = mcByFyKey.get(`${ucp.cycle.financialYearId}:${ucp.cycle.cycleKey}`);
     if (!mcId) continue;

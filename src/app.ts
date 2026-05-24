@@ -11,6 +11,7 @@ import { errorHandler } from "./middlewares/error";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
+import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
 
 export const app = express();
 
@@ -94,6 +95,15 @@ app.post(
 // through dedicated multipart endpoints with their own limits.
 app.use(express.json({ limit: "1mb" }));
 
+// PhonePe callback: mounted after express.json() since PhonePe sends JSON
+app.post("/api/v1/payments/phonepe/callback", async (req, res, next) => {
+  try {
+    await phonePeCallbackHandler(req, res);
+  } catch (e) {
+    next(e);
+  }
+});
+
 /** Profile avatars saved under `uploads/avatars` — URL path `/uploads/...` (same origin as API port). */
 app.use("/uploads", (_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
@@ -125,6 +135,19 @@ app.use((req, _res, next) => {
   if (needsApiPrefix) {
     req.url = `/api${req.url}`;
   }
+  next();
+});
+
+// Log slow requests (>500ms) at warn level for performance monitoring
+const SLOW_REQUEST_MS = 500;
+app.use((req, res, next) => {
+  const start = process.hrtime.bigint();
+  res.on("finish", () => {
+    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
+    if (durationMs > SLOW_REQUEST_MS) {
+      logger.warn({ method: req.method, path: req.originalUrl, durationMs: Math.round(durationMs), status: res.statusCode }, "slow request");
+    }
+  });
   next();
 });
 

@@ -26,9 +26,18 @@ import {
   invalidateDisplayCycleHint,
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
-import { createMaintenanceOrder, getPublishableKey, isRazorpayConfigured } from "./services/razorpay-billing";
+import {
+  createMaintenanceOrderForSociety,
+  getPublishableKeyForSociety,
+  isRazorpayConfiguredForSociety,
+} from "./services/razorpay-billing";
 import { writeAdminAuditLog } from "./services/audit-log";
 import { notifySociety } from "../../services/notification.service";
+import {
+  initiatePhonePePayment,
+  checkPhonePeStatus,
+  isPhonePeConfiguredForSociety,
+} from "../../services/phonepe-billing";
 
 const router = Router();
 
@@ -728,7 +737,7 @@ router.post(
           orderId: null,
           amountPaise: 0,
           currency: "INR",
-          key: getPublishableKey(),
+          key: await getPublishableKeyForSociety(auth.societyId),
           paymentId: paymentRow.id,
           totalDue: 0,
           unadjustedDue: due.totalDue,
@@ -749,7 +758,7 @@ router.post(
         return;
       }
 
-      if (!isRazorpayConfigured()) {
+      if (!(await isRazorpayConfiguredForSociety(auth.societyId))) {
         res.status(503).json({
           message: "Online payments are not configured",
           code: "PAYMENT_GATEWAY_UNAVAILABLE",
@@ -758,7 +767,8 @@ router.post(
       }
 
       const receipt = `mb_${cycle.cycleKey}_${auth.userId}`.slice(0, 40);
-      const order = await createMaintenanceOrder({
+      const order = await createMaintenanceOrderForSociety({
+        societyId: auth.societyId,
         amountPaise: Math.round(adjustedDue * 100),
         receipt,
         notes: {
@@ -800,7 +810,7 @@ router.post(
         orderId: order.id,
         amountPaise: order.amount,
         currency: order.currency,
-        key: getPublishableKey(),
+        key: await getPublishableKeyForSociety(auth.societyId),
         paymentId: paymentRow.id,
         totalDue: adjustedDue,
         unadjustedDue: due.totalDue,
@@ -1311,13 +1321,188 @@ router.get(
       doc.text(`Paid at (UTC): ${payment.paidAt?.toISOString() ?? "-"}`);
       doc.text(`Cycle: ${payment.cycle.title} (${payment.cycle.cycleKey})`);
       doc.text(`Amount: ${Number(payment.amountPaid).toFixed(2)}`);
-      doc.text(`Resident: ${payment.user.name}`);
-      doc.text(`Unit: ${payment.user.villa?.villaNumber ?? "-"}`);
+      doc.text(`Resident: ${payment.user?.name ?? "Unknown"}`);
+      doc.text(`Unit: ${payment.user?.villa?.villaNumber ?? "-"}`);
       doc.end();
     } catch (e) {
       next(e);
     }
   }
 );
+
+// ── PhonePe Payment Endpoints ──────────────────────────────────────
+
+const phonePeInitiateSchema = z.object({
+  cycleId: z.string().min(1),
+  idempotencyKey: z.string().min(8).max(120).optional(),
+});
+
+router.post(
+  "/payments/phonepe/initiate",
+  requireAuth,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  validateBody(phonePeInitiateSchema),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { cycleId, idempotencyKey } = req.body as z.infer<typeof phonePeInitiateSchema>;
+
+      const cycle = await prisma.billingCycle.findFirst({
+        where: { id: cycleId, societyId: auth.societyId },
+      });
+      if (!cycle) {
+        res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+
+      const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
+      if (serverStatus !== BillingCycleStatus.OPEN) {
+        res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
+        return;
+      }
+
+      // Compute amount due (mirrors create-order logic)
+      const waiver = await prisma.billingLateFeeWaiver.findUnique({
+        where: { cycleId_userId: { cycleId, userId: auth.userId } },
+      });
+      const due = computeAmountDueForCycle(cycle, new Date(), Boolean(waiver));
+      const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
+      const currentLedger = ledger.cycles.find((row) => row.cycleId === cycleId);
+      const balanceBefore = currentLedger?.balanceBefore ?? 0;
+      const cycleOutstanding = currentLedger
+        ? Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount)
+        : Math.max(0, Number(cycle.amount) - balanceBefore);
+      const lateComponent = Math.max(0, due.totalDue - Number(cycle.amount));
+      const adjustedDue = Math.max(0, cycleOutstanding + lateComponent);
+
+      if (adjustedDue <= 0) {
+        res.status(400).json({ message: "No amount due for this cycle", code: "NOTHING_DUE" });
+        return;
+      }
+
+      const existing = await prisma.userCyclePayment.findUnique({
+        where: { userId_cycleId: { userId: auth.userId, cycleId } },
+      });
+      if (existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+        res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
+
+      if (!(await isPhonePeConfiguredForSociety(auth.societyId))) {
+        res.status(503).json({
+          message: "PhonePe payments are not configured",
+          code: "PAYMENT_GATEWAY_UNAVAILABLE",
+        });
+        return;
+      }
+
+      const apiBaseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
+      const merchantTransactionId = `pp_${cycle.cycleKey}_${auth.userId}_${Date.now()}`.slice(0, 36);
+      const callbackUrl = `${apiBaseUrl}/api/v1/payments/phonepe/callback`;
+      const redirectUrl = `${apiBaseUrl}/api/v1/payments/phonepe/redirect?txnId=${merchantTransactionId}`;
+
+      const result = await initiatePhonePePayment(auth.societyId, {
+        amount: Math.round(adjustedDue * 100), // paise
+        merchantTransactionId,
+        merchantUserId: auth.userId,
+        callbackUrl,
+        redirectUrl,
+      });
+
+      if (!result) {
+        res.status(502).json({ message: "PhonePe payment initiation failed", code: "GATEWAY_ERROR" });
+        return;
+      }
+
+      const paymentRow = await prisma.userCyclePayment.upsert({
+        where: { userId_cycleId: { userId: auth.userId, cycleId } },
+        create: {
+          userId: auth.userId,
+          cycleId,
+          amountPaid: adjustedDue,
+          paymentStatus: BillingUserPaymentStatus.PENDING,
+          paymentGatewayOrderId: merchantTransactionId,
+          idempotencyKey: idempotencyKey ?? null,
+        },
+        update: {
+          amountPaid: adjustedDue,
+          paymentStatus: BillingUserPaymentStatus.PENDING,
+          paymentGatewayOrderId: merchantTransactionId,
+          idempotencyKey: idempotencyKey ?? undefined,
+        },
+      });
+
+      await prisma.billingPaymentLog.create({
+        data: {
+          societyId: auth.societyId,
+          userId: auth.userId,
+          cycleId,
+          status: "phonepe_initiate",
+          requestPayload: { merchantTransactionId } as object,
+        },
+      });
+
+      res.status(201).json({
+        redirectUrl: result.redirectUrl,
+        merchantTransactionId: result.merchantTransactionId,
+        paymentId: paymentRow.id,
+        totalDue: adjustedDue,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+router.get(
+  "/payments/phonepe/status/:txnId",
+  requireAuth,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { txnId } = req.params;
+
+      // Check local payment status
+      const localRow = await prisma.userCyclePayment.findFirst({
+        where: { paymentGatewayOrderId: txnId, cycle: { societyId: auth.societyId } },
+        select: { id: true, paymentStatus: true },
+      });
+
+      // Also poll PhonePe for the latest status
+      const phonepeResult = await checkPhonePeStatus(auth.societyId, txnId);
+
+      res.json({
+        status: localRow?.paymentStatus ?? "UNKNOWN",
+        phonepeState: phonepeResult?.state ?? "UNKNOWN",
+        paymentId: localRow?.id ?? null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+router.get("/payments/phonepe/redirect", (req, res) => {
+  const txnId = req.query.txnId ?? "";
+  res.setHeader("Content-Type", "text/html");
+  res.send(`<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Payment Processing</title>
+<style>body{font-family:system-ui,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0;background:#f5f5f5;text-align:center}
+.card{background:#fff;border-radius:12px;padding:32px;box-shadow:0 2px 8px rgba(0,0,0,.1);max-width:400px}
+.spinner{width:40px;height:40px;border:4px solid #e0e0e0;border-top-color:#6200ee;border-radius:50%;animation:spin 1s linear infinite;margin:0 auto 16px}
+@keyframes spin{to{transform:rotate(360deg)}}</style>
+</head>
+<body>
+<div class="card">
+<div class="spinner"></div>
+<h2>Payment Processing</h2>
+<p>Your payment is being verified. You may close this window and return to the app.</p>
+<p style="color:#888;font-size:13px">Transaction: ${String(txnId).slice(0, 36)}</p>
+</div>
+</body></html>`);
+});
 
 export default router;

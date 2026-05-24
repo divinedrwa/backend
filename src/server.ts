@@ -7,6 +7,8 @@ import { prisma } from "./lib/prisma";
 import { runBillingReminderJobs, syncAllBillingCycleStatuses } from "./modules/billing-cycle/services/cycle-service";
 import { reconcileAllSocieties } from "./lib/reconciliation";
 import { NotificationService } from "./services/notification.service";
+import { applyLateFees } from "./services/lateFee.service";
+import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {
@@ -69,6 +71,26 @@ cron.schedule(
             failed: reconResult.failed,
             alertsCreated: reconResult.totalAlerts,
           }, "[billing-cron] Reconciliation complete");
+
+          // Apply late fees to overdue maintenance snapshots
+          await applyLateFees();
+
+          // Check complaint SLA breaches and notify admins
+          await checkComplaintSlaBreaches();
+          await autoCloseResolvedComplaints();
+
+          // Deactivate expired pre-approved visitors
+          const { count: deactivatedPreApprovals } = await prisma.preApprovedVisitor.updateMany({
+            where: {
+              isActive: true,
+              isUsed: false,
+              validUntil: { lt: new Date() },
+            },
+            data: { isActive: false },
+          });
+          if (deactivatedPreApprovals > 0) {
+            logger.info({ deactivatedPreApprovals }, "[billing-cron] Deactivated expired pre-approvals");
+          }
 
           // Clean up stale inactive push devices (>90 days)
           await NotificationService.cleanupInactiveDevices();

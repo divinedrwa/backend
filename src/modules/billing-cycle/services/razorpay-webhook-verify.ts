@@ -4,6 +4,23 @@ import crypto from "crypto";
 export function verifyRazorpayWebhookSignature(rawBody: Buffer, headerSignature: string | undefined): boolean {
   const secret = process.env.RAZORPAY_WEBHOOK_SECRET;
   if (!secret || !headerSignature || rawBody.length === 0) return false;
+  return verifyWithSecret(rawBody, headerSignature, secret);
+}
+
+/**
+ * Verify a Razorpay webhook signature using a provided secret
+ * (for per-society webhook verification).
+ */
+export function verifyRazorpayWebhookSignatureWithSecret(
+  rawBody: Buffer,
+  headerSignature: string | undefined,
+  secret: string,
+): boolean {
+  if (!headerSignature || rawBody.length === 0) return false;
+  return verifyWithSecret(rawBody, headerSignature, secret);
+}
+
+function verifyWithSecret(rawBody: Buffer, headerSignature: string, secret: string): boolean {
   const digest = crypto.createHmac("sha256", secret).update(rawBody).digest("hex");
   try {
     if (digest.length !== headerSignature.length) return false;

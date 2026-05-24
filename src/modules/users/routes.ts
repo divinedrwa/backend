@@ -13,6 +13,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { resolveResidentDwelling } from "../../lib/residentUnitResolve";
 import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
+import { auditFromRequest } from "../../services/audit.service";
 import { passwordSchema } from "../../lib/passwordSchema";
 
 const router = Router();
@@ -28,7 +29,7 @@ const createUserSchema = z
     email: z.string().email(),
     password: passwordSchema,
     phone: z.string().optional(),
-    role: z.nativeEnum(UserRole),
+    role: z.enum(["ADMIN", "RESIDENT", "GUARD"]),
     residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
     villaId: z.string().optional(),
     /** When set without villaId, matches CSV import: create shell villa in this society if needed */
@@ -79,7 +80,7 @@ const updateUserSchema = z.object({
     .preprocess((v) => (v === "" ? null : v), z.string().nullable().optional()),
   /** Admin password reset — omit or empty to leave unchanged */
   password: passwordSchema.optional().or(z.literal("")),
-  role: z.nativeEnum(UserRole).optional(),
+  role: z.enum(["ADMIN", "RESIDENT", "GUARD"]).optional(),
   villaId: z.string().optional().nullable(),
   unitId: z.string().optional().nullable(),
   residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
@@ -583,10 +584,30 @@ router.patch(
 router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
     const { id } = req.params;
-    
+
+    if (id === req.auth!.userId) {
+      return res.status(403).json({ message: "You cannot delete your own account" });
+    }
+
+    const deleted = await prisma.user.findFirst({
+      where: { id, societyId: req.auth!.societyId },
+      select: { id: true, name: true, username: true, role: true },
+    });
+
     await prisma.user.deleteMany({
       where: { id, societyId: req.auth!.societyId },
     });
+
+    if (deleted) {
+      auditFromRequest(req, {
+        adminId: req.auth!.userId,
+        societyId: req.auth!.societyId,
+        action: "DELETE_USER",
+        entityType: "User",
+        entityId: id,
+        metadata: { name: deleted.name, username: deleted.username, role: deleted.role },
+      });
+    }
 
     return res.json({ message: "User deleted" });
   } catch (error) {

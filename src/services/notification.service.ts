@@ -152,25 +152,100 @@ export class NotificationService {
   }
 
   /**
-   * Send notification to multiple users (concurrent batches of 10).
+   * Send notification to multiple users with bulk-fetched preferences and devices.
+   * Avoids N+1 per-user DB queries for large recipient lists.
    */
   static async sendToUsers(
     userIds: string[],
     payload: NotificationPayload,
     options?: SendToUserOptions,
   ): Promise<void> {
-    logger.info({ userCount: userIds.length }, "Sending notification to users");
+    if (userIds.length === 0) return;
+    logger.info({ userCount: userIds.length }, "Sending notification to users (bulk)");
 
-    const CONCURRENCY = 10;
-    for (let i = 0; i < userIds.length; i += CONCURRENCY) {
-      const batch = userIds.slice(i, i + CONCURRENCY);
-      await Promise.allSettled(
-        batch.map((userId) =>
-          this.sendToUser(userId, payload, options).catch((error) => {
-            logger.error({ err: error, userId }, "Error sending notification to user in batch");
+    // For small batches, fall back to per-user path (less overhead)
+    if (userIds.length <= 5) {
+      const CONCURRENCY = 5;
+      for (let i = 0; i < userIds.length; i += CONCURRENCY) {
+        const batch = userIds.slice(i, i + CONCURRENCY);
+        await Promise.allSettled(
+          batch.map((userId) =>
+            this.sendToUser(userId, payload, options).catch((error) => {
+              logger.error({ err: error, userId }, "Error sending notification to user in batch");
+            }),
+          ),
+        );
+      }
+      return;
+    }
+
+    // Bulk path: fetch all user prefs + devices in two queries
+    const CHUNK = 200;
+    for (let i = 0; i < userIds.length; i += CHUNK) {
+      const chunk = userIds.slice(i, i + CHUNK);
+      try {
+        const [users, devices] = await Promise.all([
+          prisma.user.findMany({
+            where: { id: { in: chunk } },
+            select: { id: true, societyId: true, notifyPush: true },
           }),
-        ),
-      );
+          prisma.pushDevice.findMany({
+            where: { userId: { in: chunk }, isActive: true },
+            select: { userId: true, token: true },
+          }),
+        ]);
+
+        // Group devices by userId
+        const devicesByUser = new Map<string, string[]>();
+        for (const d of devices) {
+          const arr = devicesByUser.get(d.userId) ?? [];
+          arr.push(d.token);
+          devicesByUser.set(d.userId, arr);
+        }
+
+        // Collect all tokens for push-enabled users
+        const allTokens: string[] = [];
+        const pushSentUserIds = new Set<string>();
+        for (const user of users) {
+          if (user.notifyPush) {
+            const tokens = devicesByUser.get(user.id);
+            if (tokens && tokens.length > 0) {
+              allTokens.push(...tokens);
+              pushSentUserIds.add(user.id);
+            }
+          }
+        }
+
+        // Send push in one batch
+        if (allTokens.length > 0) {
+          try {
+            await this.sendToTokens(allTokens, payload);
+          } catch (fcmErr) {
+            logger.warn({ err: fcmErr, tokenCount: allTokens.length }, "Bulk FCM send failed");
+          }
+        }
+
+        // Persist in-app notifications
+        if (options?.persistInApp !== false) {
+          const inAppRows = users
+            .filter((u) => u.societyId)
+            .map((u) => ({
+              userId: u.id,
+              societyId: u.societyId!,
+              category: options?.category ?? NotificationCategory.SYSTEM,
+              title: payload.title,
+              body: payload.body,
+              data: payload.data || {},
+              pushSent: pushSentUserIds.has(u.id),
+            }));
+
+          if (inAppRows.length > 0) {
+            await prisma.userNotification.createMany({ data: inAppRows });
+          }
+        }
+      } catch (error) {
+        logger.error({ err: error, chunkStart: i, chunkSize: chunk.length }, "Bulk notification chunk failed");
+      }
     }
   }
 

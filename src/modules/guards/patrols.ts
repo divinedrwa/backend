@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole, PatrolStatus, IncidentSeverity } from "@prisma/client";
+import { UserRole, PatrolStatus, IncidentSeverity, VisitorStatus } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 
 const router = Router();
@@ -138,7 +138,7 @@ router.get("/my-patrols", requireRole(UserRole.GUARD), async (req, res, next) =>
     });
 
     // Group by date
-    const byDate = patrols.reduce((acc: any, p) => {
+    const byDate = patrols.reduce<Record<string, typeof patrols>>((acc, p) => {
       const date = new Date(p.scheduledTime).toDateString();
       if (!acc[date]) acc[date] = [];
       acc[date].push(p);
@@ -224,7 +224,7 @@ router.get("/checklist", requireRole(UserRole.GUARD), async (req, res, next) => 
     tomorrow.setDate(tomorrow.getDate() + 1);
 
     // Get today's completed tasks
-    const [visitorsCheckedIn, parcelsLogged, patrolsCompleted, incidentsReported] = await Promise.all([
+    const [visitorsCheckedIn, parcelsLogged, patrolsCompleted, _incidentsReported] = await Promise.all([
       prisma.visitor.count({
         where: {
           societyId,
@@ -257,7 +257,7 @@ router.get("/checklist", requireRole(UserRole.GUARD), async (req, res, next) => 
     const pendingCheckouts = await prisma.visitor.count({
       where: {
         societyId,
-        status: "CHECKED_IN",
+        status: "CHECKED_IN" as VisitorStatus,
         checkOutTime: null,
       },
     });

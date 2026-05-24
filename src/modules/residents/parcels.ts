@@ -27,7 +27,7 @@ router.get("/my-parcels", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
       where: {
         villaId: user.villaId,
         societyId,
-        ...(status && { status: status as any }),
+        ...(status && { status: status as ParcelStatus }),
       },
       orderBy: { receivedAt: "desc" },
       take: 50,

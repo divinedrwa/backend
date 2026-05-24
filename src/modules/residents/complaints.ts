@@ -4,7 +4,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole } from "@prisma/client";
+import { ComplaintPriority, ComplaintStatus, UserRole } from "@prisma/client";
 
 const router = Router();
 
@@ -15,7 +15,7 @@ const createComplaintSchema = z.object({
   title: z.string().min(5),
   description: z.string().min(10),
   category: z.string().optional(),
-  priority: z.enum(["LOW", "MEDIUM", "HIGH"]).optional(),
+  priority: z.nativeEnum(ComplaintPriority).optional(),
 });
 
 const updateComplaintSchema = z.object({
@@ -33,7 +33,7 @@ router.get("/my-complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asy
     const where = {
       residentId: userId,
       societyId,
-      ...(status && { status: status as any }),
+      ...(status && { status: status as ComplaintStatus }),
     };
     const [complaints, total] = await Promise.all([
       prisma.complaint.findMany({
@@ -98,7 +98,7 @@ router.get("/complaints/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
 router.post("/complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(createComplaintSchema), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
-    const { title, description, category, priority } = req.body;
+    const { title, description, category, priority } = req.body as z.infer<typeof createComplaintSchema>;
 
     // Get user's villa
     const user = await prisma.user.findFirst({
@@ -110,6 +110,14 @@ router.post("/complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), valid
       return res.status(400).json({ message: "Villa not assigned" });
     }
 
+    const prio = priority ?? ComplaintPriority.MEDIUM;
+    const now = new Date();
+    const SLA_HOURS: Record<ComplaintPriority, number> = {
+      LOW: 168,
+      MEDIUM: 72,
+      HIGH: 24,
+      URGENT: 6,
+    };
     const complaint = await prisma.complaint.create({
       data: {
         societyId,
@@ -118,7 +126,8 @@ router.post("/complaints", requireRole(UserRole.RESIDENT, UserRole.ADMIN), valid
         title,
         description,
         category: category || "General",
-        // priority field does not exist in schema, removed
+        priority: prio,
+        slaDeadline: new Date(now.getTime() + SLA_HOURS[prio] * 3600_000),
         status: "OPEN",
       },
     });

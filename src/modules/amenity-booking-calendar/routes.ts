@@ -59,14 +59,15 @@ router.get("/overview", async (req, res, next) => {
     const residentMap = new Map(residents.map((r) => [r.id, r]));
 
     // Group by amenity
-    const byAmenity: { [amenityId: string]: any[] } = {};
+    type BookingWithAmenity = (typeof bookings)[number];
+    const byAmenity: Record<string, BookingWithAmenity[]> = {};
     bookings.forEach((b) => {
       if (!byAmenity[b.amenityId]) byAmenity[b.amenityId] = [];
       byAmenity[b.amenityId].push(b);
     });
 
     // Group by date
-    const byDate: { [date: string]: any[] } = {};
+    const byDate: Record<string, BookingWithAmenity[]> = {};
     bookings.forEach((b) => {
       const dateKey = new Date(b.startTime).toISOString().split("T")[0];
       if (!byDate[dateKey]) byDate[dateKey] = [];
@@ -221,7 +222,17 @@ router.get("/daily/:date", async (req, res, next) => {
     const residentMap = new Map(residents.map((r) => [r.id, r]));
 
     // Group by hour
-    const hourlyBookings: { [hour: number]: any[] } = {};
+    interface HourlyBookingEntry {
+      id: string;
+      amenityName: string;
+      amenityType: string;
+      residentName: string;
+      villa: { villaNumber: string; block: string | null; ownerName: string | null } | null;
+      startTime: Date;
+      endTime: Date;
+      status: string;
+    }
+    const hourlyBookings: Record<number, HourlyBookingEntry[]> = {};
     for (let i = 0; i < 24; i++) {
       hourlyBookings[i] = [];
     }

@@ -1,6 +1,7 @@
 import { DocumentCategory, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -25,11 +26,18 @@ router.use(requireAuth);
 // List documents
 router.get("/", async (req, res, next) => {
   try {
-    const documents = await prisma.document.findMany({
-      where: { societyId: req.auth!.societyId },
-      orderBy: { createdAt: "desc" }
-    });
-    return res.json({ documents });
+    const pagination = getPagination(req);
+    const where = { societyId: req.auth!.societyId };
+    const [documents, total] = await Promise.all([
+      prisma.document.findMany({
+        where,
+        orderBy: { createdAt: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.document.count({ where }),
+    ]);
+    return res.json({ documents, ...paginationMeta(total, documents.length, pagination) });
   } catch (error) {
     next(error);
   }

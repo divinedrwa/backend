@@ -539,6 +539,7 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
     });
     const paidByUser = new Map<string, Set<string>>();
     for (const p of payments) {
+      if (!p.userId) continue;
       if (!paidByUser.has(p.userId)) {
         paidByUser.set(p.userId, new Set());
       }

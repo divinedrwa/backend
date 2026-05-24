@@ -1,6 +1,7 @@
 import { AmenityType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -35,14 +36,21 @@ router.use(requireAuth);
 router.get("/", async (req, res, next) => {
   try {
     const isAdmin = req.auth!.role === UserRole.ADMIN;
-    const amenities = await prisma.amenity.findMany({
-      where: {
-        societyId: req.auth!.societyId,
-        ...(!isAdmin && { isActive: true })
-      },
-      orderBy: { name: "asc" }
-    });
-    return res.json({ amenities });
+    const pagination = getPagination(req);
+    const where = {
+      societyId: req.auth!.societyId,
+      ...(!isAdmin && { isActive: true })
+    };
+    const [amenities, total] = await Promise.all([
+      prisma.amenity.findMany({
+        where,
+        orderBy: { name: "asc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.amenity.count({ where }),
+    ]);
+    return res.json({ amenities, ...paginationMeta(total, amenities.length, pagination) });
   } catch (error) {
     next(error);
   }

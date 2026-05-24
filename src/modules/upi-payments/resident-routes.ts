@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { NotificationCategory, UpiPaymentStatus, UserRole } from "@prisma/client";
+import { NotificationCategory, PaymentMethodType, UpiPaymentStatus, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -12,6 +12,7 @@ router.use(requireAuth);
 
 // ---------------------------------------------------------------------------
 // GET /api/residents/upi-config — returns society UPI VPA + payee name
+// Reads from PaymentMethod first, falls back to Society fields.
 // ---------------------------------------------------------------------------
 router.get(
   "/upi-config",
@@ -26,9 +27,36 @@ router.get(
       if (!society) {
         return res.status(404).json({ message: "Society not found" });
       }
+
+      // Try PaymentMethod table first
+      const methods = await prisma.paymentMethod.findMany({
+        where: {
+          societyId,
+          type: { in: [PaymentMethodType.UPI_VPA, PaymentMethodType.UPI_QR] },
+          isEnabled: true,
+        },
+      });
+
+      let upiVpa: string | null = null;
+      let upiQrCodeUrl: string | null = null;
+
+      for (const m of methods) {
+        const config = m.config as Record<string, unknown>;
+        if (m.type === PaymentMethodType.UPI_VPA && typeof config.vpa === "string") {
+          upiVpa = config.vpa;
+        }
+        if (m.type === PaymentMethodType.UPI_QR && typeof config.qrCodeUrl === "string") {
+          upiQrCodeUrl = config.qrCodeUrl;
+        }
+      }
+
+      // Fallback to Society fields if no PaymentMethod rows
+      if (!upiVpa) upiVpa = society.upiVpa;
+      if (!upiQrCodeUrl) upiQrCodeUrl = society.upiQrCodeUrl;
+
       return res.json({
-        upiVpa: society.upiVpa,
-        upiQrCodeUrl: society.upiQrCodeUrl,
+        upiVpa,
+        upiQrCodeUrl,
         payeeName: society.name,
       });
     } catch (error) {

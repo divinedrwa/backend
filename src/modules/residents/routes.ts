@@ -3,6 +3,7 @@ import bcrypt from "bcryptjs";
 import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { z } from "zod";
+import { passwordSchema } from "../../lib/passwordSchema";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
@@ -18,6 +19,14 @@ const updateProfileSchema = z.object({
   email: z.string().email().optional(),
   notifyEmail: z.boolean().optional(),
   notifyPush: z.boolean().optional(),
+});
+
+const updateFamilyMemberSchema = z.object({
+  name: z.string().min(1).max(100).optional(),
+  relationship: z.string().min(1).max(50).optional(),
+  age: z.number().int().min(0).max(120).optional(),
+  phone: z.string().max(20).optional(),
+  idProof: z.string().max(200).optional(),
 });
 
 const router = Router();
@@ -644,11 +653,11 @@ router.post("/add-family-member", requireRole(UserRole.RESIDENT, UserRole.ADMIN)
 });
 
 // PATCH /api/residents/family/:id - Update family member
-router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
+router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(updateFamilyMemberSchema), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
     const { id } = req.params;
-    const { name, relationship, age, phone, idProof } = req.body;
+    const body = req.body as z.infer<typeof updateFamilyMemberSchema>;
 
     // Verify ownership
     const existing = await prisma.familyMember.findFirst({
@@ -662,11 +671,11 @@ router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asyn
     const updated = await prisma.familyMember.update({
       where: { id },
       data: {
-        ...(name && { name }),
-        ...(relationship && { relation: relationship, relationship }),
-        ...(age && { age }),
-        ...(phone && { phone }),
-        ...(idProof && { idProof }),
+        ...(body.name !== undefined && { name: body.name }),
+        ...(body.relationship !== undefined && { relation: body.relationship, relationship: body.relationship }),
+        ...(body.age !== undefined && { age: body.age }),
+        ...(body.phone !== undefined && { phone: body.phone }),
+        ...(body.idProof !== undefined && { idProof: body.idProof }),
       },
     });
 
@@ -878,7 +887,7 @@ router.get("/sos/active", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
 // GET /api/residents/my-sos - Get my SOS alerts
 router.get("/my-sos", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
-    const { userId, societyId, villaId } = req.auth!;
+    const { userId, societyId } = req.auth!;
 
     const raw = await prisma.sOSAlert.findMany({
       where: {
@@ -1032,24 +1041,15 @@ router.get("/my-polls", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (r
 // ========================================
 
 // PATCH /api/residents/change-password — requires current password + new password.
-router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
+const changePasswordSchema = z.object({
+  currentPassword: z.string().min(1, "Current password is required"),
+  newPassword: passwordSchema,
+});
+
+router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(changePasswordSchema), async (req, res, next) => {
   try {
     const { userId } = req.auth!;
-    const { currentPassword, newPassword } = req.body as {
-      currentPassword?: string;
-      newPassword?: unknown;
-    };
-
-    if (typeof currentPassword !== "string" || currentPassword.trim().length === 0) {
-      return res.status(400).json({ message: "Current password is required" });
-    }
-
-    if (typeof newPassword !== "string" || newPassword.length < 8) {
-      return res.status(400).json({ message: "New password must be at least 8 characters" });
-    }
-    if (!/[a-z]/.test(newPassword) || !/[A-Z]/.test(newPassword) || !/[0-9]/.test(newPassword)) {
-      return res.status(400).json({ message: "Password must contain at least one uppercase letter, one lowercase letter, and one number" });
-    }
+    const { currentPassword, newPassword } = req.body as z.infer<typeof changePasswordSchema>;
 
     const user = await prisma.user.findUnique({
       where: { id: userId },
@@ -1060,7 +1060,7 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
       return res.status(404).json({ message: "User not found" });
     }
 
-    const isValid = await bcrypt.compare(currentPassword.trim(), user.passwordHash);
+    const isValid = await bcrypt.compare(currentPassword, user.passwordHash);
     if (!isValid) {
       return res.status(400).json({ message: "Current password is incorrect" });
     }

@@ -1,30 +1,8 @@
 import { v2 as cloudinary } from "cloudinary";
+import { ensureCloudinaryConfigured, isCloudinaryConfigured } from "./cloudinaryConfig";
 
-let configured = false;
-
-function ensureConfigured(): void {
-  if (configured) return;
-  const cloudName = process.env.CLOUDINARY_CLOUD_NAME;
-  const apiKey = process.env.CLOUDINARY_API_KEY;
-  const apiSecret = process.env.CLOUDINARY_API_SECRET;
-  if (cloudName && apiKey && apiSecret) {
-    cloudinary.config({
-      cloud_name: cloudName,
-      api_key: apiKey,
-      api_secret: apiSecret,
-    });
-    configured = true;
-  }
-}
-
-export function isCloudinaryConfigured(): boolean {
-  ensureConfigured();
-  return !!(
-    process.env.CLOUDINARY_CLOUD_NAME &&
-    process.env.CLOUDINARY_API_KEY &&
-    process.env.CLOUDINARY_API_SECRET
-  );
-}
+// Re-export for any callers that import from here
+export { isCloudinaryConfigured };
 
 /**
  * Upload an expense attachment to Cloudinary.
@@ -43,7 +21,7 @@ export async function uploadExpenseAttachmentBuffer(
   publicIdSuffix: string,
   mimetype?: string
 ): Promise<{ secureUrl: string; bytes: number; format: string }> {
-  ensureConfigured();
+  ensureCloudinaryConfigured();
   if (!isCloudinaryConfigured()) {
     throw new Error("CLOUDINARY_NOT_CONFIGURED");
   }
@@ -70,7 +48,7 @@ export async function uploadExpenseAttachmentBuffer(
         folder: `divine-app/expenses/${safeSociety}`,
         public_id: safeId,
         resource_type: resourceType,
-        access_mode: "public",
+        access_mode: "authenticated",
         overwrite: false,
       },
       (err, result) => {
@@ -79,8 +57,15 @@ export async function uploadExpenseAttachmentBuffer(
           return;
         }
         if (result?.secure_url) {
+          // For authenticated assets, generate a signed URL so clients can access the resource.
+          const signedUrl = cloudinary.url(result.public_id, {
+            secure: true,
+            resource_type: resourceType,
+            sign_url: true,
+            type: "authenticated",
+          });
           resolve({
-            secureUrl: result.secure_url,
+            secureUrl: signedUrl,
             bytes: result.bytes,
             format: result.format,
           });

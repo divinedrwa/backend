@@ -268,13 +268,15 @@ router.post("/sos-response", requireRole(UserRole.GUARD), validateBody(sosRespon
           assignedGuardId: userId,
         },
       });
-      void notifyResidentSosUpdate({
-        alertId,
-        residentUserId: alert.triggeredBy,
-        title: "Help is on the way",
-        body: "A guard has acknowledged your SOS.",
-        extraData: { sosStatus: SOSStatus.ACKNOWLEDGED },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId,
+          residentUserId: alert.triggeredBy,
+          title: "Help is on the way",
+          body: "A guard has acknowledged your SOS.",
+          extraData: { sosStatus: SOSStatus.ACKNOWLEDGED },
+        }).catch(() => undefined);
+      }
       return res.json({ message: "SOS response recorded", alert: updated });
     }
 
@@ -290,13 +292,15 @@ router.post("/sos-response", requireRole(UserRole.GUARD), validateBody(sosRespon
           assignedGuardId: userId,
         },
       });
-      void notifyResidentSosUpdate({
-        alertId,
-        residentUserId: alert.triggeredBy,
-        title: "Response in progress",
-        body: "Emergency responders are attending your SOS.",
-        extraData: { sosStatus: SOSStatus.IN_PROGRESS },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId,
+          residentUserId: alert.triggeredBy,
+          title: "Response in progress",
+          body: "Emergency responders are attending your SOS.",
+          extraData: { sosStatus: SOSStatus.IN_PROGRESS },
+        }).catch(() => undefined);
+      }
       return res.json({ message: "SOS response recorded", alert: updated });
     }
 
@@ -317,13 +321,15 @@ router.post("/sos-response", requireRole(UserRole.GUARD), validateBody(sosRespon
           resolvedAt,
         },
       });
-      void notifyResidentSosUpdate({
-        alertId,
-        residentUserId: alert.triggeredBy,
-        title: "SOS resolved",
-        body: "Your emergency alert has been closed by security.",
-        extraData: { sosStatus: SOSStatus.RESOLVED },
-      }).catch(() => undefined);
+      if (alert.triggeredBy) {
+        void notifyResidentSosUpdate({
+          alertId,
+          residentUserId: alert.triggeredBy,
+          title: "SOS resolved",
+          body: "Your emergency alert has been closed by security.",
+          extraData: { sosStatus: SOSStatus.RESOLVED },
+        }).catch(() => undefined);
+      }
       return res.json({ message: "SOS response recorded", alert: updated });
     }
 
