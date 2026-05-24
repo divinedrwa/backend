@@ -158,7 +158,7 @@ export async function checkPhonePeStatus(
 
 /**
  * Verify the X-VERIFY header from a PhonePe server-to-server callback.
- * PhonePe sends: SHA256(base64Response + "/pg/v1/status" + saltKey) + "###" + saltIndex
+ * PhonePe sends: SHA256(base64Response + "/pg/v1/pay" + saltKey) + "###" + saltIndex
  */
 export async function verifyPhonePeCallback(
   societyId: string,
@@ -171,7 +171,7 @@ export async function verifyPhonePeCallback(
   const expectedChecksum =
     crypto
       .createHash("sha256")
-      .update(responseBase64 + "/pg/v1/status" + config.saltKey)
+      .update(responseBase64 + "/pg/v1/pay" + config.saltKey)
       .digest("hex") + `###${config.saltIndex}`;
 
   return expectedChecksum === xVerifyHeader;
