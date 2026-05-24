@@ -157,7 +157,7 @@ async function createRefreshTokenForUser(userId: string): Promise<string> {
     data: {
       token: hashed,
       userId,
-      expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000), // 7 days
+      expiresAt: new Date(Date.now() + 365 * 24 * 60 * 60 * 1000), // 1 year
     },
   });
   return raw;
