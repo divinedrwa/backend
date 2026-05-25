@@ -4,7 +4,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { verifyPhonePeCallback } from "../../services/phonepe-billing";
 import { notifyUser } from "../../services/notification.service";
-import { syncLedgerForPayment } from "./ledger-sync";
+import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
 
 /**
  * PhonePe server-to-server callback handler.
@@ -88,7 +88,9 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
     }
 
     const paidAt = isSuccess ? new Date() : null;
-    const amountPaidNum = amountPaise ? amountPaise / 100 : Number(row.amountPaid);
+    /** Maintenance principal stored at initiate — not gross PhonePe amount. */
+    const maintenanceAmountNum = Number(row.amountPaid);
+    const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
 
     await prisma.$transaction(async (tx) => {
       await tx.userCyclePayment.update({
@@ -96,7 +98,6 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
         data: {
           paymentStatus: isFailure ? BillingUserPaymentStatus.FAILED : BillingUserPaymentStatus.SUCCESS,
           paymentGatewayPaymentId: phonepeTransactionId ?? merchantTransactionId,
-          amountPaid: amountPaidNum,
           paidAt,
           source: BillingPaymentSource.GATEWAY,
         },
@@ -119,9 +120,16 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
         });
       }
 
-      // Sync maintenance ledger for successful payments
       if (isSuccess) {
-        await syncLedgerForPayment(tx, row, amountPaidNum, paidAt!, PaymentMode.PHONEPE, "PhonePe online payment sync");
+        await applyGatewayPaymentSuccess(tx, {
+          row,
+          maintenanceAmount: maintenanceAmountNum,
+          paidAt: paidAt!,
+          paymentMode: PaymentMode.PHONEPE,
+          remarks: payAllPending ? "PhonePe pay-all settlement" : "PhonePe online payment sync",
+          payAllPending,
+          gatewayTransactionId: phonepeTransactionId ?? merchantTransactionId,
+        });
       }
     });
 

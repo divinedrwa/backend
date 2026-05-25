@@ -5,7 +5,7 @@ import { prisma } from "../../lib/prisma";
 import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecret } from "./services/razorpay-webhook-verify";
 import { getWebhookSecretForSociety } from "./services/razorpay-billing";
 import { notifyUser } from "../../services/notification.service";
-import { syncLedgerForPayment } from "./ledger-sync";
+import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
 
 /**
  * Razorpay webhook — raw Buffer body. Mounted with express.raw before json().
@@ -105,7 +105,13 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
 
     const isFailure = eventName === "payment.failed";
     const paidAt = isFailure ? null : new Date();
-    const amountPaidNum = amountPaise ? amountPaise / 100 : Number(row.amountPaid);
+    /** Maintenance principal stored at order creation — not the Razorpay gross (fee+GST). */
+    const maintenanceAmountNum = Number(row.amountPaid);
+    const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
+    const notes = paymentEntity.notes as Record<string, string> | undefined;
+    const payAllPending =
+      notes?.payAllPending === "true" ||
+      (await isPayAllGatewayPayment(row, "create_order"));
 
     await prisma.$transaction(async (tx) => {
       await tx.userCyclePayment.update({
@@ -113,7 +119,6 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         data: {
           paymentStatus: isFailure ? BillingUserPaymentStatus.FAILED : BillingUserPaymentStatus.SUCCESS,
           paymentGatewayPaymentId: paymentId,
-          amountPaid: amountPaidNum,
           paidAt,
           source: BillingPaymentSource.GATEWAY,
         },
@@ -126,14 +131,29 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
             userId: row.userId,
             cycleId: row.cycle.id,
             status: eventName,
-            responsePayload: { paymentId, orderId, amountPaise } as object,
+            responsePayload: {
+              paymentId,
+              orderId,
+              amountPaise,
+              amountChargedRupees,
+              maintenanceAmount: maintenanceAmountNum,
+            } as object,
           },
         });
       }
 
-      // ── Sync maintenance ledger for successful payments ──
       if (!isFailure) {
-        await syncLedgerForPayment(tx, row, amountPaidNum, paidAt!, PaymentMode.ONLINE, "Razorpay online payment sync");
+        await applyGatewayPaymentSuccess(tx, {
+          row,
+          maintenanceAmount: maintenanceAmountNum,
+          paidAt: paidAt!,
+          paymentMode: PaymentMode.ONLINE,
+          remarks: payAllPending
+            ? "Razorpay pay-all settlement"
+            : "Razorpay online payment sync",
+          payAllPending,
+          gatewayTransactionId: paymentId,
+        });
       }
     });
 

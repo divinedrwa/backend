@@ -25,6 +25,12 @@ const razorpayConfigSchema = z.object({
   keySecret: z.string().min(1),
   webhookSecret: z.string().optional(),
   currency: z.string().length(3).default("INR"),
+  /** Platform fee % on maintenance due (charged on top at checkout). */
+  feePercent: z.number().min(0).max(100).optional(),
+  /** GST % on platform fee (default 18 if omitted). */
+  feeGstPercent: z.number().min(0).max(100).optional(),
+  /** Fixed platform fee in rupees (added before GST). */
+  feeFixedRupees: z.number().min(0).optional(),
 });
 
 const phonepeConfigSchema = z.object({

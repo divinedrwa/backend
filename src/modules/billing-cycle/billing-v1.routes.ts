@@ -31,6 +31,10 @@ import {
   getPublishableKeyForSociety,
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
+import {
+  computeRazorpayCheckoutBreakup,
+  getRazorpayGatewayFeeConfigForSociety,
+} from "./services/razorpay-gateway-fee";
 import { writeAdminAuditLog } from "./services/audit-log";
 import { notifySociety } from "../../services/notification.service";
 import {
@@ -38,6 +42,8 @@ import {
   checkPhonePeStatus,
   isPhonePeConfiguredForSociety,
 } from "../../services/phonepe-billing";
+import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
+import { reconcilePhonePeIfCompleted } from "./gateway-payment-settle";
 
 const router = Router();
 
@@ -674,10 +680,15 @@ router.delete(
   }
 );
 
-const createOrderSchema = z.object({
-  cycleId: z.string().min(1),
-  idempotencyKey: z.string().min(8).max(120).optional(),
-});
+const createOrderSchema = z
+  .object({
+    cycleId: z.string().min(1).optional(),
+    payAllPending: z.boolean().optional(),
+    idempotencyKey: z.string().min(8).max(120).optional(),
+  })
+  .refine((d) => d.payAllPending === true || Boolean(d.cycleId), {
+    message: "cycleId is required unless payAllPending is true",
+  });
 
 router.post(
   "/payments/create-order",
@@ -687,7 +698,18 @@ router.post(
   async (req, res, next) => {
     try {
       const auth = req.auth!;
-      const { cycleId, idempotencyKey } = req.body as z.infer<typeof createOrderSchema>;
+      const body = req.body as z.infer<typeof createOrderSchema>;
+      const { idempotencyKey, payAllPending } = body;
+
+      const payAllQuote = payAllPending
+        ? await computePayAllQuote(auth.societyId, auth.userId)
+        : null;
+      if (payAllPending && !payAllQuote) {
+        res.status(400).json({ message: "No pending dues to pay", code: "NOTHING_DUE" });
+        return;
+      }
+
+      const cycleId = payAllQuote?.anchorCycleId ?? body.cycleId!;
 
       const cycle = await prisma.billingCycle.findFirst({
         where: { id: cycleId, societyId: auth.societyId },
@@ -697,24 +719,29 @@ router.post(
         return;
       }
 
-      const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
-      if (serverStatus !== BillingCycleStatus.OPEN) {
-        res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
-        return;
+      if (!payAllPending) {
+        const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
+        if (serverStatus !== BillingCycleStatus.OPEN) {
+          res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
+          return;
+        }
       }
 
-      const waiver = await prisma.billingLateFeeWaiver.findUnique({
-        where: { cycleId_userId: { cycleId, userId: auth.userId } },
-      });
-      const due = computeAmountDueForCycle(cycle, new Date(), Boolean(waiver));
       const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
       const currentLedger = ledger.cycles.find((row) => row.cycleId === cycleId);
       const balanceBefore = currentLedger?.balanceBefore ?? 0;
-      const cycleOutstanding = currentLedger
-          ? Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount)
-          : Math.max(0, Number(cycle.amount) - balanceBefore);
-      const lateComponent = Math.max(0, due.totalDue - Number(cycle.amount));
-      const adjustedDue = Math.max(0, cycleOutstanding + lateComponent);
+      const due = computeAmountDueForCycle(
+        cycle,
+        new Date(),
+        Boolean(
+          await prisma.billingLateFeeWaiver.findUnique({
+            where: { cycleId_userId: { cycleId, userId: auth.userId } },
+          }),
+        ),
+      );
+      const adjustedDue = payAllQuote
+        ? payAllQuote.maintenanceTotal
+        : await computeCycleAdjustedDue(auth.societyId, auth.userId, cycle, currentLedger);
       if (adjustedDue <= 0) {
         const paymentRow = await prisma.userCyclePayment.upsert({
           where: { userId_cycleId: { userId: auth.userId, cycleId } },
@@ -766,15 +793,22 @@ router.post(
         return;
       }
 
+      const feeConfig = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+      const breakup = computeRazorpayCheckoutBreakup(adjustedDue, feeConfig);
+
       const receipt = `mb_${cycle.cycleKey}_${auth.userId}`.slice(0, 40);
       const order = await createMaintenanceOrderForSociety({
         societyId: auth.societyId,
-        amountPaise: Math.round(adjustedDue * 100),
+        amountPaise: breakup.totalPayablePaise,
         receipt,
         notes: {
           societyId: auth.societyId,
           cycleId,
           userId: auth.userId,
+          maintenanceAmountPaise: String(breakup.maintenanceAmountPaise),
+          platformFeePaise: String(breakup.platformFeePaise),
+          platformFeeGstPaise: String(breakup.platformFeeGstPaise),
+          ...(payAllPending ? { payAllPending: "true" } : {}),
         },
       });
 
@@ -783,13 +817,13 @@ router.post(
         create: {
           userId: auth.userId,
           cycleId,
-          amountPaid: adjustedDue,
+          amountPaid: breakup.maintenanceAmount,
           paymentStatus: BillingUserPaymentStatus.PENDING,
           paymentGatewayOrderId: order.id,
           idempotencyKey: idempotencyKey ?? null,
         },
         update: {
-          amountPaid: adjustedDue,
+          amountPaid: breakup.maintenanceAmount,
           paymentStatus: BillingUserPaymentStatus.PENDING,
           paymentGatewayOrderId: order.id,
           idempotencyKey: idempotencyKey ?? undefined,
@@ -802,7 +836,15 @@ router.post(
           userId: auth.userId,
           cycleId,
           status: "create_order",
-          requestPayload: { orderId: order.id } as object,
+          requestPayload: {
+            orderId: order.id,
+            maintenanceAmount: breakup.maintenanceAmount,
+            platformFee: breakup.platformFee,
+            platformFeeGst: breakup.platformFeeGst,
+            totalPayable: breakup.totalPayable,
+            payAllPending: payAllPending === true,
+            pendingCycleCount: payAllQuote?.pendingCount,
+          } as object,
         },
       });
 
@@ -812,7 +854,13 @@ router.post(
         currency: order.currency,
         key: await getPublishableKeyForSociety(auth.societyId),
         paymentId: paymentRow.id,
-        totalDue: adjustedDue,
+        totalDue: breakup.maintenanceAmount,
+        maintenanceAmount: breakup.maintenanceAmount,
+        platformFee: breakup.platformFee,
+        platformFeeGst: breakup.platformFeeGst,
+        totalPayable: breakup.totalPayable,
+        payAllPending: payAllPending === true,
+        pendingCycleCount: payAllQuote?.pendingCount ?? 1,
         unadjustedDue: due.totalDue,
         availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
       });
@@ -1332,10 +1380,15 @@ router.get(
 
 // ── PhonePe Payment Endpoints ──────────────────────────────────────
 
-const phonePeInitiateSchema = z.object({
-  cycleId: z.string().min(1),
-  idempotencyKey: z.string().min(8).max(120).optional(),
-});
+const phonePeInitiateSchema = z
+  .object({
+    cycleId: z.string().min(1).optional(),
+    payAllPending: z.boolean().optional(),
+    idempotencyKey: z.string().min(8).max(120).optional(),
+  })
+  .refine((d) => d.payAllPending === true || Boolean(d.cycleId), {
+    message: "cycleId is required unless payAllPending is true",
+  });
 
 router.post(
   "/payments/phonepe/initiate",
@@ -1345,7 +1398,18 @@ router.post(
   async (req, res, next) => {
     try {
       const auth = req.auth!;
-      const { cycleId, idempotencyKey } = req.body as z.infer<typeof phonePeInitiateSchema>;
+      const body = req.body as z.infer<typeof phonePeInitiateSchema>;
+      const { idempotencyKey, payAllPending } = body;
+
+      const payAllQuote = payAllPending
+        ? await computePayAllQuote(auth.societyId, auth.userId)
+        : null;
+      if (payAllPending && !payAllQuote) {
+        res.status(400).json({ message: "No pending dues to pay", code: "NOTHING_DUE" });
+        return;
+      }
+
+      const cycleId = payAllQuote?.anchorCycleId ?? body.cycleId!;
 
       const cycle = await prisma.billingCycle.findFirst({
         where: { id: cycleId, societyId: auth.societyId },
@@ -1355,25 +1419,19 @@ router.post(
         return;
       }
 
-      const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
-      if (serverStatus !== BillingCycleStatus.OPEN) {
-        res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
-        return;
+      if (!payAllPending) {
+        const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
+        if (serverStatus !== BillingCycleStatus.OPEN) {
+          res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
+          return;
+        }
       }
 
-      // Compute amount due (mirrors create-order logic)
-      const waiver = await prisma.billingLateFeeWaiver.findUnique({
-        where: { cycleId_userId: { cycleId, userId: auth.userId } },
-      });
-      const due = computeAmountDueForCycle(cycle, new Date(), Boolean(waiver));
       const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
       const currentLedger = ledger.cycles.find((row) => row.cycleId === cycleId);
-      const balanceBefore = currentLedger?.balanceBefore ?? 0;
-      const cycleOutstanding = currentLedger
-        ? Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount)
-        : Math.max(0, Number(cycle.amount) - balanceBefore);
-      const lateComponent = Math.max(0, due.totalDue - Number(cycle.amount));
-      const adjustedDue = Math.max(0, cycleOutstanding + lateComponent);
+      const adjustedDue = payAllQuote
+        ? payAllQuote.maintenanceTotal
+        : await computeCycleAdjustedDue(auth.societyId, auth.userId, cycle, currentLedger);
 
       if (adjustedDue <= 0) {
         res.status(400).json({ message: "No amount due for this cycle", code: "NOTHING_DUE" });
@@ -1438,7 +1496,11 @@ router.post(
           userId: auth.userId,
           cycleId,
           status: "phonepe_initiate",
-          requestPayload: { merchantTransactionId } as object,
+          requestPayload: {
+            merchantTransactionId,
+            payAllPending: payAllPending === true,
+            pendingCycleCount: payAllQuote?.pendingCount,
+          } as object,
         },
       });
 
@@ -1447,6 +1509,8 @@ router.post(
         merchantTransactionId: result.merchantTransactionId,
         paymentId: paymentRow.id,
         totalDue: adjustedDue,
+        payAllPending: payAllPending === true,
+        pendingCycleCount: payAllQuote?.pendingCount ?? 1,
       });
     } catch (e) {
       next(e);
@@ -1463,17 +1527,21 @@ router.get(
       const auth = req.auth!;
       const { txnId } = req.params;
 
-      // Check local payment status
       const localRow = await prisma.userCyclePayment.findFirst({
         where: { paymentGatewayOrderId: txnId, cycle: { societyId: auth.societyId } },
         select: { id: true, paymentStatus: true },
       });
 
-      // Also poll PhonePe for the latest status
       const phonepeResult = await checkPhonePeStatus(auth.societyId, txnId);
 
+      let status = localRow?.paymentStatus ?? "UNKNOWN";
+      if (status !== BillingUserPaymentStatus.SUCCESS && phonepeResult?.state === "COMPLETED") {
+        const reconciled = await reconcilePhonePeIfCompleted(auth.societyId, txnId);
+        if (reconciled.status) status = reconciled.status;
+      }
+
       res.json({
-        status: localRow?.paymentStatus ?? "UNKNOWN",
+        status,
         phonepeState: phonepeResult?.state ?? "UNKNOWN",
         paymentId: localRow?.id ?? null,
       });

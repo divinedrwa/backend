@@ -33,6 +33,8 @@ export interface RecordPaymentParams {
    * multi-month UPI payments.
    */
   walkAllCycles?: boolean;
+  /** Source stamped on synced UserCyclePayment rows (defaults to manual cash). */
+  billingSource?: BillingPaymentSource;
 }
 
 /**
@@ -60,6 +62,7 @@ export async function recordPaymentAndSyncLedgers(
     idempotencyKey,
     recordedByUserId,
     auditAction = "RECORD_PAYMENT",
+    billingSource = BillingPaymentSource.CASH_MANUAL,
   } = params;
 
   // 1. Find or create maintenance record
@@ -221,15 +224,17 @@ export async function recordPaymentAndSyncLedgers(
             cycleId: billingCycle.id,
             amountPaid: new Prisma.Decimal(paidAmt),
             paymentStatus: payStatus,
-            source: BillingPaymentSource.CASH_MANUAL,
-            manualMarkedByAdminId: recordedByUserId,
+            source: billingSource,
+            manualMarkedByAdminId:
+              billingSource === BillingPaymentSource.CASH_MANUAL ? recordedByUserId : null,
             paidAt: new Date(paymentDate),
           },
           update: {
             amountPaid: new Prisma.Decimal(paidAmt),
             paymentStatus: payStatus,
-            source: BillingPaymentSource.CASH_MANUAL,
-            manualMarkedByAdminId: recordedByUserId,
+            source: billingSource,
+            manualMarkedByAdminId:
+              billingSource === BillingPaymentSource.CASH_MANUAL ? recordedByUserId : null,
             paidAt: new Date(paymentDate),
           },
         });
