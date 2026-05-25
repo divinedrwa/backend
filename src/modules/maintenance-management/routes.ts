@@ -697,7 +697,7 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
         },
       });
 
-      // Re-derive snapshot via credit walker (paidAmount → 0, status → PENDING/OVERDUE)
+      // Re-derive snapshot via credit walker (paidAmount → 0)
       await applyVillaCreditAcrossSnapshots(tx, {
         societyId,
         villaId: body.villaId,
@@ -705,17 +705,25 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
         throughCycleId: cycle.id,
       });
 
-      // Sync legacy Maintenance record status
       const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
         where: { id: snapshotCheck.id },
         select: { status: true, paidAmount: true },
       });
-      const snapStatus = reconciledSnapshot?.status ?? "PENDING";
 
-      // Map snapshot status to legacy MaintenanceStatus enum (which lacks PARTIAL/WAIVED)
-      const legacyStatus = snapStatus === "PAID" ? "PAID"
-        : snapStatus === "OVERDUE" ? "OVERDUE"
+      // Admin explicitly reversed payment → force PENDING regardless of due date.
+      // The credit walker may set OVERDUE if the due date has passed, but admin
+      // intent is a clean reset; the hourly cron will re-evaluate OVERDUE later.
+      const paidAfterWalker = Number(reconciledSnapshot?.paidAmount ?? 0);
+      const snapStatus = paidAfterWalker > 0.005
+        ? (reconciledSnapshot?.status ?? "PARTIAL")
         : "PENDING";
+      if (reconciledSnapshot && reconciledSnapshot.status !== snapStatus) {
+        await tx.villaMaintenanceSnapshot.update({
+          where: { id: snapshotCheck.id },
+          data: { status: snapStatus },
+        });
+      }
+
       await tx.maintenance.updateMany({
         where: {
           societyId,
@@ -723,7 +731,7 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
           month: cycle.periodMonth,
           year: cycle.periodYear,
         },
-        data: { status: legacyStatus },
+        data: { status: snapStatus === "PAID" ? "PAID" : snapStatus === "OVERDUE" ? "OVERDUE" : "PENDING" },
       });
 
       // Sync UserCyclePayment
