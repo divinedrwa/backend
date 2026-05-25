@@ -18,6 +18,10 @@ import {
   decryptConfigSecrets,
   mergeConfigUpdate,
 } from "./service";
+import {
+  getEnvPhonePeDisplayName,
+  isPhonePeConfigured,
+} from "../../services/phonepe-billing";
 
 const router = Router();
 
@@ -325,6 +329,17 @@ residentPaymentMethodsRouter.get(
         sortOrder: m.sortOrder,
         config: sanitizeConfigForResident(m.type, m.config as Record<string, unknown>),
       }));
+
+      // Env-only PhonePe (Render credentials) — show in picker without duplicating admin config.
+      if (isPhonePeConfigured() && !sanitized.some((m) => m.type === PaymentMethodType.PHONEPE)) {
+        sanitized.push({
+          id: "env-default-phonepe",
+          type: PaymentMethodType.PHONEPE,
+          displayName: getEnvPhonePeDisplayName(),
+          sortOrder: 999,
+          config: {},
+        });
+      }
 
       return res.json({ methods: sanitized });
     } catch (error) {

@@ -4,7 +4,7 @@ import { prisma } from "../lib/prisma";
 import { decryptConfigSecrets } from "../modules/payment-methods/service";
 import { logger } from "../lib/logger";
 
-type PhonePeConfig = {
+export type PhonePeConfig = {
   merchantId: string;
   saltKey: string;
   saltIndex: number;
@@ -16,7 +16,33 @@ const BASE_URLS = {
   PRODUCTION: "https://api.phonepe.com/apis/hermes",
 } as const;
 
-export async function getPhonePeConfig(societyId: string): Promise<PhonePeConfig | null> {
+function parsePhonePeEnvironment(raw: string | undefined): "SANDBOX" | "PRODUCTION" {
+  const v = (raw ?? "SANDBOX").toUpperCase();
+  return v === "PRODUCTION" ? "PRODUCTION" : "SANDBOX";
+}
+
+/** Global PhonePe credentials from environment (Render / local .env). */
+export function getEnvPhonePeConfig(): PhonePeConfig | null {
+  const merchantId = process.env.PHONEPE_MERCHANT_ID?.trim();
+  const saltKey = process.env.PHONEPE_SALT_KEY?.trim();
+  if (!merchantId || !saltKey) return null;
+
+  const saltIndexRaw = process.env.PHONEPE_SALT_INDEX?.trim();
+  const saltIndex = saltIndexRaw ? Number.parseInt(saltIndexRaw, 10) : 1;
+
+  return {
+    merchantId,
+    saltKey,
+    saltIndex: Number.isFinite(saltIndex) && saltIndex > 0 ? saltIndex : 1,
+    environment: parsePhonePeEnvironment(process.env.PHONEPE_ENVIRONMENT),
+  };
+}
+
+export function isPhonePeConfigured(): boolean {
+  return getEnvPhonePeConfig() !== null;
+}
+
+async function getPhonePeConfigFromDb(societyId: string): Promise<PhonePeConfig | null> {
   const method = await prisma.paymentMethod.findFirst({
     where: {
       societyId,
@@ -32,20 +58,36 @@ export async function getPhonePeConfig(societyId: string): Promise<PhonePeConfig
 
   if (!merchantId || !saltKey) return null;
 
+  const idx =
+    typeof saltIndex === "number"
+      ? saltIndex
+      : typeof saltIndex === "string"
+        ? Number.parseInt(saltIndex, 10)
+        : 1;
+
   return {
     merchantId: merchantId as string,
     saltKey: saltKey as string,
-    saltIndex: (saltIndex as number) ?? 1,
-    environment: (environment as "SANDBOX" | "PRODUCTION") ?? "SANDBOX",
+    saltIndex: Number.isFinite(idx) && idx > 0 ? idx : 1,
+    environment:
+      environment === "PRODUCTION" || environment === "SANDBOX"
+        ? environment
+        : "SANDBOX",
   };
+}
+
+/**
+ * PhonePe credentials for a society: PaymentMethod row first, then env fallback.
+ */
+export async function getPhonePeConfig(societyId: string): Promise<PhonePeConfig | null> {
+  const fromDb = await getPhonePeConfigFromDb(societyId);
+  if (fromDb) return fromDb;
+  return getEnvPhonePeConfig();
 }
 
 /**
  * Initiate a PhonePe Standard Pay API request.
  * Returns the redirect URL and transaction ID.
- *
- * NOTE: Full integration (webhook handler, Flutter SDK) is a separate follow-up.
- * This creates the service skeleton for test-connection and future use.
  */
 export async function initiatePhonePePayment(
   societyId: string,
@@ -178,9 +220,23 @@ export async function verifyPhonePeCallback(
 }
 
 /**
- * Check if PhonePe is enabled and configured for a society.
+ * Check if PhonePe is configured for a society (enabled PaymentMethod or global env).
  */
 export async function isPhonePeConfiguredForSociety(societyId: string): Promise<boolean> {
-  const config = await getPhonePeConfig(societyId);
-  return config !== null;
+  const method = await prisma.paymentMethod.findFirst({
+    where: {
+      societyId,
+      type: PaymentMethodType.PHONEPE,
+      isEnabled: true,
+    },
+    select: { id: true },
+  });
+  if (method) return true;
+  return isPhonePeConfigured();
+}
+
+/** Display name when exposing PhonePe via env-only (no DB row). */
+export function getEnvPhonePeDisplayName(): string {
+  const name = process.env.PHONEPE_DISPLAY_NAME?.trim();
+  return name && name.length > 0 ? name : "PhonePe";
 }

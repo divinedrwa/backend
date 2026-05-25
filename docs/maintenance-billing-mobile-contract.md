@@ -96,10 +96,26 @@ Timestamps returned are **UTC ISO8601**. Convert for display using the device lo
 
 ---
 
+## PhonePe (resident)
+
+`POST /v1/payments/phonepe/initiate` — body `{ "cycleId": "..." }`. Returns `redirectUrl`, `merchantTransactionId`.
+
+`GET /v1/payments/phonepe/status/:txnId` — poll after redirect.
+
+Server callback: `POST /api/v1/payments/phonepe/callback` (PhonePe → your API; requires `API_BASE_URL` on deploy).
+
+Credentials: per-society **Payment methods → PhonePe** in admin, or global env fallback:
+
+- `PHONEPE_MERCHANT_ID`, `PHONEPE_SALT_KEY`, `PHONEPE_SALT_INDEX`, `PHONEPE_ENVIRONMENT` (`SANDBOX` | `PRODUCTION`)
+- `API_BASE_URL` — public origin (e.g. `https://gatepass-v037.onrender.com`)
+
+---
+
 ## Operational env (backend)
 
 - `REDIS_URL` — optional; cache falls back to in-memory TTL.
 - `RAZORPAY_KEY_ID`, `RAZORPAY_KEY_SECRET`, `RAZORPAY_WEBHOOK_SECRET` — Razorpay order + webhook verification.
+- `PHONEPE_*`, `API_BASE_URL` — PhonePe pay + callback URLs (see above).
 
 ## Related
 
