@@ -7,6 +7,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { logger } from "../../lib/logger";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
@@ -211,12 +212,18 @@ router.post(
         availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
       });
     } catch (e: unknown) {
-      const err = e as { code?: string };
+      const err = e as { code?: string; statusCode?: number; error?: { description?: string } };
       if (err.code === "GATEWAY_MISSING") {
         res.status(503).json({ message: "Gateway not configured", code: "PAYMENT_GATEWAY_UNAVAILABLE" });
         return;
       }
-      next(e);
+      // Razorpay SDK / API errors — log detail, return user-safe message
+      logger.error({ err: e }, "Razorpay order creation failed");
+      const detail = err.error?.description ?? (e instanceof Error ? e.message : "Unknown error");
+      res.status(502).json({
+        message: `Payment gateway error: ${detail}`,
+        code: "GATEWAY_ERROR",
+      });
     }
   }
 );

@@ -1,6 +1,8 @@
 import Razorpay from "razorpay";
 import { PaymentMethodType } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
+import { logger } from "../../../lib/logger";
+import { isEncrypted } from "../../../lib/paymentSecrets";
 import { decryptConfigSecrets } from "../../payment-methods/service";
 
 let client: Razorpay | null = null;
@@ -61,6 +63,10 @@ export async function getClientForSociety(societyId: string): Promise<Razorpay |
     const keyId = config.keyId as string;
     const keySecret = config.keySecret as string;
     if (keyId && keySecret) {
+      if (isEncrypted(keySecret)) {
+        logger.error("Razorpay keySecret is still encrypted — PAYMENT_SECRETS_KEY env var is missing or wrong");
+        return null;
+      }
       return new Razorpay({ key_id: keyId, key_secret: keySecret });
     }
   }
@@ -71,19 +77,11 @@ export async function getClientForSociety(societyId: string): Promise<Razorpay |
 
 /**
  * Check if Razorpay is configured for a given society
- * (either per-society PaymentMethod or global env vars).
+ * (either per-society PaymentMethod with usable credentials, or global env vars).
  */
 export async function isRazorpayConfiguredForSociety(societyId: string): Promise<boolean> {
-  const method = await prisma.paymentMethod.findFirst({
-    where: {
-      societyId,
-      type: PaymentMethodType.RAZORPAY,
-      isEnabled: true,
-    },
-    select: { id: true },
-  });
-  if (method) return true;
-  return isRazorpayConfigured();
+  const client = await getClientForSociety(societyId);
+  return client !== null;
 }
 
 /**

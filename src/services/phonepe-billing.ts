@@ -1,6 +1,7 @@
 import crypto from "crypto";
 import { PaymentMethodType } from "@prisma/client";
 import { prisma } from "../lib/prisma";
+import { isEncrypted } from "../lib/paymentSecrets";
 import { decryptConfigSecrets } from "../modules/payment-methods/service";
 import { logger } from "../lib/logger";
 
@@ -57,6 +58,10 @@ async function getPhonePeConfigFromDb(societyId: string): Promise<PhonePeConfig 
   const { merchantId, saltKey, saltIndex, environment } = config as Record<string, unknown>;
 
   if (!merchantId || !saltKey) return null;
+  if (typeof saltKey === "string" && isEncrypted(saltKey as string)) {
+    logger.error("PhonePe saltKey is still encrypted — PAYMENT_SECRETS_KEY env var is missing or wrong");
+    return null;
+  }
 
   const idx =
     typeof saltIndex === "number"
@@ -228,18 +233,11 @@ export async function verifyPhonePeCallback(
 
 /**
  * Check if PhonePe is configured for a society (enabled PaymentMethod or global env).
+ * Returns true only if usable credentials are available (i.e. not still encrypted).
  */
 export async function isPhonePeConfiguredForSociety(societyId: string): Promise<boolean> {
-  const method = await prisma.paymentMethod.findFirst({
-    where: {
-      societyId,
-      type: PaymentMethodType.PHONEPE,
-      isEnabled: true,
-    },
-    select: { id: true },
-  });
-  if (method) return true;
-  return isPhonePeConfigured();
+  const config = await getPhonePeConfig(societyId);
+  return config !== null;
 }
 
 /** Display name when exposing PhonePe via env-only (no DB row). */
