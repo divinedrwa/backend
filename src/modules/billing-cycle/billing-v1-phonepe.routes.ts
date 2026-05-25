@@ -99,7 +99,7 @@ router.post(
       }
 
       const apiBaseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
-      const merchantTransactionId = `pp_${cycle.cycleKey}_${auth.userId}_${Date.now()}`.slice(0, 36);
+      const merchantTransactionId = `pp_${cycle.cycleKey}_${auth.userId.slice(-8)}_${Date.now().toString(36)}`.slice(0, 36);
       const callbackUrl = `${apiBaseUrl}/api/v1/payments/phonepe/callback`;
       const redirectUrl = `${apiBaseUrl}/api/v1/payments/phonepe/redirect?txnId=${merchantTransactionId}`;
 
