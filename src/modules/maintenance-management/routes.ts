@@ -22,6 +22,7 @@ import {
   pickMaintenanceCollectionCycleId,
 } from "./financial-dashboard-cycle";
 import { notifyUsers } from "../../services/notification.service";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -338,9 +339,6 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         const expected = Number(snapshot.expectedAmount);
         const paidSoFar = Number(snapshot.paidAmount);
         const remaining = Math.round((expected - paidSoFar) * 100) / 100;
-        if (remaining <= 0 && !body.applyCredit) {
-          throw Object.assign(new Error("No balance due for this billing cycle"), { statusCode: 400 });
-        }
         const maintenanceRow = await tx.maintenance.upsert({
           where: {
             villaId_month_year: { villaId: body.villaId, month: body.month, year: body.year },
@@ -632,6 +630,195 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       message: "Payment marked successfully",
       payment,
       maintenance,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// POST /api/maintenance-management/reverse-payment
+// Reverse all payments for a villa in a billing cycle (admin undo)
+const reversePaymentSchema = z.object({
+  villaId: z.string().min(1),
+  maintenanceCollectionCycleId: z.string().min(1),
+  reason: z.string().max(500).optional(),
+});
+
+router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const adminId = req.auth!.userId;
+    const body = req.body as z.infer<typeof reversePaymentSchema>;
+
+    const villa = await prisma.villa.findFirst({ where: { id: body.villaId, societyId } });
+    if (!villa) return res.status(404).json({ message: "Villa not found" });
+
+    const cycle = await prisma.maintenanceCollectionCycle.findFirst({
+      where: { id: body.maintenanceCollectionCycleId, societyId },
+    });
+    if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
+    if (cycle.status === "LOCKED") {
+      return res.status(400).json({ message: "This billing cycle is locked" });
+    }
+
+    const snapshotCheck = await prisma.villaMaintenanceSnapshot.findUnique({
+      where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+      select: { id: true },
+    });
+    if (!snapshotCheck) {
+      return res.status(400).json({ message: "No billing snapshot for this villa." });
+    }
+
+    // Count existing payments to guard against no-op reversals
+    const paymentCount = await prisma.maintenancePayment.count({
+      where: {
+        societyId,
+        villaId: body.villaId,
+        maintenanceCollectionCycleId: cycle.id,
+      },
+    });
+    if (paymentCount === 0) {
+      return res.status(400).json({ message: "No payments found to reverse for this billing cycle" });
+    }
+
+    await prisma.$transaction(async (tx) => {
+      // Lock the snapshot row to prevent concurrent modifications
+      await tx.$queryRawUnsafe<{ id: string }[]>(
+        `SELECT id FROM "VillaMaintenanceSnapshot" WHERE id = $1 FOR UPDATE`,
+        snapshotCheck.id,
+      );
+
+      // Delete all payments linked to this cycle + villa
+      await tx.maintenancePayment.deleteMany({
+        where: {
+          societyId,
+          villaId: body.villaId,
+          maintenanceCollectionCycleId: cycle.id,
+        },
+      });
+
+      // Re-derive snapshot via credit walker (paidAmount → 0, status → PENDING/OVERDUE)
+      await applyVillaCreditAcrossSnapshots(tx, {
+        societyId,
+        villaId: body.villaId,
+        financialYearId: cycle.financialYearId,
+        throughCycleId: cycle.id,
+      });
+
+      // Sync legacy Maintenance record status
+      const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
+        where: { id: snapshotCheck.id },
+        select: { status: true, paidAmount: true },
+      });
+      const snapStatus = reconciledSnapshot?.status ?? "PENDING";
+
+      // Map snapshot status to legacy MaintenanceStatus enum (which lacks PARTIAL/WAIVED)
+      const legacyStatus = snapStatus === "PAID" ? "PAID"
+        : snapStatus === "OVERDUE" ? "OVERDUE"
+        : "PENDING";
+      await tx.maintenance.updateMany({
+        where: {
+          societyId,
+          villaId: body.villaId,
+          month: cycle.periodMonth,
+          year: cycle.periodYear,
+        },
+        data: { status: legacyStatus },
+      });
+
+      // Sync UserCyclePayment
+      const billingCycle = await tx.billingCycle.findFirst({
+        where: { societyId, financialYearId: cycle.financialYearId, cycleKey: cycle.periodKey },
+        select: { id: true },
+      });
+      if (billingCycle) {
+        await clearExcludedResidentsUserCyclePayments(tx, {
+          societyId,
+          villaId: body.villaId,
+          billingCycleId: billingCycle.id,
+        });
+        const payStatus =
+          snapStatus === "PAID" || snapStatus === "WAIVED"
+            ? BillingUserPaymentStatus.SUCCESS
+            : BillingUserPaymentStatus.PENDING;
+        const primaryResidents = await tx.user.findMany({
+          where: {
+            societyId,
+            villaId: body.villaId,
+            role: UserRole.RESIDENT,
+            isActive: true,
+            maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+          },
+          select: { id: true },
+        });
+        for (const u of primaryResidents) {
+          await tx.userCyclePayment.upsert({
+            where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
+            create: {
+              userId: u.id,
+              cycleId: billingCycle.id,
+              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(),
+            },
+            update: {
+              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
+              paymentStatus: payStatus,
+              source: BillingPaymentSource.CASH_MANUAL,
+              manualMarkedByAdminId: adminId,
+              paidAt: new Date(),
+            },
+          });
+        }
+      }
+    }, { timeout: 15000 });
+
+    // Fire-and-forget: audit log
+    auditFromRequest(req, {
+      societyId,
+      adminId,
+      action: "PAYMENT_REVERSED",
+      entityType: "Villa",
+      entityId: body.villaId,
+      metadata: {
+        villaNumber: villa.villaNumber,
+        cycleId: cycle.id,
+        periodMonth: cycle.periodMonth,
+        periodYear: cycle.periodYear,
+        reason: body.reason || undefined,
+        paymentsDeleted: paymentCount,
+      },
+    });
+
+    // Fire-and-forget: push notification to villa residents
+    void (async () => {
+      try {
+        const residents = await prisma.user.findMany({
+          where: { villaId: body.villaId, societyId, role: UserRole.RESIDENT, isActive: true },
+          select: { id: true },
+        });
+        if (residents.length > 0) {
+          const monthName = new Date(cycle.periodYear, cycle.periodMonth - 1).toLocaleString("en-US", { month: "long" });
+          await notifyUsers(
+            residents.map((r) => r.id),
+            {
+              title: "Payment reversed by admin",
+              body: `Your maintenance payment for ${monthName} ${cycle.periodYear} has been reversed by admin.${body.reason ? ` Reason: ${body.reason}` : ""}`,
+              data: { type: "MAINTENANCE_PAYMENT_REVERSED", villaId: body.villaId },
+            },
+            { category: NotificationCategory.SYSTEM },
+          );
+        }
+      } catch {
+        // Fire-and-forget
+      }
+    })();
+
+    return res.status(200).json({
+      message: `Payment reversed for Villa ${villa.villaNumber}`,
+      paymentsDeleted: paymentCount,
     });
   } catch (error) {
     next(error);
