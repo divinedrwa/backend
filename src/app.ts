@@ -79,8 +79,20 @@ app.use(
   })
 );
 
+// Tighter rate limit for payment webhooks — public endpoints hit by
+// gateway servers. 30 requests per minute per IP is generous for
+// legitimate callbacks but stops abuse from burning DB queries.
+const webhookLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: 30,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  message: { message: "Too many webhook requests" },
+});
+
 app.post(
   "/api/v1/payments/webhook",
+  webhookLimiter,
   express.raw({ type: "*/*", limit: "2mb" }),
   async (req, res, next) => {
     try {
@@ -96,7 +108,7 @@ app.post(
 app.use(express.json({ limit: "1mb" }));
 
 // PhonePe callback: mounted after express.json() since PhonePe sends JSON
-app.post("/api/v1/payments/phonepe/callback", async (req, res, next) => {
+app.post("/api/v1/payments/phonepe/callback", webhookLimiter, async (req, res, next) => {
   try {
     await phonePeCallbackHandler(req, res);
   } catch (e) {

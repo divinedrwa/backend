@@ -5,6 +5,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { passwordSchema } from "../../lib/passwordSchema";
 import { logger } from "../../lib/logger";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -1092,37 +1093,46 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
 router.get("/community-directory", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
+    const pagination = getPagination(req);
     const q = ((req.query.q as string) || "").trim().toLowerCase();
 
-    const residents = await prisma.user.findMany({
-      where: {
-        societyId,
-        role: { in: [UserRole.RESIDENT, UserRole.ADMIN] },
-        isActive: true,
-        ...(q
-          ? {
-              OR: [
-                { name: { contains: q, mode: "insensitive" as const } },
-                { villa: { villaNumber: { contains: q, mode: "insensitive" as const } } },
-                { villa: { block: { contains: q, mode: "insensitive" as const } } },
-              ],
-            }
-          : {}),
-      },
-      take: 100,
-      orderBy: { name: "asc" },
-      select: {
-        id: true,
-        name: true,
-        phone: true,
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
-          },
+    const where = {
+      societyId,
+      role: { in: [UserRole.RESIDENT, UserRole.ADMIN] },
+      isActive: true,
+      ...(q
+        ? {
+            OR: [
+              { name: { contains: q, mode: "insensitive" as const } },
+              { villa: { villaNumber: { contains: q, mode: "insensitive" as const } } },
+              { villa: { block: { contains: q, mode: "insensitive" as const } } },
+            ],
+          }
+        : {}),
+    };
+
+    const select = {
+      id: true,
+      name: true,
+      phone: true,
+      villa: {
+        select: {
+          villaNumber: true,
+          block: true,
         },
       },
-    });
+    } as const;
+
+    const [residents, total] = await Promise.all([
+      prisma.user.findMany({
+        where,
+        take: pagination.take,
+        skip: pagination.skip,
+        orderBy: { name: "asc" },
+        select,
+      }),
+      prisma.user.count({ where }),
+    ]);
 
     const rows = residents.map((r) => ({
       userId: r.id,
@@ -1134,7 +1144,7 @@ router.get("/community-directory", requireRole(UserRole.RESIDENT, UserRole.ADMIN
         : null,
     }));
 
-    return res.json({ residents: rows, count: rows.length });
+    return res.json({ residents: rows, count: rows.length, ...paginationMeta(total, rows.length, pagination) });
   } catch (error) {
     next(error);
   }

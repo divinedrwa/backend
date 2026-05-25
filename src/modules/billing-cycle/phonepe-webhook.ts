@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode } from "@prisma/client";
+import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode, Prisma } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { verifyPhonePeCallback } from "../../services/phonepe-billing";
@@ -53,28 +53,26 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
   }
 
   try {
-    // Look up the payment row by merchantTransactionId
-    const row = await prisma.userCyclePayment.findFirst({
+    // Quick pre-check: find the row and verify checksum before entering the tx.
+    // The row lookup here is a fast-path; the real idempotency guard is inside the tx.
+    const preRow = await prisma.userCyclePayment.findFirst({
       where: { paymentGatewayOrderId: merchantTransactionId },
-      include: {
-        cycle: { select: { societyId: true, id: true } },
-      },
+      include: { cycle: { select: { societyId: true, id: true } } },
     });
 
-    if (!row) {
-      // Return 200 to prevent PhonePe from retrying for orders we don't recognize
+    if (!preRow) {
       res.status(200).json({ ok: true, skipped: true, reason: "unknown_order" });
       return;
     }
 
-    // Idempotency: skip if already SUCCESS
-    if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+    // Idempotency fast-path (non-authoritative — real check is inside tx)
+    if (preRow.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
       res.status(200).json({ ok: true, idempotent: true });
       return;
     }
 
     // Verify checksum using the society's salt key
-    const verified = await verifyPhonePeCallback(row.cycle.societyId, xVerifyStr, responseBase64);
+    const verified = await verifyPhonePeCallback(preRow.cycle.societyId, xVerifyStr, responseBase64);
     if (!verified) {
       logger.warn({ merchantTransactionId }, "[phonepe webhook] checksum verification failed");
       res.status(400).json({ message: "Invalid signature" });
@@ -87,12 +85,45 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
       return;
     }
 
-    const paidAt = isSuccess ? new Date() : null;
-    /** Maintenance principal stored at initiate — not gross PhonePe amount. */
-    const maintenanceAmountNum = Number(row.amountPaid);
-    const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
+    // All state reads + writes inside a single transaction with row-level lock
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the row with FOR UPDATE to prevent concurrent callbacks from
+      // both reading PENDING and double-settling.
+      const [lockedRow] = await tx.$queryRawUnsafe<
+        { id: string; userId: string | null; cycleId: string; amountPaid: string; paymentStatus: string }[]
+      >(
+        `SELECT id, "userId", "cycleId", "amountPaid"::text, "paymentStatus"
+         FROM "UserCyclePayment"
+         WHERE "paymentGatewayOrderId" = $1
+         FOR UPDATE`,
+        merchantTransactionId,
+      );
 
-    await prisma.$transaction(async (tx) => {
+      if (!lockedRow) return { action: "skip" as const, reason: "unknown_order" };
+
+      // Idempotency: already settled — return without double-processing
+      if (lockedRow.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+        return { action: "idempotent" as const };
+      }
+
+      const cycle = await tx.billingCycle.findUnique({
+        where: { id: lockedRow.cycleId },
+        select: { societyId: true, id: true },
+      });
+      if (!cycle) return { action: "skip" as const, reason: "cycle_not_found" };
+
+      const row = {
+        id: lockedRow.id,
+        userId: lockedRow.userId,
+        cycleId: lockedRow.cycleId,
+        amountPaid: new Prisma.Decimal(lockedRow.amountPaid),
+        cycle: { societyId: cycle.societyId, id: cycle.id },
+      };
+
+      const paidAt = isSuccess ? new Date() : null;
+      const maintenanceAmountNum = Number(lockedRow.amountPaid);
+      const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
+
       await tx.userCyclePayment.update({
         where: { id: row.id },
         data: {
@@ -106,9 +137,9 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
       if (row.userId) {
         await tx.billingPaymentLog.create({
           data: {
-            societyId: row.cycle.societyId,
+            societyId: cycle.societyId,
             userId: row.userId,
-            cycleId: row.cycle.id,
+            cycleId: cycle.id,
             status: isSuccess ? "phonepe.payment.success" : "phonepe.payment.failed",
             responsePayload: {
               merchantTransactionId,
@@ -131,14 +162,30 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
           gatewayTransactionId: phonepeTransactionId ?? merchantTransactionId,
         });
       }
+
+      logger.info(
+        { merchantTransactionId, phonepeTransactionId, amount: maintenanceAmountNum, payAllPending, state },
+        "[phonepe webhook] payment settled",
+      );
+
+      return { action: "settled" as const, userId: row.userId, cycleId: cycle.id, isSuccess };
     });
 
-    if (isSuccess && row.userId) {
+    if (result.action === "skip") {
+      res.status(200).json({ ok: true, skipped: true, reason: result.reason });
+      return;
+    }
+    if (result.action === "idempotent") {
+      res.status(200).json({ ok: true, idempotent: true });
+      return;
+    }
+
+    if (result.isSuccess && result.userId) {
       try {
-        await notifyUser(row.userId, {
+        await notifyUser(result.userId, {
           title: "Payment received",
           body: "Your maintenance payment was recorded successfully.",
-          data: { cycleId: row.cycle.id, type: "billing_payment_success" },
+          data: { cycleId: result.cycleId, type: "billing_payment_success" },
         });
       } catch {
         /* optional push */

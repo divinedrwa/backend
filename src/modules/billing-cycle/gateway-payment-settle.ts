@@ -125,6 +125,14 @@ export async function reconcilePhonePeIfCompleted(
   const paidAt = new Date();
 
   await prisma.$transaction(async (tx) => {
+    const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
+      `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+      row.id,
+    );
+    if (!locked || locked.paymentStatus === "SUCCESS") {
+      return; // already settled by webhook
+    }
+
     await tx.userCyclePayment.update({
       where: { id: row.id },
       data: {

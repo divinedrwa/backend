@@ -1,5 +1,5 @@
 import type { Request, Response } from "express";
-import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode } from "@prisma/client";
+import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode, Prisma } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecret } from "./services/razorpay-webhook-verify";
@@ -77,6 +77,8 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
   }
 
   try {
+    // Quick pre-check outside tx — fast-path for replayed webhooks.
+    // NOT relied on for correctness; the real guard is inside the transaction.
     const dup = await prisma.userCyclePayment.findFirst({
       where: { paymentGatewayPaymentId: paymentId, paymentStatus: BillingUserPaymentStatus.SUCCESS },
     });
@@ -85,35 +87,51 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       return;
     }
 
-    const row = await prisma.userCyclePayment.findFirst({
-      where: { paymentGatewayOrderId: orderId },
-      include: {
-        cycle: { select: { societyId: true, id: true } },
-      },
-    });
-
-    if (!row) {
-      // Return 200 to prevent Razorpay from retrying for orders we don't recognize.
-      res.status(200).json({ ok: true, skipped: true, reason: "unknown_order" });
-      return;
-    }
-
-    if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-      res.status(200).json({ ok: true, idempotent: true });
-      return;
-    }
-
-    const isFailure = eventName === "payment.failed";
-    const paidAt = isFailure ? null : new Date();
-    /** Maintenance principal stored at order creation — not the Razorpay gross (fee+GST). */
-    const maintenanceAmountNum = Number(row.amountPaid);
-    const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
     const notes = paymentEntity.notes as Record<string, string> | undefined;
-    const payAllPending =
-      notes?.payAllPending === "true" ||
-      (await isPayAllGatewayPayment(row, "create_order"));
+    const isFailure = eventName === "payment.failed";
 
-    await prisma.$transaction(async (tx) => {
+    // All state reads + writes inside a single transaction with row-level lock
+    const result = await prisma.$transaction(async (tx) => {
+      // Lock the row with FOR UPDATE to prevent concurrent webhooks from
+      // both reading PENDING and double-settling.
+      const [lockedRow] = await tx.$queryRawUnsafe<
+        { id: string; userId: string | null; cycleId: string; amountPaid: string; paymentStatus: string }[]
+      >(
+        `SELECT id, "userId", "cycleId", "amountPaid"::text, "paymentStatus"
+         FROM "UserCyclePayment"
+         WHERE "paymentGatewayOrderId" = $1
+         FOR UPDATE`,
+        orderId,
+      );
+
+      if (!lockedRow) return { action: "skip" as const, reason: "unknown_order" };
+
+      // Idempotency: already settled — return without double-processing
+      if (lockedRow.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+        return { action: "idempotent" as const };
+      }
+
+      const cycle = await tx.billingCycle.findUnique({
+        where: { id: lockedRow.cycleId },
+        select: { societyId: true, id: true },
+      });
+      if (!cycle) return { action: "skip" as const, reason: "cycle_not_found" };
+
+      const row = {
+        id: lockedRow.id,
+        userId: lockedRow.userId,
+        cycleId: lockedRow.cycleId,
+        amountPaid: new Prisma.Decimal(lockedRow.amountPaid),
+        cycle: { societyId: cycle.societyId, id: cycle.id },
+      };
+
+      const paidAt = isFailure ? null : new Date();
+      const maintenanceAmountNum = Number(lockedRow.amountPaid);
+      const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
+      const payAllPending =
+        notes?.payAllPending === "true" ||
+        (await isPayAllGatewayPayment(row, "create_order"));
+
       await tx.userCyclePayment.update({
         where: { id: row.id },
         data: {
@@ -127,9 +145,9 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       if (row.userId) {
         await tx.billingPaymentLog.create({
           data: {
-            societyId: row.cycle.societyId,
+            societyId: cycle.societyId,
             userId: row.userId,
-            cycleId: row.cycle.id,
+            cycleId: cycle.id,
             status: eventName,
             responsePayload: {
               paymentId,
@@ -155,14 +173,30 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
           gatewayTransactionId: paymentId,
         });
       }
+
+      logger.info(
+        { orderId, paymentId, amount: maintenanceAmountNum, payAllPending, event: eventName },
+        "[billing webhook] payment settled",
+      );
+
+      return { action: "settled" as const, userId: row.userId, cycleId: cycle.id, isFailure };
     });
 
-    if (!isFailure && row.userId) {
+    if (result.action === "skip") {
+      res.status(200).json({ ok: true, skipped: true, reason: result.reason });
+      return;
+    }
+    if (result.action === "idempotent") {
+      res.status(200).json({ ok: true, idempotent: true });
+      return;
+    }
+
+    if (!result.isFailure && result.userId) {
       try {
-        await notifyUser(row.userId, {
+        await notifyUser(result.userId, {
           title: "Payment received",
           body: "Your maintenance payment was recorded successfully.",
-          data: { cycleId: row.cycle.id, type: "billing_payment_success" },
+          data: { cycleId: result.cycleId, type: "billing_payment_success" },
         });
       } catch {
         /* optional push */

@@ -216,7 +216,14 @@ export async function verifyPhonePeCallback(
       .update(responseBase64 + "/pg/v1/pay" + config.saltKey)
       .digest("hex") + `###${config.saltIndex}`;
 
-  return expectedChecksum === xVerifyHeader;
+  const expected = Buffer.from(expectedChecksum, "utf8");
+  const received = Buffer.from(xVerifyHeader, "utf8");
+  if (expected.length !== received.length) return false;
+  try {
+    return crypto.timingSafeEqual(expected, received);
+  } catch {
+    return false;
+  }
 }
 
 /**

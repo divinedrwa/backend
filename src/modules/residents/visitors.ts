@@ -3,6 +3,7 @@ import rateLimit from "express-rate-limit";
 import { randomInt } from "node:crypto";
 import { z } from "zod";
 import { logger } from "../../lib/logger";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -81,7 +82,8 @@ async function generateUniqueOtp(societyId: string, maxAttempts = 10): Promise<s
 router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
-    const { limit = "50", status } = req.query;
+    const pagination = getPagination(req);
+    const { status } = req.query;
 
     // Get user's villa
     const user = await prisma.user.findFirst({
@@ -98,44 +100,49 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       ...(user.unitId ? { unitId: user.unitId } : {}),
     };
 
-    // Get visitors for user's villa
-    const visitors = await prisma.visitor.findMany({
-      where: {
-        societyId,
-        villaVisits: {
-          some: visitMatch,
-        },
-        ...(status &&
-          (Object.values(VisitorStatus) as string[]).includes(status as string) && {
-            status: status as VisitorStatus,
-          }),
+    const where = {
+      societyId,
+      villaVisits: {
+        some: visitMatch,
       },
-      include: {
-        gate: {
-          select: {
-            name: true,
-            location: true,
-          },
-        },
-        villaVisits: {
-          where: visitMatch,
-          select: {
-            villa: {
-              select: {
-                villaNumber: true,
-              },
+      ...(status &&
+        (Object.values(VisitorStatus) as string[]).includes(status as string) && {
+          status: status as VisitorStatus,
+        }),
+    };
+
+    const [visitors, total] = await Promise.all([
+      prisma.visitor.findMany({
+        where,
+        include: {
+          gate: {
+            select: {
+              name: true,
+              location: true,
             },
-            unit: { select: { label: true, unitCode: true } },
+          },
+          villaVisits: {
+            where: visitMatch,
+            select: {
+              villa: {
+                select: {
+                  villaNumber: true,
+                },
+              },
+              unit: { select: { label: true, unitCode: true } },
+            },
           },
         },
-      },
-      orderBy: { checkInTime: "desc" },
-      take: parseInt(limit as string),
-    });
+        orderBy: { checkInTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.visitor.count({ where }),
+    ]);
 
     // Calculate summary
     const summary = {
-      total: visitors.length,
+      total,
       today: visitors.filter((v) => {
         const today = new Date().toDateString();
         return new Date(v.checkInTime).toDateString() === today;
@@ -143,7 +150,7 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       checkedIn: visitors.filter((v) => !v.checkOutTime).length,
     };
 
-    return res.json({ visitors, summary });
+    return res.json({ visitors, summary, ...paginationMeta(total, visitors.length, pagination) });
   } catch (error) {
     next(error);
   }

@@ -778,8 +778,7 @@ router.post(
         where: { userId_cycleId: { userId: auth.userId, cycleId } },
       });
       if (
-        existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS &&
-        adjustedDue <= 0
+        existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS
       ) {
         res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
         return;
@@ -1347,7 +1346,11 @@ router.get(
       const { paymentId } = req.params;
 
       const payment = await prisma.userCyclePayment.findFirst({
-        where: { id: paymentId, userId: auth.userId },
+        where: {
+          id: paymentId,
+          cycle: { societyId: auth.societyId },
+          ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
+        },
         include: {
           cycle: true,
           user: { include: { villa: { select: { villaNumber: true, ownerName: true } } } },
@@ -1528,7 +1531,11 @@ router.get(
       const { txnId } = req.params;
 
       const localRow = await prisma.userCyclePayment.findFirst({
-        where: { paymentGatewayOrderId: txnId, cycle: { societyId: auth.societyId } },
+        where: {
+          paymentGatewayOrderId: txnId,
+          cycle: { societyId: auth.societyId },
+          ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
+        },
         select: { id: true, paymentStatus: true },
       });
 
@@ -1551,6 +1558,10 @@ router.get(
   }
 );
 
+function escapeHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+
 router.get("/payments/phonepe/redirect", (req, res) => {
   const txnId = req.query.txnId ?? "";
   res.setHeader("Content-Type", "text/html");
@@ -1568,7 +1579,7 @@ router.get("/payments/phonepe/redirect", (req, res) => {
 <div class="spinner"></div>
 <h2>Payment Processing</h2>
 <p>Your payment is being verified. You may close this window and return to the app.</p>
-<p style="color:#888;font-size:13px">Transaction: ${String(txnId).slice(0, 36)}</p>
+<p style="color:#888;font-size:13px">Transaction: ${escapeHtml(String(txnId).slice(0, 36))}</p>
 </div>
 </body></html>`);
 });
