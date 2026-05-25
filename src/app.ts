@@ -7,6 +7,7 @@ import helmet from "helmet";
 import path from "path";
 import pinoHttp from "pino-http";
 import routes from "./routes";
+import swaggerRoutes from "./routes/swagger";
 import { errorHandler } from "./middlewares/error";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
@@ -163,5 +164,6 @@ app.use((req, res, next) => {
   next();
 });
 
+app.use("/api", swaggerRoutes);
 app.use("/api", routes);
 app.use(errorHandler);
