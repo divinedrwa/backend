@@ -6,6 +6,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { logger } from "../../lib/logger";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
@@ -17,6 +18,9 @@ import {
 } from "../../services/phonepe-billing";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
 import { reconcilePhonePeIfCompleted } from "./gateway-payment-settle";
+
+/** PhonePe states that mean the payment is completed. */
+const PHONEPE_COMPLETED_STATES = new Set(["COMPLETED", "PAYMENT_SUCCESS"]);
 
 const router = Router();
 
@@ -177,9 +181,15 @@ router.get(
       });
 
       const phonepeResult = await checkPhonePeStatus(auth.societyId, txnId);
+      logger.info(
+        { txnId, localStatus: localRow?.paymentStatus, phonepeState: phonepeResult?.state, phonepeSuccess: phonepeResult?.success },
+        "[phonepe status] poll result",
+      );
 
       let status = localRow?.paymentStatus ?? "UNKNOWN";
-      if (status !== BillingUserPaymentStatus.SUCCESS && phonepeResult?.state === "COMPLETED") {
+      const phonepeCompleted = phonepeResult != null &&
+        (PHONEPE_COMPLETED_STATES.has(phonepeResult.state) || (phonepeResult.success && phonepeResult.state !== "PENDING" && phonepeResult.state !== "FAILED"));
+      if (status !== BillingUserPaymentStatus.SUCCESS && phonepeCompleted) {
         const reconciled = await reconcilePhonePeIfCompleted(auth.societyId, txnId);
         if (reconciled.status) status = reconciled.status;
       }

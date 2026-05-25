@@ -116,7 +116,9 @@ export async function reconcilePhonePeIfCompleted(
 
   const { checkPhonePeStatus } = await import("../../services/phonepe-billing");
   const phonepeResult = await checkPhonePeStatus(societyId, merchantTransactionId);
-  if (!phonepeResult?.success || phonepeResult.state !== "COMPLETED") {
+  const isCompleted = phonepeResult?.success &&
+    phonepeResult.state !== "PENDING" && phonepeResult.state !== "FAILED";
+  if (!isCompleted) {
     return { reconciled: false, status: row.paymentStatus };
   }
 
