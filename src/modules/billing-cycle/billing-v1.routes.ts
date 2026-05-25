@@ -721,8 +721,8 @@ router.post(
 
       if (!payAllPending) {
         const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
-        if (serverStatus !== BillingCycleStatus.OPEN) {
-          res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
+        if (serverStatus === BillingCycleStatus.UPCOMING) {
+          res.status(400).json({ message: "Cycle is not yet open for payment", code: "CYCLE_NOT_OPEN" });
           return;
         }
       }
@@ -1421,8 +1421,8 @@ router.post(
 
       if (!payAllPending) {
         const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
-        if (serverStatus !== BillingCycleStatus.OPEN) {
-          res.status(400).json({ message: "Cycle is not open for online payment", code: "CYCLE_NOT_OPEN" });
+        if (serverStatus === BillingCycleStatus.UPCOMING) {
+          res.status(400).json({ message: "Cycle is not yet open for payment", code: "CYCLE_NOT_OPEN" });
           return;
         }
       }
