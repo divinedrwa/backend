@@ -21,7 +21,7 @@ import {
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
 import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
-import { reconcileRazorpayFromPoll } from "./gateway-payment-settle";
+import { isGatewayLedgerSynced, reconcileRazorpayFromPoll } from "./gateway-payment-settle";
 import {
   computeRazorpayCheckoutBreakup,
   getRazorpayGatewayFeeConfigForSociety,
@@ -253,7 +253,14 @@ router.get(
           cycle: { societyId: auth.societyId },
           ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
         },
-        select: { id: true, paymentStatus: true },
+        select: {
+          id: true,
+          paymentStatus: true,
+          userId: true,
+          cycleId: true,
+          amountPaid: true,
+          cycle: { select: { societyId: true, id: true } },
+        },
       });
 
       if (!localRow) {
@@ -299,6 +306,17 @@ router.get(
         "[razorpay status] poll result",
       );
 
+      const ledgerSynced = await isGatewayLedgerSynced(
+        {
+          id: localRow.id,
+          userId: localRow.userId,
+          cycleId: localRow.cycleId,
+          amountPaid: localRow.amountPaid,
+          cycle: { societyId: localRow.cycle.societyId, id: localRow.cycle.id },
+        },
+        orderId,
+      );
+
       res.json({
         status,
         outcome: poll.outcome,
@@ -306,6 +324,7 @@ router.get(
         razorpayCode: poll.gateway.rawCode ?? null,
         razorpayAvailable: poll.gateway.gatewayReachable,
         reconciled: poll.reconciled,
+        ledgerSynced,
         paymentId: localRow.id,
         detail: poll.gateway.detail ?? null,
       });

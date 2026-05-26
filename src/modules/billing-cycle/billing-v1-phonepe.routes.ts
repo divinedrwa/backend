@@ -17,7 +17,7 @@ import {
 } from "../../services/phonepe-billing";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
 import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
-import { reconcilePhonePeFromPoll } from "./gateway-payment-settle";
+import { isGatewayLedgerSynced, reconcilePhonePeFromPoll } from "./gateway-payment-settle";
 
 function buildMerchantTransactionId(cycleKey: string, userId: string): string {
   const safeKey = cycleKey.replace(/[^a-zA-Z0-9]/g, "");
@@ -208,7 +208,14 @@ router.get(
           cycle: { societyId: auth.societyId },
           ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
         },
-        select: { id: true, paymentStatus: true },
+        select: {
+          id: true,
+          paymentStatus: true,
+          userId: true,
+          cycleId: true,
+          amountPaid: true,
+          cycle: { select: { societyId: true, id: true } },
+        },
       });
 
       if (!localRow) {
@@ -254,6 +261,17 @@ router.get(
         "[phonepe status] poll result",
       );
 
+      const ledgerSynced = await isGatewayLedgerSynced(
+        {
+          id: localRow.id,
+          userId: localRow.userId,
+          cycleId: localRow.cycleId,
+          amountPaid: localRow.amountPaid,
+          cycle: { societyId: localRow.cycle.societyId, id: localRow.cycle.id },
+        },
+        txnId,
+      );
+
       res.json({
         status,
         outcome: poll.outcome,
@@ -261,6 +279,7 @@ router.get(
         phonepeCode: poll.gateway.rawCode ?? null,
         phonepeAvailable: poll.gateway.gatewayReachable,
         reconciled: poll.reconciled,
+        ledgerSynced,
         paymentId: localRow.id,
         detail: poll.gateway.detail ?? null,
       });

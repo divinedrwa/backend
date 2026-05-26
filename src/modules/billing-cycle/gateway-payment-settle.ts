@@ -126,6 +126,47 @@ export async function applyGatewayPaymentSuccess(
   );
 }
 
+/** True when maintenance-management ledger reflects payment (admin grid + resident dues). */
+export async function isGatewayLedgerSynced(
+  row: PaymentRow,
+  gatewayTransactionId: string,
+): Promise<boolean> {
+  if (await hasGatewayMaintenancePayment(row, gatewayTransactionId)) {
+    return true;
+  }
+  if (!row.userId) return false;
+
+  const user = await prisma.user.findUnique({
+    where: { id: row.userId },
+    select: { villaId: true },
+  });
+  if (!user?.villaId) return false;
+
+  const billingCycle = await prisma.billingCycle.findUnique({
+    where: { id: row.cycleId },
+    select: { cycleKey: true, financialYearId: true, societyId: true },
+  });
+  if (!billingCycle?.financialYearId) return false;
+
+  const maintenanceCycle = await prisma.maintenanceCollectionCycle.findFirst({
+    where: {
+      societyId: billingCycle.societyId,
+      financialYearId: billingCycle.financialYearId,
+      periodKey: billingCycle.cycleKey,
+    },
+    select: { id: true },
+  });
+  if (!maintenanceCycle) return false;
+
+  const snap = await prisma.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycle.id, villaId: user.villaId } },
+    select: { status: true, expectedAmount: true, paidAmount: true },
+  });
+  if (!snap) return false;
+  if (snap.status === "PAID" || snap.status === "WAIVED") return true;
+  return Number(snap.paidAmount) >= Number(snap.expectedAmount) - 0.005;
+}
+
 async function hasGatewayMaintenancePayment(
   row: PaymentRow,
   gatewayTransactionId: string,
@@ -197,9 +238,9 @@ export async function reconcilePhonePeFromPoll(
   }
 
   if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-    const ledgerOk = await hasGatewayMaintenancePayment(row, merchantTransactionId);
+    let ledgerSynced = await isGatewayLedgerSynced(row, merchantTransactionId);
     if (
-      !ledgerOk &&
+      !ledgerSynced &&
       (gateway.outcome === "completed" ||
         isPhonePePaymentSuccessful(gateway.gatewaySuccessFlag, gateway.rawState, gateway.rawCode))
     ) {
@@ -212,6 +253,7 @@ export async function reconcilePhonePeFromPoll(
         logStatus: "phonepe.poll.repair",
         gatewayPayload: { merchantTransactionId, rawState: gateway.rawState, rawCode: gateway.rawCode },
       });
+      ledgerSynced = repaired.ok;
       if (repaired.ok) {
         return {
           reconciled: true,
@@ -224,7 +266,24 @@ export async function reconcilePhonePeFromPoll(
         reconciled: false,
         status: row.paymentStatus,
         outcome: "reconcile_failed",
-        gateway: { ...gateway, detail: repaired.detail },
+        gateway: {
+          ...gateway,
+          detail:
+            repaired.detail ??
+            "Payment is marked paid but maintenance ledger was not updated. Tap Check again.",
+        },
+      };
+    }
+    if (!ledgerSynced) {
+      return {
+        reconciled: false,
+        status: row.paymentStatus,
+        outcome: "reconcile_failed",
+        gateway: {
+          ...gateway,
+          detail:
+            "Payment is marked paid but villa ledger is not updated. Ask admin to sync billing cycle to maintenance collection.",
+        },
       };
     }
     return {
@@ -466,8 +525,8 @@ export async function reconcileRazorpayFromPoll(
   const razorpayPaymentId = gateway.gatewayTransactionId ?? orderId;
 
   if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-    const ledgerOk = await hasGatewayMaintenancePayment(row, razorpayPaymentId);
-    if (!ledgerOk && gateway.outcome === "completed") {
+    let ledgerSynced = await isGatewayLedgerSynced(row, razorpayPaymentId);
+    if (!ledgerSynced && gateway.outcome === "completed") {
       const repaired = await repairGatewayLedger(row, {
         gatewayTransactionId: razorpayPaymentId,
         maintenanceAmount: Number(row.amountPaid),
@@ -477,6 +536,7 @@ export async function reconcileRazorpayFromPoll(
         logStatus: "razorpay.poll.repair",
         gatewayPayload: { orderId, razorpayPaymentId, rawState: gateway.rawState, rawCode: gateway.rawCode },
       });
+      ledgerSynced = repaired.ok;
       if (repaired.ok) {
         return {
           reconciled: true,
@@ -490,6 +550,18 @@ export async function reconcileRazorpayFromPoll(
         status: row.paymentStatus,
         outcome: "reconcile_failed",
         gateway: { ...gateway, detail: repaired.detail },
+      };
+    }
+    if (!ledgerSynced) {
+      return {
+        reconciled: false,
+        status: row.paymentStatus,
+        outcome: "reconcile_failed",
+        gateway: {
+          ...gateway,
+          detail:
+            "Payment is marked paid but maintenance ledger was not updated. Tap Check again or contact admin.",
+        },
       };
     }
     return {

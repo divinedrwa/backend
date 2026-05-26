@@ -403,9 +403,15 @@ export async function computeUserBillingLedger(
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
       cashPaidAmount = Math.max(snapPaid, gatewayPaid);
 
-      if (snap.status === "PAID" || snap.status === "WAIVED") {
+      const effectivelyPaid =
+        snap.status === "PAID" ||
+        snap.status === "WAIVED" ||
+        cashPaidAmount >= expectedAmount - 0.005 ||
+        snapPaid >= expectedAmount - 0.005;
+
+      if (effectivelyPaid) {
         paymentStatus = BillingUserPaymentStatus.SUCCESS;
-      } else if (cashPaidAmount > 0 || snap.status === "PARTIAL") {
+      } else if (cashPaidAmount > 0.005 || snap.status === "PARTIAL") {
         paymentStatus = BillingUserPaymentStatus.PENDING;
       } else {
         paymentStatus = p?.paymentStatus ?? "NONE";
