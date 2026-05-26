@@ -8,6 +8,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import crypto from "node:crypto";
+import { isPhonePePaymentSuccessful } from "./phonepe-status.js";
 
 // ---------------------------------------------------------------------------
 // Reproduce the pure-function parts of phonepe-billing so we can test them
@@ -159,6 +160,20 @@ describe("PhonePe callback verification", () => {
     const almostRight = hexPart.slice(0, -1) + flipped + "###" + saltIndex;
 
     assert.equal(verifyChecksum(almostRight, expected), false);
+  });
+});
+
+describe("PhonePe payment success detection", () => {
+  it("accepts COMPLETED and PAYMENT_SUCCESS states", () => {
+    assert.equal(isPhonePePaymentSuccessful(true, "COMPLETED"), true);
+    assert.equal(isPhonePePaymentSuccessful(true, "PAYMENT_SUCCESS"), true);
+    assert.equal(isPhonePePaymentSuccessful(true, "PAYMENT_SUCCESS", "PAYMENT_PENDING"), true);
+  });
+
+  it("rejects PENDING and FAILED", () => {
+    assert.equal(isPhonePePaymentSuccessful(false, "PENDING"), false);
+    assert.equal(isPhonePePaymentSuccessful(true, "FAILED"), false);
+    assert.equal(isPhonePePaymentSuccessful(true, "PAYMENT_ERROR"), false);
   });
 });
 

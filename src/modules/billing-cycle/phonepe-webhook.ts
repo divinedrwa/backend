@@ -2,7 +2,12 @@ import type { Request, Response } from "express";
 import { BillingPaymentSource, BillingUserPaymentStatus, PaymentMode, Prisma } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
-import { verifyPhonePeCallback } from "../../services/phonepe-billing";
+import {
+  classifyPhonePeGatewayPayload,
+  isPhonePePaymentFailed,
+  isPhonePePaymentSuccessful,
+  verifyPhonePeCallback,
+} from "../../services/phonepe-billing";
 import { notifyUser } from "../../services/notification.service";
 import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
 
@@ -43,9 +48,17 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
   const merchantTransactionId = decoded.data?.merchantTransactionId;
   const phonepeTransactionId = decoded.data?.transactionId;
   const amountPaise = decoded.data?.amount ?? 0;
-  const state = decoded.data?.state ?? decoded.code ?? "UNKNOWN";
-  const isSuccess = decoded.success === true && state === "COMPLETED";
-  const isFailure = state === "FAILED" || state === "PAYMENT_ERROR";
+  const classified = classifyPhonePeGatewayPayload({
+    success: decoded.success,
+    code: decoded.code,
+    data: decoded.data,
+  });
+  const state = classified.rawState;
+  const isSuccess =
+    classified.outcome === "completed" ||
+    isPhonePePaymentSuccessful(decoded.success === true, state, classified.rawCode);
+  const isFailure =
+    classified.outcome === "failed" || isPhonePePaymentFailed(state, classified.rawCode);
 
   if (!merchantTransactionId) {
     res.status(400).json({ message: "Missing merchantTransactionId in response" });

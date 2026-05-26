@@ -6,6 +6,15 @@ import {
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
+import {
+  checkPhonePeStatus,
+  isPhonePePaymentSuccessful,
+  mergePhonePeStatusWithLocal,
+  type PhonePeSettlementOutcome,
+  type PhonePeStatusResult,
+} from "../../services/phonepe-billing";
+import { checkRazorpayOrderStatus } from "./services/razorpay-billing";
+import { mergeRazorpayStatusWithLocal } from "../../services/razorpay-status";
 import { syncLedgerForPayment } from "./ledger-sync";
 
 type PaymentRow = {
@@ -97,29 +106,88 @@ export async function applyGatewayPaymentSuccess(
   await syncLedgerForPayment(tx, row, maintenanceAmount, paidAt, paymentMode, remarks);
 }
 
+export type PhonePePollReconcileResult = {
+  reconciled: boolean;
+  status: BillingUserPaymentStatus | null;
+  outcome: PhonePeSettlementOutcome;
+  gateway: PhonePeStatusResult;
+};
+
 /**
- * Poll reconciliation when PhonePe callback is delayed but status API shows COMPLETED.
+ * Poll PhonePe status API and sync local payment row (success → ledger, failure → FAILED).
  */
-export async function reconcilePhonePeIfCompleted(
+export async function reconcilePhonePeFromPoll(
   societyId: string,
   merchantTransactionId: string,
-): Promise<{ reconciled: boolean; status: BillingUserPaymentStatus | null }> {
+): Promise<PhonePePollReconcileResult> {
   const row = await prisma.userCyclePayment.findFirst({
     where: { paymentGatewayOrderId: merchantTransactionId, cycle: { societyId } },
     include: { cycle: { select: { societyId: true, id: true } } },
   });
 
-  if (!row) return { reconciled: false, status: null };
-  if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-    return { reconciled: false, status: row.paymentStatus };
+  const gatewayRaw = await checkPhonePeStatus(societyId, merchantTransactionId);
+  const gateway = mergePhonePeStatusWithLocal(gatewayRaw, row?.paymentStatus);
+
+  if (!row) {
+    return { reconciled: false, status: null, outcome: gateway.outcome, gateway };
   }
 
-  const { checkPhonePeStatus } = await import("../../services/phonepe-billing");
-  const phonepeResult = await checkPhonePeStatus(societyId, merchantTransactionId);
-  const isCompleted = phonepeResult?.success &&
-    phonepeResult.state !== "PENDING" && phonepeResult.state !== "FAILED";
-  if (!isCompleted) {
-    return { reconciled: false, status: row.paymentStatus };
+  if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+    return {
+      reconciled: false,
+      status: row.paymentStatus,
+      outcome: "recorded",
+      gateway,
+    };
+  }
+
+  if (gateway.outcome === "failed") {
+    await prisma.$transaction(async (tx) => {
+      const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
+        `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+        row.id,
+      );
+      if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;
+
+      await tx.userCyclePayment.update({
+        where: { id: row.id },
+        data: {
+          paymentStatus: BillingUserPaymentStatus.FAILED,
+          paidAt: null,
+          source: BillingPaymentSource.GATEWAY,
+        },
+      });
+
+      if (row.userId) {
+        await tx.billingPaymentLog.create({
+          data: {
+            societyId: row.cycle.societyId,
+            userId: row.userId,
+            cycleId: row.cycle.id,
+            status: "phonepe.poll.failed",
+            responsePayload: {
+              merchantTransactionId,
+              rawState: gateway.rawState,
+              rawCode: gateway.rawCode,
+            } as object,
+          },
+        });
+      }
+    });
+
+    return {
+      reconciled: true,
+      status: BillingUserPaymentStatus.FAILED,
+      outcome: "failed",
+      gateway,
+    };
+  }
+
+  if (
+    gateway.outcome !== "completed" &&
+    !isPhonePePaymentSuccessful(gateway.gatewaySuccessFlag, gateway.rawState, gateway.rawCode)
+  ) {
+    return { reconciled: false, status: row.paymentStatus, outcome: gateway.outcome, gateway };
   }
 
   const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
@@ -131,8 +199,8 @@ export async function reconcilePhonePeIfCompleted(
       `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
       row.id,
     );
-    if (!locked || locked.paymentStatus === "SUCCESS") {
-      return; // already settled by webhook
+    if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+      return;
     }
 
     await tx.userCyclePayment.update({
@@ -151,7 +219,11 @@ export async function reconcilePhonePeIfCompleted(
           userId: row.userId,
           cycleId: row.cycle.id,
           status: "phonepe.poll.reconcile",
-          responsePayload: { merchantTransactionId, state: phonepeResult.state } as object,
+          responsePayload: {
+            merchantTransactionId,
+            rawState: gateway.rawState,
+            rawCode: gateway.rawCode,
+          } as object,
         },
       });
     }
@@ -167,5 +239,156 @@ export async function reconcilePhonePeIfCompleted(
     });
   });
 
-  return { reconciled: true, status: BillingUserPaymentStatus.SUCCESS };
+  return {
+    reconciled: true,
+    status: BillingUserPaymentStatus.SUCCESS,
+    outcome: "completed",
+    gateway,
+  };
+}
+
+/** @deprecated Use reconcilePhonePeFromPoll */
+export async function reconcilePhonePeIfCompleted(
+  societyId: string,
+  merchantTransactionId: string,
+): Promise<{ reconciled: boolean; status: BillingUserPaymentStatus | null }> {
+  const result = await reconcilePhonePeFromPoll(societyId, merchantTransactionId);
+  return { reconciled: result.reconciled, status: result.status };
+}
+
+export type GatewayPollReconcileResult = PhonePePollReconcileResult;
+
+/**
+ * Poll Razorpay order API and sync local payment (success → ledger, failure → FAILED).
+ * Used when SDK reports success before webhook lands.
+ */
+export async function reconcileRazorpayFromPoll(
+  societyId: string,
+  orderId: string,
+): Promise<GatewayPollReconcileResult> {
+  const row = await prisma.userCyclePayment.findFirst({
+    where: { paymentGatewayOrderId: orderId, cycle: { societyId } },
+    include: { cycle: { select: { societyId: true, id: true } } },
+  });
+
+  const gatewayRaw = await checkRazorpayOrderStatus(societyId, orderId);
+  const gateway = mergeRazorpayStatusWithLocal(gatewayRaw, row?.paymentStatus);
+
+  if (!row) {
+    return { reconciled: false, status: null, outcome: gateway.outcome, gateway };
+  }
+
+  if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+    return {
+      reconciled: false,
+      status: row.paymentStatus,
+      outcome: "recorded",
+      gateway,
+    };
+  }
+
+  if (gateway.outcome === "failed") {
+    await prisma.$transaction(async (tx) => {
+      const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
+        `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+        row.id,
+      );
+      if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;
+
+      await tx.userCyclePayment.update({
+        where: { id: row.id },
+        data: {
+          paymentStatus: BillingUserPaymentStatus.FAILED,
+          paidAt: null,
+          source: BillingPaymentSource.GATEWAY,
+        },
+      });
+
+      if (row.userId) {
+        await tx.billingPaymentLog.create({
+          data: {
+            societyId: row.cycle.societyId,
+            userId: row.userId,
+            cycleId: row.cycle.id,
+            status: "razorpay.poll.failed",
+            responsePayload: {
+              orderId,
+              rawState: gateway.rawState,
+              rawCode: gateway.rawCode,
+            } as object,
+          },
+        });
+      }
+    });
+
+    return {
+      reconciled: true,
+      status: BillingUserPaymentStatus.FAILED,
+      outcome: "failed",
+      gateway,
+    };
+  }
+
+  if (gateway.outcome !== "completed") {
+    return { reconciled: false, status: row.paymentStatus, outcome: gateway.outcome, gateway };
+  }
+
+  const payAllPending = await isPayAllGatewayPayment(row, "create_order");
+  const maintenanceAmount = Number(row.amountPaid);
+  const paidAt = new Date();
+  const razorpayPaymentId = gateway.gatewayTransactionId ?? orderId;
+
+  await prisma.$transaction(async (tx) => {
+    const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
+      `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+      row.id,
+    );
+    if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+      return;
+    }
+
+    await tx.userCyclePayment.update({
+      where: { id: row.id },
+      data: {
+        paymentStatus: BillingUserPaymentStatus.SUCCESS,
+        paymentGatewayPaymentId: razorpayPaymentId,
+        paidAt,
+        source: BillingPaymentSource.GATEWAY,
+      },
+    });
+
+    if (row.userId) {
+      await tx.billingPaymentLog.create({
+        data: {
+          societyId: row.cycle.societyId,
+          userId: row.userId,
+          cycleId: row.cycle.id,
+          status: "razorpay.poll.reconcile",
+          responsePayload: {
+            orderId,
+            razorpayPaymentId,
+            rawState: gateway.rawState,
+            rawCode: gateway.rawCode,
+          } as object,
+        },
+      });
+    }
+
+    await applyGatewayPaymentSuccess(tx, {
+      row,
+      maintenanceAmount,
+      paidAt,
+      paymentMode: PaymentMode.ONLINE,
+      remarks: payAllPending ? "Razorpay pay-all poll reconciliation" : "Razorpay poll reconciliation",
+      payAllPending,
+      gatewayTransactionId: razorpayPaymentId,
+    });
+  });
+
+  return {
+    reconciled: true,
+    status: BillingUserPaymentStatus.SUCCESS,
+    outcome: "completed",
+    gateway,
+  };
 }

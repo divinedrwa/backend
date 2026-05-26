@@ -161,3 +161,61 @@ export async function getWebhookSecretForSociety(societyId: string): Promise<str
 
   return process.env.RAZORPAY_WEBHOOK_SECRET;
 }
+
+type RazorpayPaymentItem = { id?: string; status?: string; amount?: number };
+
+/**
+ * Poll Razorpay order + payments. Always returns a structured result (never null).
+ */
+export async function checkRazorpayOrderStatus(
+  societyId: string,
+  orderId: string,
+): Promise<import("../../../services/razorpay-status").RazorpayStatusResult> {
+  const {
+    buildRazorpayStatusPending,
+    buildRazorpayStatusUnavailable,
+    classifyRazorpayOrderAndPayments,
+  } = await import("../../../services/razorpay-status");
+
+  const rzp = await getClientForSociety(societyId);
+  if (!rzp) {
+    return buildRazorpayStatusUnavailable("Razorpay is not configured for this society");
+  }
+
+  try {
+    const order = (await rzp.orders.fetch(orderId)) as { status?: string };
+    let payments: RazorpayPaymentItem[] = [];
+    try {
+      const paymentList = (await rzp.orders.fetchPayments(orderId)) as {
+        items?: RazorpayPaymentItem[];
+      };
+      payments = paymentList.items ?? [];
+    } catch (payErr) {
+      logger.warn({ err: payErr, orderId }, "[razorpay] fetchPayments failed — using order status only");
+    }
+
+    const classified = classifyRazorpayOrderAndPayments({
+      orderStatus: order.status,
+      payments,
+    });
+
+    const captured = payments.find((p) => (p.status ?? "").toLowerCase() === "captured");
+    return {
+      ...classified,
+      gatewayReachable: true,
+      amountPaise: captured?.amount,
+      gatewayTransactionId: classified.gatewayTransactionId ?? captured?.id,
+    };
+  } catch (error) {
+    const err = error as { statusCode?: number; error?: { code?: string; description?: string } };
+    if (err.statusCode === 400 || err.error?.code === "BAD_REQUEST_ERROR") {
+      return buildRazorpayStatusPending(
+        err.error?.description ?? "Order not found or not ready at Razorpay",
+      );
+    }
+    logger.error({ err: error, orderId }, "[razorpay] order status check error");
+    return buildRazorpayStatusUnavailable(
+      error instanceof Error ? error.message : "Razorpay status request failed",
+    );
+  }
+}

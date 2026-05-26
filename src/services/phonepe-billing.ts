@@ -4,6 +4,26 @@ import { prisma } from "../lib/prisma";
 import { isEncrypted } from "../lib/paymentSecrets";
 import { decryptConfigSecrets } from "../modules/payment-methods/service";
 import { logger } from "../lib/logger";
+import {
+  buildPhonePeStatusPending,
+  buildPhonePeStatusUnavailable,
+  classifyPhonePeGatewayPayload,
+  isPhonePePaymentFailed,
+  isPhonePePaymentSuccessful,
+  type PhonePeStatusResult,
+} from "./phonepe-status";
+
+export {
+  PHONEPE_COMPLETED_STATES,
+  PHONEPE_FAILED_STATES,
+  PHONEPE_PENDING_STATES,
+  isPhonePePaymentSuccessful,
+  isPhonePePaymentFailed,
+  classifyPhonePeGatewayPayload,
+  mergePhonePeStatusWithLocal,
+  type PhonePeSettlementOutcome,
+  type PhonePeStatusResult,
+} from "./phonepe-status";
 
 export type PhonePeConfig = {
   merchantId: string;
@@ -158,14 +178,16 @@ export async function initiatePhonePePayment(
 }
 
 /**
- * Check the status of a PhonePe transaction.
+ * Check PhonePe transaction status. Always returns a structured result (never null).
  */
 export async function checkPhonePeStatus(
   societyId: string,
   merchantTransactionId: string,
-): Promise<{ success: boolean; state: string; amount?: number } | null> {
+): Promise<PhonePeStatusResult> {
   const config = await getPhonePeConfig(societyId);
-  if (!config) return null;
+  if (!config) {
+    return buildPhonePeStatusUnavailable("PhonePe is not configured for this society");
+  }
 
   const path = `/pg/v1/status/${config.merchantId}/${merchantTransactionId}`;
   const checksum =
@@ -186,20 +208,49 @@ export async function checkPhonePeStatus(
       },
     });
 
-    const data = (await response.json()) as {
-      success: boolean;
-      code: string;
-      data?: { state: string; amount?: number };
-    };
+    if (response.status === 204 || response.status === 404) {
+      return buildPhonePeStatusPending(
+        response.status === 404 ? "Transaction not found at PhonePe yet" : "PhonePe has no status yet (pending)",
+        response.status,
+      );
+    }
 
+    const raw = await response.text();
+    if (!raw.trim()) {
+      logger.warn(
+        { merchantTransactionId, httpStatus: response.status },
+        "[phonepe] status check empty body",
+      );
+      return buildPhonePeStatusPending("Empty response from PhonePe status API", response.status);
+    }
+
+    let data: Parameters<typeof classifyPhonePeGatewayPayload>[0];
+    try {
+      data = JSON.parse(raw) as typeof data;
+    } catch {
+      logger.error(
+        { merchantTransactionId, httpStatus: response.status, raw: raw.slice(0, 200) },
+        "[phonepe] status check non-JSON body",
+      );
+      return {
+        ...buildPhonePeStatusUnavailable("Invalid JSON from PhonePe status API"),
+        httpStatus: response.status,
+        gatewayReachable: true,
+      };
+    }
+
+    const classified = classifyPhonePeGatewayPayload(data);
     return {
-      success: data.success,
-      state: data.data?.state ?? data.code,
-      amount: data.data?.amount,
+      ...classified,
+      gatewayReachable: true,
+      httpStatus: response.status,
+      detail: data.message,
     };
   } catch (error) {
-    logger.error({ err: error }, "[phonepe] status check error");
-    return null;
+    logger.error({ err: error, merchantTransactionId }, "[phonepe] status check error");
+    return buildPhonePeStatusUnavailable(
+      error instanceof Error ? error.message : "PhonePe status request failed",
+    );
   }
 }
 

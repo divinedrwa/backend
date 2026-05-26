@@ -6,6 +6,10 @@ import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecre
 import { getWebhookSecretForSociety } from "./services/razorpay-billing";
 import { notifyUser } from "../../services/notification.service";
 import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
+import {
+  isRazorpayWebhookFailEvent,
+  isRazorpayWebhookSettleEvent,
+} from "../../services/razorpay-status";
 
 /**
  * Razorpay webhook — raw Buffer body. Mounted with express.raw before json().
@@ -66,7 +70,15 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
   const orderId = typeof paymentEntity.order_id === "string" ? paymentEntity.order_id : undefined;
   const amountPaise = Number(paymentEntity.amount ?? 0);
 
-  if (!eventName.startsWith("payment.")) {
+  if (!eventName.startsWith("payment.") && !eventName.startsWith("order.")) {
+    res.status(200).json({ received: true, ignored: eventName });
+    return;
+  }
+
+  const isSuccess = isRazorpayWebhookSettleEvent(eventName);
+  const isFailure = isRazorpayWebhookFailEvent(eventName);
+
+  if (!isSuccess && !isFailure) {
     res.status(200).json({ received: true, ignored: eventName });
     return;
   }
@@ -88,7 +100,6 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
     }
 
     const notes = paymentEntity.notes as Record<string, string> | undefined;
-    const isFailure = eventName === "payment.failed";
 
     // All state reads + writes inside a single transaction with row-level lock
     const result = await prisma.$transaction(async (tx) => {

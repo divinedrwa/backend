@@ -20,6 +20,7 @@ import {
   getPublishableKeyForSociety,
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
+import { reconcileRazorpayFromPoll } from "./gateway-payment-settle";
 import {
   computeRazorpayCheckoutBreakup,
   getRazorpayGatewayFeeConfigForSociety,
@@ -226,6 +227,67 @@ router.post(
       });
     }
   }
+);
+
+router.get(
+  "/payments/razorpay/status/:orderId",
+  requireAuth,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { orderId } = req.params;
+
+      const localRow = await prisma.userCyclePayment.findFirst({
+        where: {
+          paymentGatewayOrderId: orderId,
+          cycle: { societyId: auth.societyId },
+          ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
+        },
+        select: { id: true, paymentStatus: true },
+      });
+
+      if (!localRow) {
+        res.status(404).json({
+          message: "Payment not found for this order",
+          code: "PAYMENT_NOT_FOUND",
+          status: "UNKNOWN",
+          outcome: "unknown",
+        });
+        return;
+      }
+
+      const poll = await reconcileRazorpayFromPoll(auth.societyId, orderId);
+      const status =
+        poll.status ?? localRow.paymentStatus ?? BillingUserPaymentStatus.PENDING;
+
+      logger.info(
+        {
+          orderId,
+          localStatus: localRow.paymentStatus,
+          status,
+          outcome: poll.outcome,
+          razorpayState: poll.gateway.rawState,
+          razorpayCode: poll.gateway.rawCode,
+          reconciled: poll.reconciled,
+        },
+        "[razorpay status] poll result",
+      );
+
+      res.json({
+        status,
+        outcome: poll.outcome,
+        razorpayState: poll.gateway.rawState,
+        razorpayCode: poll.gateway.rawCode ?? null,
+        razorpayAvailable: poll.gateway.gatewayReachable,
+        reconciled: poll.reconciled,
+        paymentId: localRow.id,
+        detail: poll.gateway.detail ?? null,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
 );
 
 export default router;

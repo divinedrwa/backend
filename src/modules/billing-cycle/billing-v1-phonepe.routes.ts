@@ -13,14 +13,17 @@ import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { computeUserBillingLedger } from "./services/cycle-service";
 import {
   initiatePhonePePayment,
-  checkPhonePeStatus,
   isPhonePeConfiguredForSociety,
 } from "../../services/phonepe-billing";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
-import { reconcilePhonePeIfCompleted } from "./gateway-payment-settle";
+import { reconcilePhonePeFromPoll } from "./gateway-payment-settle";
 
-/** PhonePe states that mean the payment is completed. */
-const PHONEPE_COMPLETED_STATES = new Set(["COMPLETED", "PAYMENT_SUCCESS"]);
+function buildMerchantTransactionId(cycleKey: string, userId: string): string {
+  const safeKey = cycleKey.replace(/[^a-zA-Z0-9]/g, "");
+  const safeUser = userId.replace(/[^a-zA-Z0-9]/g, "").slice(-10);
+  const suffix = Date.now().toString(36);
+  return `pp${safeKey}${safeUser}${suffix}`.slice(0, 35);
+}
 
 const router = Router();
 
@@ -98,10 +101,29 @@ router.post(
         return;
       }
 
-      const apiBaseUrl = process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 4000}`;
-      const merchantTransactionId = `pp_${cycle.cycleKey}_${auth.userId.slice(-8)}_${Date.now().toString(36)}`.slice(0, 36);
+      const apiBaseUrl = (process.env.API_BASE_URL || `http://localhost:${process.env.PORT || 4000}`).replace(
+        /\/$/,
+        "",
+      );
+      if (
+        process.env.NODE_ENV === "production" &&
+        /localhost|127\.0\.0\.1/i.test(apiBaseUrl)
+      ) {
+        logger.error(
+          { apiBaseUrl },
+          "[phonepe] API_BASE_URL is localhost in production — PhonePe cannot deliver callbacks",
+        );
+        res.status(503).json({
+          message:
+            "PhonePe callback URL is not configured. Set API_BASE_URL on the server to your public HTTPS URL.",
+          code: "PHONEPE_CALLBACK_URL_INVALID",
+        });
+        return;
+      }
+
+      const merchantTransactionId = buildMerchantTransactionId(cycle.cycleKey, auth.userId);
       const callbackUrl = `${apiBaseUrl}/api/v1/payments/phonepe/callback`;
-      const redirectUrl = `${apiBaseUrl}/api/v1/payments/phonepe/redirect?txnId=${merchantTransactionId}`;
+      const redirectUrl = `${apiBaseUrl}/api/v1/payments/phonepe/redirect?txnId=${encodeURIComponent(merchantTransactionId)}`;
 
       const result = await initiatePhonePePayment(auth.societyId, {
         amount: Math.round(adjustedDue * 100),
@@ -180,24 +202,42 @@ router.get(
         select: { id: true, paymentStatus: true },
       });
 
-      const phonepeResult = await checkPhonePeStatus(auth.societyId, txnId);
+      if (!localRow) {
+        res.status(404).json({
+          message: "Payment not found for this transaction",
+          code: "PAYMENT_NOT_FOUND",
+          status: "UNKNOWN",
+          outcome: "unknown",
+        });
+        return;
+      }
+
+      const poll = await reconcilePhonePeFromPoll(auth.societyId, txnId);
+      const status =
+        poll.status ?? localRow.paymentStatus ?? BillingUserPaymentStatus.PENDING;
+
       logger.info(
-        { txnId, localStatus: localRow?.paymentStatus, phonepeState: phonepeResult?.state, phonepeSuccess: phonepeResult?.success },
+        {
+          txnId,
+          localStatus: localRow.paymentStatus,
+          status,
+          outcome: poll.outcome,
+          phonepeState: poll.gateway.rawState,
+          phonepeCode: poll.gateway.rawCode,
+          reconciled: poll.reconciled,
+        },
         "[phonepe status] poll result",
       );
 
-      let status = localRow?.paymentStatus ?? "UNKNOWN";
-      const phonepeCompleted = phonepeResult != null &&
-        (PHONEPE_COMPLETED_STATES.has(phonepeResult.state) || (phonepeResult.success && phonepeResult.state !== "PENDING" && phonepeResult.state !== "FAILED"));
-      if (status !== BillingUserPaymentStatus.SUCCESS && phonepeCompleted) {
-        const reconciled = await reconcilePhonePeIfCompleted(auth.societyId, txnId);
-        if (reconciled.status) status = reconciled.status;
-      }
-
       res.json({
         status,
-        phonepeState: phonepeResult?.state ?? "UNKNOWN",
-        paymentId: localRow?.id ?? null,
+        outcome: poll.outcome,
+        phonepeState: poll.gateway.rawState,
+        phonepeCode: poll.gateway.rawCode ?? null,
+        phonepeAvailable: poll.gateway.gatewayReachable,
+        reconciled: poll.reconciled,
+        paymentId: localRow.id,
+        detail: poll.gateway.detail ?? null,
       });
     } catch (e) {
       next(e);
