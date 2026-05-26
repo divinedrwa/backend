@@ -242,26 +242,28 @@ export async function recordPaymentAndSyncLedgers(
     }
   }
 
-  // 7. Create audit log
-  await tx.adminAuditLog.create({
-    data: {
-      adminId: recordedByUserId,
-      societyId,
-      action: auditAction,
-      entityType: "MaintenancePayment",
-      entityId: payment.id,
-      metadata: {
-        villaId,
-        month,
-        year,
-        amount: amount.toString(),
-        paymentMode,
-        transactionId,
-        receiptNumber,
-        timestamp: new Date().toISOString(),
+  // 7. Audit log (gateway settlements skip — resident id is not an admin actor)
+  if (billingSource !== BillingPaymentSource.GATEWAY) {
+    await tx.adminAuditLog.create({
+      data: {
+        adminId: recordedByUserId,
+        societyId,
+        action: auditAction,
+        entityType: "MaintenancePayment",
+        entityId: payment.id,
+        metadata: {
+          villaId,
+          month,
+          year,
+          amount: amount.toString(),
+          paymentMode,
+          transactionId,
+          receiptNumber,
+          timestamp: new Date().toISOString(),
+        },
       },
-    },
-  });
+    });
+  }
 
   return { maintenance, payment };
 }

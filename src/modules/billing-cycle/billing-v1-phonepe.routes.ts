@@ -16,6 +16,7 @@ import {
   isPhonePeConfiguredForSociety,
 } from "../../services/phonepe-billing";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
+import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
 import { reconcilePhonePeFromPoll } from "./gateway-payment-settle";
 
 function buildMerchantTransactionId(cycleKey: string, userId: string): string {
@@ -121,6 +122,14 @@ router.post(
         return;
       }
 
+      try {
+        await prisma.$transaction(async (tx) => {
+          await ensureMaintenanceCollectionForBillingCycle(tx, cycleId);
+        });
+      } catch (linkErr) {
+        logger.warn({ err: linkErr, cycleId }, "[phonepe] billing→collection pre-link failed");
+      }
+
       const merchantTransactionId = buildMerchantTransactionId(cycle.cycleKey, auth.userId);
       const callbackUrl = `${apiBaseUrl}/api/v1/payments/phonepe/callback`;
       const redirectUrl = `${apiBaseUrl}/api/v1/payments/phonepe/redirect?txnId=${encodeURIComponent(merchantTransactionId)}`;
@@ -212,7 +221,23 @@ router.get(
         return;
       }
 
-      const poll = await reconcilePhonePeFromPoll(auth.societyId, txnId);
+      let poll;
+      try {
+        poll = await reconcilePhonePeFromPoll(auth.societyId, txnId);
+      } catch (reconcileErr) {
+        logger.error({ err: reconcileErr, txnId }, "[phonepe status] unexpected reconcile error");
+        res.status(200).json({
+          status: localRow.paymentStatus,
+          outcome: "reconcile_failed",
+          phonepeState: "UNKNOWN",
+          phonepeCode: null,
+          phonepeAvailable: false,
+          reconciled: false,
+          paymentId: localRow.id,
+          detail: reconcileErr instanceof Error ? reconcileErr.message : "Could not verify payment",
+        });
+        return;
+      }
       const status =
         poll.status ?? localRow.paymentStatus ?? BillingUserPaymentStatus.PENDING;
 

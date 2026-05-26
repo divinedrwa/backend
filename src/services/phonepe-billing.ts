@@ -74,7 +74,16 @@ async function getPhonePeConfigFromDb(societyId: string): Promise<PhonePeConfig 
 
   if (!method) return null;
 
-  const config = decryptConfigSecrets(method.type, method.config as Record<string, unknown>);
+  let config: Record<string, unknown>;
+  try {
+    config = decryptConfigSecrets(method.type, method.config as Record<string, unknown>);
+  } catch (err) {
+    logger.error(
+      { err, societyId },
+      "[phonepe] failed to decrypt society PhonePe config — falling back to env",
+    );
+    return null;
+  }
   const { merchantId, saltKey, saltIndex, environment } = config as Record<string, unknown>;
 
   if (!merchantId || !saltKey) return null;

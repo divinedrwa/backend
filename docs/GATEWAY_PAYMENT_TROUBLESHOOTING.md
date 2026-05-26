@@ -2,6 +2,15 @@
 
 Use this when the mobile app shows **Verifying payment…** for a long time, lands on **Confirming payment**, or maintenance dues do not update after paying.
 
+## Two admin surfaces (important)
+
+| Screen | API | What marks a villa “paid” |
+|--------|-----|---------------------------|
+| **Maintenance Management** (grid, financial dashboard) | `/maintenance-management/collection/...`, `/financial-dashboard` | `VillaMaintenanceSnapshot.status` + `MaintenancePayment` rows |
+| **Maintenance Billing** (cycles / residents) | `/v1/admin/cycles`, `/v1/admin/residents/payments` | `UserCyclePayment.paymentStatus` + snapshot-backed ledger |
+
+Gateway settlement must write **both** ledgers. Before this fix, `UserCyclePayment` could become `SUCCESS` while snapshots were never updated (billing cycle not linked to a collection cycle) — resident app looked “paid” in billing but **admin maintenance grid stayed unpaid**.
+
 ## How settlement works
 
 ```mermaid

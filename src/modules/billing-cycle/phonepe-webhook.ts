@@ -136,12 +136,25 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
       const paidAt = isSuccess ? new Date() : null;
       const maintenanceAmountNum = Number(lockedRow.amountPaid);
       const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
+      const gatewayTxnId = phonepeTransactionId ?? merchantTransactionId;
+
+      if (isSuccess) {
+        await applyGatewayPaymentSuccess(tx, {
+          row,
+          maintenanceAmount: maintenanceAmountNum,
+          paidAt: paidAt!,
+          paymentMode: PaymentMode.PHONEPE,
+          remarks: payAllPending ? "PhonePe pay-all settlement" : "PhonePe online payment sync",
+          payAllPending,
+          gatewayTransactionId: gatewayTxnId,
+        });
+      }
 
       await tx.userCyclePayment.update({
         where: { id: row.id },
         data: {
           paymentStatus: isFailure ? BillingUserPaymentStatus.FAILED : BillingUserPaymentStatus.SUCCESS,
-          paymentGatewayPaymentId: phonepeTransactionId ?? merchantTransactionId,
+          paymentGatewayPaymentId: gatewayTxnId,
           paidAt,
           source: BillingPaymentSource.GATEWAY,
         },
@@ -161,18 +174,6 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
               state,
             } as object,
           },
-        });
-      }
-
-      if (isSuccess) {
-        await applyGatewayPaymentSuccess(tx, {
-          row,
-          maintenanceAmount: maintenanceAmountNum,
-          paidAt: paidAt!,
-          paymentMode: PaymentMode.PHONEPE,
-          remarks: payAllPending ? "PhonePe pay-all settlement" : "PhonePe online payment sync",
-          payAllPending,
-          gatewayTransactionId: phonepeTransactionId ?? merchantTransactionId,
         });
       }
 

@@ -48,6 +48,27 @@ async function main() {
   console.log(`API_BASE_URL: ${apiBaseUrl}`);
   console.log(`NODE_ENV:    ${process.env.NODE_ENV ?? "development"}\n`);
 
+  try {
+    const enumRows = await prisma.$queryRaw<{ enumlabel: string }[]>`
+      SELECT e.enumlabel
+      FROM pg_enum e
+      JOIN pg_type t ON e.enumtypid = t.oid
+      WHERE t.typname = 'PaymentMode'
+      ORDER BY e.enumsortorder
+    `;
+    const labels = enumRows.map((r) => r.enumlabel);
+    console.log(`PaymentMode enum in DB: ${labels.join(", ") || "(none)"}`);
+    if (!labels.includes("PHONEPE")) {
+      console.log(
+        "  ❌ PHONEPE missing — run: npm run prisma:migrate:deploy (fixes Internal server error on PhonePe settle)\n",
+      );
+    } else {
+      console.log("");
+    }
+  } catch {
+    console.log("(Could not read PaymentMode enum — not PostgreSQL or no access)\n");
+  }
+
   const row = await prisma.userCyclePayment.findFirst({
     where: { paymentGatewayOrderId: id },
     include: {

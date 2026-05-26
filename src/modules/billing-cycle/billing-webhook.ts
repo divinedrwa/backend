@@ -143,6 +143,20 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         notes?.payAllPending === "true" ||
         (await isPayAllGatewayPayment(row, "create_order"));
 
+      if (!isFailure) {
+        await applyGatewayPaymentSuccess(tx, {
+          row,
+          maintenanceAmount: maintenanceAmountNum,
+          paidAt: paidAt!,
+          paymentMode: PaymentMode.ONLINE,
+          remarks: payAllPending
+            ? "Razorpay pay-all settlement"
+            : "Razorpay online payment sync",
+          payAllPending,
+          gatewayTransactionId: paymentId,
+        });
+      }
+
       await tx.userCyclePayment.update({
         where: { id: row.id },
         data: {
@@ -168,20 +182,6 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
               maintenanceAmount: maintenanceAmountNum,
             } as object,
           },
-        });
-      }
-
-      if (!isFailure) {
-        await applyGatewayPaymentSuccess(tx, {
-          row,
-          maintenanceAmount: maintenanceAmountNum,
-          paidAt: paidAt!,
-          paymentMode: PaymentMode.ONLINE,
-          remarks: payAllPending
-            ? "Razorpay pay-all settlement"
-            : "Razorpay online payment sync",
-          payAllPending,
-          gatewayTransactionId: paymentId,
         });
       }
 

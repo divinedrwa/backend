@@ -34,6 +34,7 @@ export type PhonePeSettlementOutcome =
   | "completed"
   | "pending"
   | "failed"
+  | "reconcile_failed"
   | "gateway_unavailable"
   | "unknown";
 

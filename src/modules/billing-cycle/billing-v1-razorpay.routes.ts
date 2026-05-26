@@ -20,6 +20,7 @@ import {
   getPublishableKeyForSociety,
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
+import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
 import { reconcileRazorpayFromPoll } from "./gateway-payment-settle";
 import {
   computeRazorpayCheckoutBreakup,
@@ -141,6 +142,14 @@ router.post(
         return;
       }
 
+      try {
+        await prisma.$transaction(async (tx) => {
+          await ensureMaintenanceCollectionForBillingCycle(tx, cycleId);
+        });
+      } catch (linkErr) {
+        logger.warn({ err: linkErr, cycleId }, "[razorpay] billing→collection pre-link failed");
+      }
+
       const feeConfig = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
       const breakup = computeRazorpayCheckoutBreakup(adjustedDue, feeConfig);
 
@@ -257,7 +266,23 @@ router.get(
         return;
       }
 
-      const poll = await reconcileRazorpayFromPoll(auth.societyId, orderId);
+      let poll;
+      try {
+        poll = await reconcileRazorpayFromPoll(auth.societyId, orderId);
+      } catch (reconcileErr) {
+        logger.error({ err: reconcileErr, orderId }, "[razorpay status] unexpected reconcile error");
+        res.status(200).json({
+          status: localRow.paymentStatus,
+          outcome: "reconcile_failed",
+          razorpayState: "UNKNOWN",
+          razorpayCode: null,
+          razorpayAvailable: false,
+          reconciled: false,
+          paymentId: localRow.id,
+          detail: reconcileErr instanceof Error ? reconcileErr.message : "Could not verify payment",
+        });
+        return;
+      }
       const status =
         poll.status ?? localRow.paymentStatus ?? BillingUserPaymentStatus.PENDING;
 
