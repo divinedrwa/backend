@@ -707,7 +707,7 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
 
       const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
         where: { id: snapshotCheck.id },
-        select: { status: true, paidAmount: true },
+        select: { status: true, paidAmount: true, lateFeeAmount: true, lateFeeAppliedAt: true },
       });
 
       // Admin explicitly reversed payment → force PENDING regardless of due date.
@@ -717,10 +717,21 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
       const snapStatus = paidAfterWalker > 0.005
         ? (reconciledSnapshot?.status ?? "PARTIAL")
         : "PENDING";
+
+      // Build update payload: always reset status + late fee on reversal
+      const snapUpdate: Record<string, unknown> = {};
       if (reconciledSnapshot && reconciledSnapshot.status !== snapStatus) {
+        snapUpdate.status = snapStatus;
+      }
+      // Reset late fee so the cron can re-evaluate from scratch
+      if (reconciledSnapshot && (Number(reconciledSnapshot.lateFeeAmount) > 0 || reconciledSnapshot.lateFeeAppliedAt)) {
+        snapUpdate.lateFeeAmount = 0;
+        snapUpdate.lateFeeAppliedAt = null;
+      }
+      if (Object.keys(snapUpdate).length > 0) {
         await tx.villaMaintenanceSnapshot.update({
           where: { id: snapshotCheck.id },
-          data: { status: snapStatus },
+          data: snapUpdate,
         });
       }
 
@@ -769,14 +780,19 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
               paymentStatus: payStatus,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
-              paidAt: new Date(),
+              paidAt: null,
             },
             update: {
               amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
               paymentStatus: payStatus,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
-              paidAt: new Date(),
+              paidAt: null,
+              // Clear gateway identifiers so PhonePe/Razorpay reconciliation
+              // or delayed webhooks can't re-settle after admin reversal
+              paymentGatewayOrderId: null,
+              paymentGatewayPaymentId: null,
+              idempotencyKey: null,
             },
           });
         }
