@@ -249,8 +249,31 @@ function escapeHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
 }
 
-router.get("/payments/phonepe/redirect", (req, res) => {
-  const txnId = req.query.txnId ?? "";
+router.get("/payments/phonepe/redirect", async (req, res) => {
+  const txnId = String(req.query.txnId ?? "").trim();
+  if (txnId) {
+    try {
+      const row = await prisma.userCyclePayment.findFirst({
+        where: { paymentGatewayOrderId: txnId },
+        include: { cycle: { select: { societyId: true } } },
+      });
+      if (row) {
+        const poll = await reconcilePhonePeFromPoll(row.cycle.societyId, txnId);
+        logger.info(
+          {
+            txnId,
+            outcome: poll.outcome,
+            reconciled: poll.reconciled,
+            phonepeState: poll.gateway.rawState,
+            phonepeCode: poll.gateway.rawCode,
+          },
+          "[phonepe redirect] reconcile on return",
+        );
+      }
+    } catch (e) {
+      logger.warn({ err: e, txnId }, "[phonepe redirect] reconcile failed");
+    }
+  }
   res.setHeader("Content-Type", "text/html");
   res.send(`<!DOCTYPE html>
 <html>

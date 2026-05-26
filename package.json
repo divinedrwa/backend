@@ -22,6 +22,7 @@
     "validate:tenant-data": "tsx src/scripts/validate-tenant-data.ts",
     "verify:super-admin": "tsx scripts/verify-super-admin.ts",
     "diagnose:db": "tsx scripts/diagnose-db-overview.ts",
+    "diagnose:gateway-payment": "tsx scripts/diagnose-gateway-payment.ts",
     "verify:migrations-safe": "tsx scripts/verify-migrations-safe.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",
     "reconcile:villa-credits": "tsx scripts/reconcile-villa-credits.ts",

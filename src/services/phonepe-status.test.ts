@@ -37,6 +37,20 @@ describe("classifyPhonePeGatewayPayload", () => {
     assert.equal(r.outcome, "pending");
     assert.equal(r.paymentStatus, "PENDING");
   });
+
+  it("maps v1 paymentState COMPLETED with PAYMENT_SUCCESS code", () => {
+    const r = classifyPhonePeGatewayPayload({
+      success: true,
+      code: "PAYMENT_SUCCESS",
+      data: {
+        paymentState: "COMPLETED",
+        payResponseCode: "SUCCESS",
+        amount: 50000,
+      },
+    });
+    assert.equal(r.outcome, "completed");
+    assert.equal(r.paymentStatus, "SUCCESS");
+  });
 });
 
 describe("mergePhonePeStatusWithLocal", () => {

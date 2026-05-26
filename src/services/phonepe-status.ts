@@ -3,7 +3,11 @@
  * the billing layer and mobile client can act on — never rely on raw null from fetch.
  */
 
-export const PHONEPE_COMPLETED_STATES = new Set(["COMPLETED", "PAYMENT_SUCCESS"]);
+export const PHONEPE_COMPLETED_STATES = new Set([
+  "COMPLETED",
+  "PAYMENT_SUCCESS",
+  "SUCCESS", // payResponseCode / legacy aliases
+]);
 
 export const PHONEPE_FAILED_STATES = new Set([
   "FAILED",
@@ -82,7 +86,14 @@ type ParsedPhonePeBody = {
   success?: boolean;
   code?: string;
   message?: string;
-  data?: { state?: string; amount?: number; responseCode?: string };
+  data?: {
+    state?: string;
+    /** v1 status API often uses paymentState instead of state */
+    paymentState?: string;
+    amount?: number;
+    responseCode?: string;
+    payResponseCode?: string;
+  };
 };
 
 /**
@@ -94,8 +105,14 @@ export function classifyPhonePeGatewayPayload(
   PhonePeStatusResult,
   "outcome" | "paymentStatus" | "rawState" | "rawCode" | "gatewaySuccessFlag" | "amountPaise"
 > {
-  const rawState = body.data?.state ?? body.code ?? "UNKNOWN";
-  const rawCode = body.code;
+  const rawState =
+    body.data?.state ??
+    body.data?.paymentState ??
+    body.data?.payResponseCode ??
+    body.data?.responseCode ??
+    body.code ??
+    "UNKNOWN";
+  const rawCode = body.code ?? body.data?.payResponseCode;
   const gatewaySuccessFlag = body.success === true;
   const state = rawState.toUpperCase();
   const code = rawCode?.toUpperCase();
