@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Prisma } from "@prisma/client";
 import { SOSStatus, SOSType } from "@prisma/client";
 import { createSOSAlert, processEscalations } from "./sos-coordinator.js";
 
@@ -9,7 +10,7 @@ describe("sos-coordinator", () => {
       sOSAlert: {
         findFirst: async () => ({ id: "existing" }),
       },
-    } as any;
+    } as unknown as Prisma.TransactionClient;
 
     await assert.rejects(
       createSOSAlert(tx, {
@@ -53,7 +54,7 @@ describe("sos-coordinator", () => {
           return {};
         },
       },
-    } as any;
+    } as unknown as Prisma.TransactionClient;
 
     const alert = await createSOSAlert(tx, {
       societyId: "soc1",
@@ -108,7 +109,7 @@ describe("sos-coordinator", () => {
       },
       sOSAlert: {
         findUnique: async () => ({ createdAt: new Date(Date.now() - 10_000) }),
-        update: async ({ where, data }: any) => ({
+        update: async ({ where, data }: { where: { id: string }; data: { status?: SOSStatus } }) => ({
           id: where.id,
           societyId: "soc1",
           villaId: "villa1",
@@ -123,7 +124,7 @@ describe("sos-coordinator", () => {
       sOSCheckpoint: {
         create: async () => ({}),
       },
-    } as any;
+    } as unknown as Prisma.TransactionClient;
 
     const processed = await processEscalations(tx);
     assert.equal(processed, 1);

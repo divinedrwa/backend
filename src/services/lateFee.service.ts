@@ -57,27 +57,39 @@ export async function applyLateFees(): Promise<void> {
 
       let appliedCount = 0;
       for (const snap of overdueSnapshots) {
-        const expected = Number(snap.expectedAmount);
-        const paid = Number(snap.paidAmount);
-        if (paid >= expected) continue; // Already paid in full
-
         let lateFee = 0;
         if (society.lateFeePercentage > 0) {
-          lateFee = Math.round(expected * (society.lateFeePercentage / 100) * 100) / 100;
+          lateFee = Math.round(Number(snap.expectedAmount) * (society.lateFeePercentage / 100) * 100) / 100;
         } else if (society.lateFeeFixedAmount > 0) {
           lateFee = society.lateFeeFixedAmount;
         }
-
         if (lateFee <= 0) continue;
 
-        await prisma.villaMaintenanceSnapshot.update({
-          where: { id: snap.id },
-          data: {
-            lateFeeAmount: lateFee,
-            lateFeeAppliedAt: now,
-          },
+        // Mini-transaction with FOR UPDATE: re-read the snapshot to ensure it
+        // hasn't been paid (or had late fee applied) by a concurrent webhook.
+        const applied = await prisma.$transaction(async (tx) => {
+          const [locked] = await tx.$queryRawUnsafe<
+            { id: string; status: string; paidAmount: string; expectedAmount: string; lateFeeAppliedAt: Date | null }[]
+          >(
+            `SELECT id, status, "paidAmount"::text, "expectedAmount"::text, "lateFeeAppliedAt"
+             FROM "villa_maintenance_snapshots"
+             WHERE id = $1
+             FOR UPDATE`,
+            snap.id,
+          );
+          if (!locked) return false;
+          if (locked.lateFeeAppliedAt) return false; // already applied
+          if (locked.status === "PAID" || locked.status === "WAIVED") return false;
+          if (Number(locked.paidAmount) >= Number(locked.expectedAmount)) return false;
+
+          await tx.villaMaintenanceSnapshot.update({
+            where: { id: snap.id },
+            data: { lateFeeAmount: lateFee, lateFeeAppliedAt: now },
+          });
+          return true;
         });
-        appliedCount++;
+
+        if (applied) appliedCount++;
       }
 
       if (appliedCount > 0) {

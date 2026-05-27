@@ -138,6 +138,19 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
       const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
       const gatewayTxnId = phonepeTransactionId ?? merchantTransactionId;
 
+      // Amount validation: gateway-reported amount must match the stored order amount.
+      // Tolerance of 1 paisa (₹0.01) to handle floating-point rounding.
+      if (isSuccess && amountPaise > 0) {
+        const expectedPaise = Math.round(maintenanceAmountNum * 100);
+        if (Math.abs(amountPaise - expectedPaise) > 1) {
+          logger.error(
+            { merchantTransactionId, expectedPaise, actualPaise: amountPaise },
+            "[phonepe webhook] AMOUNT MISMATCH — gateway charged different amount than order",
+          );
+          return { action: "skip" as const, reason: "amount_mismatch" };
+        }
+      }
+
       if (isSuccess) {
         await applyGatewayPaymentSuccess(tx, {
           row,
@@ -194,13 +207,21 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
       return;
     }
 
-    if (result.isSuccess && result.userId) {
+    if (result.userId) {
       try {
-        await notifyUser(result.userId, {
-          title: "Payment received",
-          body: "Your maintenance payment was recorded successfully.",
-          data: { cycleId: result.cycleId, type: "billing_payment_success" },
-        });
+        if (result.isSuccess) {
+          await notifyUser(result.userId, {
+            title: "Payment received",
+            body: "Your maintenance payment was recorded successfully.",
+            data: { cycleId: result.cycleId, type: "billing_payment_success" },
+          });
+        } else {
+          await notifyUser(result.userId, {
+            title: "Payment failed",
+            body: "Your maintenance payment could not be processed. Please try again.",
+            data: { cycleId: result.cycleId, type: "billing_payment_failed" },
+          });
+        }
       } catch {
         /* optional push */
       }

@@ -139,6 +139,20 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       const paidAt = isFailure ? null : new Date();
       const maintenanceAmountNum = Number(lockedRow.amountPaid);
       const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
+
+      // Amount validation: gateway-reported amount must match the stored order amount.
+      // Tolerance of 1 paisa (₹0.01) to handle floating-point rounding.
+      if (isSuccess && amountPaise > 0) {
+        const expectedPaise = Math.round(maintenanceAmountNum * 100);
+        if (Math.abs(amountPaise - expectedPaise) > 1) {
+          logger.error(
+            { orderId, paymentId, expectedPaise, actualPaise: amountPaise },
+            "[billing webhook] AMOUNT MISMATCH — gateway charged different amount than order",
+          );
+          return { action: "skip" as const, reason: "amount_mismatch" };
+        }
+      }
+
       const payAllPending =
         notes?.payAllPending === "true" ||
         (await isPayAllGatewayPayment(row, "create_order"));
@@ -202,13 +216,21 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       return;
     }
 
-    if (!result.isFailure && result.userId) {
+    if (result.userId) {
       try {
-        await notifyUser(result.userId, {
-          title: "Payment received",
-          body: "Your maintenance payment was recorded successfully.",
-          data: { cycleId: result.cycleId, type: "billing_payment_success" },
-        });
+        if (!result.isFailure) {
+          await notifyUser(result.userId, {
+            title: "Payment received",
+            body: "Your maintenance payment was recorded successfully.",
+            data: { cycleId: result.cycleId, type: "billing_payment_success" },
+          });
+        } else {
+          await notifyUser(result.userId, {
+            title: "Payment failed",
+            body: "Your maintenance payment could not be processed. Please try again.",
+            data: { cycleId: result.cycleId, type: "billing_payment_failed" },
+          });
+        }
       } catch {
         /* optional push */
       }

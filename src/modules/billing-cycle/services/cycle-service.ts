@@ -12,7 +12,12 @@ import { deriveCycleStatusUtc } from "../domain/cycleStatus";
 import { computeAmountDueForCycle } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
 import { notifySociety, notifyUser } from "../../../services/notification.service";
+import { residentLikeRoleFilter } from "../../../lib/residentLike";
 import { getVillaCreditBalance } from "../../maintenance-management/credit-walker";
+import {
+  buildPendingDuesFromLedger,
+  pendingDuesToCurrentCycleShape,
+} from "./resident-pending-dues";
 
 export type BillingLedgerCycleRow = {
   cycleId: string;
@@ -130,41 +135,11 @@ export async function buildCurrentCycleResponse(input: {
   const maintenanceBillingExcluded =
     billingSubject?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
 
-  const pendingRows = await prisma.billingCycle.findMany({
-    where: { societyId: input.societyId },
-    orderBy: { paymentEndDate: "asc" },
-    take: 60,
-  });
-
-  const pendingPayments = await prisma.userCyclePayment.findMany({
-    where: {
-      userId: input.userId,
-      cycleId: { in: pendingRows.map((c) => c.id) },
-      paymentStatus: BillingUserPaymentStatus.SUCCESS,
-    },
-    select: { cycleId: true },
-  });
-  const paidCycleIds = new Set(pendingPayments.map((p) => p.cycleId));
   const pendingDues = maintenanceBillingExcluded
     ? []
-    : pendingRows
-        .filter((c) => !paidCycleIds.has(c.id))
-        .map((c) => {
-          const isGraceOver =
-            nowUtc.getTime() >
-            c.paymentEndDate.getTime() + c.gracePeriodDays * 24 * 60 * 60 * 1000;
-          const status = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
-          return {
-            cycleId: c.id,
-            cycleKey: c.cycleKey,
-            title: c.title,
-            amount: Number(c.amount),
-            paymentEndDate: c.paymentEndDate.toISOString(),
-            gracePeriodDays: c.gracePeriodDays,
-            isGraceOver,
-            status,
-          };
-        });
+    : pendingDuesToCurrentCycleShape(
+        await buildPendingDuesFromLedger(input.societyId, input.userId, nowUtc),
+      );
 
   let cycle: BillingCycle | null = null;
   if (input.billingCycleId?.trim()) {
@@ -249,8 +224,10 @@ export async function buildCurrentCycleResponse(input: {
       deltaAmount:
         (payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0) -
         Number(cycle.amount),
-      balanceBefore: 0,
-      balanceAfter: 0,
+      balanceBefore: ledger.currentBalance,
+      balanceAfter: ledger.currentBalance +
+        (payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0) -
+        Number(cycle.amount),
       paymentStatus: payment?.paymentStatus ?? "NONE",
       paidAt: payment?.paidAt?.toISOString() ?? null,
     } as BillingLedgerCycleRow);
@@ -470,6 +447,12 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
     const status = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
 
     if (status === BillingCycleStatus.OPEN && !c.windowOpenNotifiedAt) {
+      // Persist timestamp BEFORE sending push — if cron crashes mid-send, a
+      // missed push is less harmful than duplicate pushes to all residents.
+      await prisma.billingCycle.update({
+        where: { id: c.id },
+        data: { windowOpenNotifiedAt: nowUtc },
+      });
       try {
         await notifySociety(
           c.societyId,
@@ -483,15 +466,15 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
       } catch {
         /* optional */
       }
-      await prisma.billingCycle.update({
-        where: { id: c.id },
-        data: { windowOpenNotifiedAt: nowUtc },
-      });
     }
 
     const msLeft = c.paymentEndDate.getTime() - nowUtc.getTime();
     const oneDay = 24 * 60 * 60 * 1000;
     if (status === BillingCycleStatus.OPEN && msLeft > 0 && msLeft <= oneDay && !c.dueReminderSentAt) {
+      await prisma.billingCycle.update({
+        where: { id: c.id },
+        data: { dueReminderSentAt: nowUtc },
+      });
       try {
         await notifySociety(
           c.societyId,
@@ -505,14 +488,12 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
       } catch {
         /* optional */
       }
-      await prisma.billingCycle.update({
-        where: { id: c.id },
-        data: { dueReminderSentAt: nowUtc },
-      });
     }
   }
 
-  const indiaNow = new Date(nowUtc.toLocaleString("en-US", { timeZone: "Asia/Kolkata" }));
+  // IST is UTC+5:30 (fixed offset, no DST). Avoid toLocaleString which is
+  // implementation-defined and may not round-trip through new Date().
+  const indiaNow = new Date(nowUtc.getTime() + 5.5 * 60 * 60 * 1000);
   const slotHour = indiaNow.getHours();
   const runSlot = slotHour === 9 || slotHour === 19;
   if (!runSlot) {
@@ -538,8 +519,10 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
     const residents = await prisma.user.findMany({
       where: {
         societyId,
-        role: UserRole.RESIDENT,
         isActive: true,
+        villaId: { not: null },
+        maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+        ...residentLikeRoleFilter,
       },
       select: { id: true, name: true },
     });
@@ -567,15 +550,23 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
       const alreadySent = await billingCacheGet(sentKey);
       if (alreadySent) continue;
 
-      const paidSet = paidByUser.get(resident.id) ?? new Set<string>();
-      const pendingCycles = overdueCycles.filter((c) => !paidSet.has(c.id));
-      if (pendingCycles.length === 0) continue;
-
       const ledger = await computeUserBillingLedger(societyId, resident.id);
       const ledgerByCycleId = new Map(ledger.cycles.map((row) => [row.cycleId, row]));
+      const paidSet = paidByUser.get(resident.id) ?? new Set<string>();
+      const pendingCycles = overdueCycles.filter((c) => {
+        const row = ledgerByCycleId.get(c.id);
+        if (row) {
+          return Math.max(0, row.expectedAmount - row.cashPaidAmount) > 0.005;
+        }
+        return !paidSet.has(c.id);
+      });
+      if (pendingCycles.length === 0) continue;
+
       const totalDue = pendingCycles.reduce((sum, c) => {
         const row = ledgerByCycleId.get(c.id);
-        const remaining = row ? Math.max(0, row.expectedAmount - row.paidAmount) : Number(c.amount);
+        const remaining = row
+          ? Math.max(0, row.expectedAmount - row.cashPaidAmount)
+          : Number(c.amount);
         return sum + remaining;
       }, 0);
       const monthsList = pendingCycles.map((c) => c.cycleKey).join(", ");
@@ -612,6 +603,8 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
         }
       }
 
+      // Set cache key BEFORE sending push to prevent duplicates on crash/restart.
+      await billingCacheSet(sentKey, "1", 16 * 60 * 60);
       try {
         await notifyUser(
           resident.id,
@@ -629,8 +622,6 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
       } catch (pushErr) {
         logger.error({ err: pushErr }, "[billing-reminder] push send failed");
       }
-
-      await billingCacheSet(sentKey, "1", 16 * 60 * 60);
     }
   }
 }

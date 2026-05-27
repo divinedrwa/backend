@@ -2,13 +2,10 @@ import {
   NotificationCategory,
   UserRole,
   VisitorStatus,
-  VisitorMultiVillaApprovalMode,
-  VisitorVillaApprovalStatus,
 } from "@prisma/client";
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
-import { residentLikeRoleFilter } from "../../lib/residentLike";
 import {
   recomputeVisitorAggregateApproval as recomputeFromStateManager,
   resolveVisitorApprovalRecipientIds as resolveFromStateManager,

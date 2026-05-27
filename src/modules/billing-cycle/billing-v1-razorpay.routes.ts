@@ -45,11 +45,39 @@ router.post(
   requireAuth,
   requireRole(UserRole.RESIDENT, UserRole.ADMIN),
   validateBody(createOrderSchema),
-  async (req, res, next) => {
+  async (req, res, _next) => {
     try {
       const auth = req.auth!;
       const body = req.body as z.infer<typeof createOrderSchema>;
       const { idempotencyKey, payAllPending } = body;
+
+      // Server-side idempotency: if the same key was already used for a
+      // PENDING order, return that order to prevent duplicate gateway charges.
+      if (idempotencyKey) {
+        const idempotentRow = await prisma.userCyclePayment.findFirst({
+          where: {
+            userId: auth.userId,
+            idempotencyKey,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: { not: null },
+          },
+        });
+        if (idempotentRow?.paymentGatewayOrderId) {
+          const feeConfigIdem = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+          const breakupIdem = computeRazorpayCheckoutBreakup(Number(idempotentRow.amountPaid), feeConfigIdem);
+          res.status(200).json({
+            orderId: idempotentRow.paymentGatewayOrderId,
+            amountPaise: breakupIdem.totalPayablePaise,
+            currency: "INR",
+            key: await getPublishableKeyForSociety(auth.societyId),
+            paymentId: idempotentRow.id,
+            totalDue: Number(idempotentRow.amountPaid),
+            existingOrder: true,
+            idempotent: true,
+          });
+          return;
+        }
+      }
 
       const payAllQuote = payAllPending
         ? await computePayAllQuote(auth.societyId, auth.userId)
@@ -131,6 +159,30 @@ router.post(
         existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS
       ) {
         res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
+
+      // Prevent race: if a PENDING payment already has a gateway order,
+      // return the existing order so the client retries checkout with it
+      // instead of creating a second order (which would orphan the first).
+      if (
+        existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
+        existing.paymentGatewayOrderId
+      ) {
+        const feeConfigExisting = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+        const breakupExisting = computeRazorpayCheckoutBreakup(adjustedDue, feeConfigExisting);
+        res.status(200).json({
+          orderId: existing.paymentGatewayOrderId,
+          amountPaise: breakupExisting.totalPayablePaise,
+          currency: "INR",
+          key: await getPublishableKeyForSociety(auth.societyId),
+          paymentId: existing.id,
+          totalDue: adjustedDue,
+          unadjustedDue: due.totalDue,
+          availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
+          autoSettledFromCredit: false,
+          existingOrder: true,
+        });
         return;
       }
 

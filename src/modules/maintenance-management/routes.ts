@@ -17,6 +17,7 @@ import {
   ensureVillaLedgersAligned,
   syncBillingUserCyclePaymentsFromSnapshot,
 } from "../billing-cycle/billing-collection-link";
+import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -343,7 +344,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
 
         const expected = Number(snapshot.expectedAmount);
         const paidSoFar = Number(snapshot.paidAmount);
-        const remaining = Math.round((expected - paidSoFar) * 100) / 100;
+        const _remaining = Math.round((expected - paidSoFar) * 100) / 100;
         const maintenanceRow = await tx.maintenance.upsert({
           where: {
             villaId_month_year: { villaId: body.villaId, month: body.month, year: body.year },
@@ -483,6 +484,8 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         return { payment: paymentRow, maintenance: maintenanceRow };
       }, { timeout: 15000 });
 
+      invalidateReconcileCache(body.villaId);
+
       // Notify villa residents about payment recorded
       void (async () => {
         try {
@@ -499,7 +502,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
                 body: `Your maintenance payment of \u20B9${body.amount} for ${monthName} ${body.year} has been recorded.`,
                 data: { type: "MAINTENANCE_PAYMENT_RECORDED", villaId: body.villaId },
               },
-              { category: NotificationCategory.SYSTEM },
+              { category: NotificationCategory.MAINTENANCE },
             );
           }
         } catch {
@@ -568,15 +571,22 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
 
     const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
+    // Legacy path: always create a new payment record (append-only) to avoid
+    // overwriting previous partial payments. Existing payment is only used for
+    // receipt-number reuse.
     const payment = existingPayment
-      ? await prisma.maintenancePayment.update({
-          where: { id: existingPayment.id },
+      ? await prisma.maintenancePayment.create({
           data: {
+            societyId,
+            villaId: body.villaId,
             maintenanceId: maintenance.id,
             amount: body.amount,
+            month: body.month,
+            year: body.year,
             paymentDate: new Date(body.paymentDate),
             paymentMode: body.paymentMode,
             transactionId: body.transactionId,
+            receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
             bankAccountId: body.bankAccountId,
             remarks: body.remarks,
           },
@@ -968,7 +978,7 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
           where: {
             societyId,
             villaId: body.villaId,
-            role: UserRole.RESIDENT,
+            ...residentLikeRoleFilter,
             isActive: true,
             maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
           },
@@ -1002,6 +1012,8 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
         status: reconciledSnapshot?.status ?? "PENDING",
       };
     }, { timeout: 15000 });
+
+    invalidateReconcileCache(body.villaId);
 
     return res.status(200).json({
       message: "Advance credit applied successfully",
@@ -1716,7 +1728,7 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
           where: {
             societyId,
             villaId: paymentData.villaId,
-            role: UserRole.RESIDENT,
+            ...residentLikeRoleFilter,
             isActive: true,
             maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
           },
@@ -1736,14 +1748,14 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
               paymentStatus: payStatus,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
-              paidAt: new Date(paymentsData[0].paymentDate),
+              paidAt: new Date(paymentData.paymentDate),
             },
             update: {
               amountPaid: new Prisma.Decimal(paidAmount),
               paymentStatus: payStatus,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
-              paidAt: new Date(paymentsData[0].paymentDate),
+              paidAt: new Date(paymentData.paymentDate),
             },
           });
         }
@@ -1751,6 +1763,35 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
 
       return txResults;
     }, { timeout: 30000 });
+
+    // Bust reconcile cache for all villas touched in the batch.
+    const villaIds = new Set(paymentsData.map((p: { villaId: string }) => p.villaId));
+    for (const vid of villaIds) invalidateReconcileCache(vid);
+
+    // Notify residents of each affected villa (fire-and-forget).
+    void (async () => {
+      for (const vid of villaIds) {
+        try {
+          const residents = await prisma.user.findMany({
+            where: { villaId: vid, societyId, ...residentLikeRoleFilter, isActive: true },
+            select: { id: true },
+          });
+          if (residents.length > 0) {
+            await notifyUsers(
+              residents.map((r) => r.id),
+              {
+                title: "Maintenance payment recorded",
+                body: "Admin recorded a maintenance payment for your villa.",
+                data: { type: "MAINTENANCE_PAYMENT_RECORDED", villaId: vid },
+              },
+              { category: NotificationCategory.MAINTENANCE },
+            );
+          }
+        } catch {
+          // Fire-and-forget
+        }
+      }
+    })();
 
     return res.status(201).json({
       message: `${results.length} of ${results.length} payments marked successfully`,

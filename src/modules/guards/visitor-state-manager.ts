@@ -168,7 +168,7 @@ async function recordVisitorCheckpoint(
     checkpointType: VisitorCheckpointType;
     timestamp: Date;
     actorUserId: string;
-    metadata?: Record<string, any>;
+    metadata?: Prisma.InputJsonObject;
   }
 ): Promise<void> {
   await tx.visitorCheckpoint.create({
@@ -521,7 +521,8 @@ export async function admitPreApprovedVisitor(
   }
 
   // Check expiry
-  if (preApproved.validUntil && new Date() > preApproved.validUntil) {
+  const now = new Date();
+  if (preApproved.validUntil && now > preApproved.validUntil) {
     throw new Error("PRE_APPROVED_EXPIRED");
   }
 
@@ -530,7 +531,7 @@ export async function admitPreApprovedVisitor(
     await tx.preApprovedVisitor.update({
       where: { id: preApproved.id },
       data: {
-        usedAt: new Date(),
+        usedAt: now,
         usedCount: { increment: 1 },
       },
     });
@@ -539,7 +540,7 @@ export async function admitPreApprovedVisitor(
       where: { id: preApproved.id },
       data: {
         isUsed: true,
-        usedAt: new Date(),
+        usedAt: now,
         usedCount: { increment: 1 },
       },
     });
@@ -555,8 +556,9 @@ export async function admitPreApprovedVisitor(
       status: VisitorStatus.CHECKED_IN, // Skip approval
       societyId: params.societyId,
       gateId: params.gateId,
-      checkInAt: new Date(),
+      checkInAt: now,
       checkedInByGuardId: params.guardUserId,
+      preApprovedId: preApproved.id,
     },
   });
 
@@ -586,7 +588,7 @@ export async function admitPreApprovedVisitor(
   await recordVisitorCheckpoint(tx, {
     visitorId: visitor.id,
     checkpointType: VisitorCheckpointType.ADMITTED,
-    timestamp: new Date(),
+    timestamp: now,
     actorUserId: params.guardUserId,
     metadata: {
       preApprovedId: preApproved.id,

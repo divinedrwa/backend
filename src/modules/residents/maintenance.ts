@@ -4,6 +4,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { MaintenanceBillingRole, UserRole } from "@prisma/client";
 import { computeUserBillingLedger } from "../billing-cycle/services/cycle-service";
+import { reconcileVillaLedgersForRecentCycles } from "../billing-cycle/services/resident-pending-dues";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 
 const router = Router();
@@ -351,6 +352,8 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
           "Maintenance for this villa is billed to the primary resident account. Use that login to view or pay dues.",
       });
     }
+
+    await reconcileVillaLedgersForRecentCycles(societyId, user.villaId);
 
     const pending = (await buildResidentLedgerRows(societyId, userId))
       .filter((row) => row.remainingDue > 0.005)

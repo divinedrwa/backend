@@ -17,6 +17,7 @@ import {
   syncAllUserCyclePaymentsForMaintenanceCycle,
   syncBillingUserCyclePaymentsFromSnapshot,
 } from "../billing-cycle/billing-collection-link";
+import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import {
   notifySocietyMaintenanceLedgerUpdate,
   notifyVillaMaintenanceLedgerUpdate,
@@ -754,6 +755,8 @@ router.put(
           });
         }
       });
+
+      invalidateReconcileCache(body.villaId);
 
       return res.json({
         message: "Row updated",

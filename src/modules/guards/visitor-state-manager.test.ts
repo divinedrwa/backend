@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import type { Prisma } from "@prisma/client";
 import {
   VisitorMultiVillaApprovalMode,
   VisitorStatus,
@@ -28,7 +29,7 @@ describe("recomputeVisitorAggregateApproval", () => {
           return {};
         },
       },
-    } as any;
+    } as unknown as Prisma.TransactionClient;
 
     const status = await recomputeVisitorAggregateApproval(tx, {
       visitorId: "vis1",
@@ -59,7 +60,7 @@ describe("recomputeVisitorAggregateApproval", () => {
           return {};
         },
       },
-    } as any;
+    } as unknown as Prisma.TransactionClient;
 
     const status = await recomputeVisitorAggregateApproval(tx, {
       visitorId: "vis2",

@@ -8,8 +8,6 @@ import {
   buildPhonePeStatusPending,
   buildPhonePeStatusUnavailable,
   classifyPhonePeGatewayPayload,
-  isPhonePePaymentFailed,
-  isPhonePePaymentSuccessful,
   type PhonePeStatusResult,
 } from "./phonepe-status";
 

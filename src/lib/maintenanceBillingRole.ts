@@ -1,9 +1,9 @@
 import {
   MaintenanceBillingRole,
   Prisma,
-  UserRole,
 } from "@prisma/client";
 import { prisma } from "./prisma";
+import { RESIDENT_LIKE_ROLES } from "./residentLike";
 
 export async function defaultMaintenanceBillingRoleForNewResident(params: {
   societyId: string;
@@ -13,7 +13,7 @@ export async function defaultMaintenanceBillingRoleForNewResident(params: {
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       isActive: true,
       maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
     },
@@ -35,7 +35,7 @@ export async function demoteOtherResidentsToExcluded(
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       id: { not: params.primaryUserId },
     },
     data: { maintenanceBillingRole: MaintenanceBillingRole.EXCLUDED },
@@ -52,7 +52,7 @@ export async function hasOtherPrimaryOnVilla(params: {
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       isActive: true,
       maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
       NOT: { id: params.exceptUserId },
@@ -73,7 +73,7 @@ export async function clearExcludedResidentsUserCyclePayments(
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       maintenanceBillingRole: MaintenanceBillingRole.EXCLUDED,
     },
     select: { id: true },
@@ -98,7 +98,7 @@ export async function ensurePrimaryCoverageForVilla(
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       isActive: true,
     },
     select: {
@@ -120,7 +120,7 @@ export async function ensurePrimaryCoverageForVilla(
       where: {
         societyId: params.societyId,
         villaId: params.villaId,
-        role: UserRole.RESIDENT,
+        role: { in: [...RESIDENT_LIKE_ROLES] },
         isActive: true,
         id: { not: primaryIds[0] },
         maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
@@ -148,7 +148,7 @@ export async function ensurePrimaryCoverageForVilla(
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      role: { in: [...RESIDENT_LIKE_ROLES] },
       isActive: true,
       id: { not: promote.id },
     },

@@ -9,6 +9,10 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
+import {
+  buildPendingDuesFromLedger,
+  reconcileVillaLedgersForRecentCycles,
+} from "../billing-cycle/services/resident-pending-dues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
@@ -178,18 +182,17 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     const month = now.getMonth() + 1;
     const year = now.getFullYear();
 
+    let personalPendingCount = 0;
+    let personalPendingAmount = 0;
+    if (!maintenanceBillingExcluded && villaId) {
+      await reconcileVillaLedgersForRecentCycles(societyId, villaId);
+      const personalDues = await buildPendingDuesFromLedger(societyId, userId);
+      personalPendingCount = personalDues.length;
+      personalPendingAmount = personalDues.reduce((sum, row) => sum + row.remainingDue, 0);
+    }
+
     // Run all independent counts + money snapshot in parallel.
-    const [pendingMaintenance, complaintCount, pendingParcels, upcomingBookings, money] =
-      await Promise.all([
-        // Pending maintenance (billing contact only; others see 0).
-        maintenanceBillingExcluded || !villaId
-          ? 0
-          : prisma.villaMaintenanceSnapshot.count({
-              where: {
-                villaId,
-                status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
-              },
-            }),
+    const [complaintCount, pendingParcels, upcomingBookings, money] = await Promise.all([
         // Total complaints filed by this resident.
         prisma.complaint.count({
           where: { societyId, residentId: userId },
@@ -198,6 +201,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         villaId
           ? prisma.parcel.count({
               where: {
+                societyId,
                 villaId,
                 status: { in: ["RECEIVED", "PENDING"] },
               },
@@ -206,6 +210,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         // Upcoming amenity bookings.
         prisma.amenityBooking.count({
           where: {
+            societyId,
             residentId: userId,
             status: { in: ["CONFIRMED", "PENDING"] },
             startTime: { gte: now },
@@ -242,6 +247,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         ? Math.min(100, (collectedForRate / money.expectedAllTime) * 100)
         : 0;
 
+    res.setHeader("Cache-Control", "no-store");
     return res.json({
       user: {
         name: user?.name,
@@ -250,7 +256,8 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         villa: user?.villa,
       },
       stats: {
-        pendingMaintenance,
+        pendingMaintenance: personalPendingCount,
+        personalPendingAmount,
         activeComplaints: complaintCount,
         totalComplaints: complaintCount,
         pendingParcels,

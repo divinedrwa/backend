@@ -25,6 +25,7 @@ import {
   invalidateDisplayCycleHint,
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
+import { reconcileVillaLedgersForRecentCycles, invalidateReconcileCache } from "./services/resident-pending-dues";
 import { writeAdminAuditLog } from "./services/audit-log";
 import { notifyVillaMaintenanceLedgerUpdate } from "../../lib/maintenanceLedgerNotify";
 import { notifySociety } from "../../services/notification.service";
@@ -62,11 +63,22 @@ router.get("/cycles/current", requireAuth, async (req, res, next) => {
     const billingCycleId =
       typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
     try {
+      const billingSubject = await prisma.user.findFirst({
+        where: { id: userId, societyId },
+        select: { villaId: true, maintenanceBillingRole: true },
+      });
+      if (
+        billingSubject?.villaId &&
+        billingSubject.maintenanceBillingRole !== MaintenanceBillingRole.EXCLUDED
+      ) {
+        await reconcileVillaLedgersForRecentCycles(societyId, billingSubject.villaId);
+      }
       const payload = await buildCurrentCycleResponse({
         societyId,
         userId,
         billingCycleId: billingCycleId || undefined,
       });
+      res.setHeader("Cache-Control", "no-store");
       res.json(payload);
     } catch (err) {
       if (err instanceof Error && err.message === "BILLING_CYCLE_NOT_FOUND") {
@@ -288,7 +300,7 @@ router.delete(
       }
 
       const paymentCount = await prisma.userCyclePayment.count({
-        where: { cycleId: id },
+        where: { cycleId: id, cycle: { societyId: auth.societyId } },
       });
       if (paymentCount > 0) {
         res.status(409).json({
@@ -467,7 +479,7 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
     });
 
     const residentCount = await prisma.user.count({
-      where: { societyId: auth.societyId, role: UserRole.RESIDENT, isActive: true },
+      where: { societyId: auth.societyId, ...residentLikeRoleFilter, isActive: true },
     });
 
     const rows = await Promise.all(
@@ -777,6 +789,8 @@ router.post(
         return payment;
       });
 
+      if (user.villaId) invalidateReconcileCache(user.villaId);
+
       await writeAdminAuditLog({
         societyId: auth.societyId,
         adminId: auth.userId,
@@ -930,7 +944,12 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
 
     const cycleIds = cycles.map((c) => c.id);
     const users = await prisma.user.findMany({
-      where: { societyId: auth.societyId, role: UserRole.RESIDENT, isActive: true },
+      where: {
+        societyId: auth.societyId,
+        isActive: true,
+        villaId: { not: null },
+        ...residentLikeRoleFilter,
+      },
       select: { id: true, name: true, email: true, phone: true, villa: { select: { villaNumber: true } } },
     });
 

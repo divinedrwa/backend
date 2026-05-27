@@ -49,6 +49,29 @@ router.post(
       const body = req.body as z.infer<typeof phonePeInitiateSchema>;
       const { idempotencyKey, payAllPending } = body;
 
+      // Server-side idempotency: if the same key was already used for a
+      // PENDING order, return that order to prevent duplicate gateway charges.
+      if (idempotencyKey) {
+        const idempotentRow = await prisma.userCyclePayment.findFirst({
+          where: {
+            userId: auth.userId,
+            idempotencyKey,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: { not: null },
+          },
+        });
+        if (idempotentRow?.paymentGatewayOrderId) {
+          res.status(200).json({
+            merchantTransactionId: idempotentRow.paymentGatewayOrderId,
+            paymentId: idempotentRow.id,
+            totalDue: Number(idempotentRow.amountPaid),
+            existingOrder: true,
+            idempotent: true,
+          });
+          return;
+        }
+      }
+
       const payAllQuote = payAllPending
         ? await computePayAllQuote(auth.societyId, auth.userId)
         : null;
@@ -91,6 +114,24 @@ router.post(
       });
       if (existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
         res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
+
+      // Prevent orphaned orders: if a PENDING payment already has a gateway
+      // transaction, return it so the client retries with the same txnId
+      // instead of creating a second (which would orphan the first).
+      if (
+        existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
+        existing.paymentGatewayOrderId
+      ) {
+        res.status(200).json({
+          merchantTransactionId: existing.paymentGatewayOrderId,
+          paymentId: existing.id,
+          totalDue: adjustedDue,
+          payAllPending: payAllPending === true,
+          pendingCycleCount: payAllQuote?.pendingCount ?? 1,
+          existingOrder: true,
+        });
         return;
       }
 

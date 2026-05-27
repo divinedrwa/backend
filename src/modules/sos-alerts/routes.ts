@@ -1,7 +1,6 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
-import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -11,7 +10,6 @@ import {
   createSOSAlert,
   transitionSOSState,
   SOSTransitionType,
-  OPEN_SOS_STATUSES,
 } from "../../services/sos-coordinator";
 
 const router = Router();
@@ -60,8 +58,8 @@ const sosRateLimiter = rateLimit({
   message: { message: "Too many SOS alerts. Please wait before sending another." },
 });
 
-// POST /api/sos-alerts - Trigger SOS (residents)
-router.post("/", requireAuth, sosRateLimiter, validateBody(createSOSSchema), async (req, res, next) => {
+// POST /api/sos-alerts - Trigger SOS (residents/admin only)
+router.post("/", requireAuth, requireRole(UserRole.RESIDENT, UserRole.ADMIN), sosRateLimiter, validateBody(createSOSSchema), async (req, res, next) => {
   try {
     const { userId, societyId, villaId } = req.auth!;
     const { emergencyType, message, location, latitude, longitude } = req.body;
@@ -114,8 +112,10 @@ router.get("/", requireAuth, requireRole(UserRole.ADMIN, UserRole.GUARD), async 
     const { status, villaId } = req.query;
 
     const where: Record<string, unknown> = { societyId };
-    if (status) where.status = status;
-    if (villaId) where.villaId = villaId;
+    if (status && typeof status === "string" && Object.values(SOSStatus).includes(status as SOSStatus)) {
+      where.status = status;
+    }
+    if (villaId && typeof villaId === "string") where.villaId = villaId;
 
     const pagination = getPagination(req);
     const [alerts, total] = await Promise.all([
