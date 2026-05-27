@@ -6,6 +6,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { notifyUsers } from "../../services/notification.service";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 
 const router = Router();
 
@@ -85,7 +86,12 @@ router.post(
       void (async () => {
         try {
           const residents = await prisma.user.findMany({
-            where: { villaId: body.villaId, societyId: req.auth!.societyId, role: UserRole.RESIDENT, isActive: true },
+            where: {
+              villaId: body.villaId,
+              societyId: req.auth!.societyId,
+              ...residentLikeRoleFilter,
+              isActive: true,
+            },
             select: { id: true },
           });
           if (residents.length > 0) {

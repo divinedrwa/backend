@@ -1,10 +1,7 @@
 import crypto from "crypto";
 import {
   BillingPaymentSource,
-  BillingUserPaymentStatus,
-  MaintenanceBillingRole,
   Prisma,
-  UserRole,
 } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
@@ -13,7 +10,12 @@ import {
 } from "../../lib/maintenanceBillingRole";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
-import { syncAllUserCyclePaymentsForMaintenanceCycle } from "../billing-cycle/billing-collection-link";
+import {
+  ensureVillaLedgersAligned,
+  reconcileAllVillasForBillingCycle,
+  syncAllUserCyclePaymentsForMaintenanceCycle,
+  syncBillingUserCyclePaymentsFromSnapshot,
+} from "../billing-cycle/billing-collection-link";
 import {
   notifySocietyMaintenanceLedgerUpdate,
   notifyVillaMaintenanceLedgerUpdate,
@@ -87,44 +89,14 @@ async function syncUserCyclePaymentsFromSnapshot(
     billingCycleId: billingCycle.id,
   });
 
-  const primaryResidents = await tx.user.findMany({
-    where: {
-      societyId: params.societyId,
-      villaId: params.villaId,
-      role: UserRole.RESIDENT,
-      isActive: true,
-      maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-    },
-    select: { id: true },
+  await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    billingCycleId: billingCycle.id,
+    paidAmount: params.newPaid,
+    snapStatus: params.snapStatus,
+    source: BillingPaymentSource.CASH_MANUAL,
   });
-
-  const payStatus =
-    params.snapStatus === "PAID" || params.snapStatus === "WAIVED"
-      ? BillingUserPaymentStatus.SUCCESS
-      : BillingUserPaymentStatus.PENDING;
-  const paidAt = new Date();
-
-  for (const u of primaryResidents) {
-    await tx.userCyclePayment.upsert({
-      where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-      create: {
-        userId: u.id,
-        cycleId: billingCycle.id,
-        amountPaid: new Prisma.Decimal(params.newPaid),
-        paymentStatus: payStatus,
-        source: BillingPaymentSource.CASH_MANUAL,
-        manualMarkedByAdminId: params.adminId,
-        paidAt,
-      },
-      update: {
-        amountPaid: new Prisma.Decimal(params.newPaid),
-        paymentStatus: payStatus,
-        source: BillingPaymentSource.CASH_MANUAL,
-        manualMarkedByAdminId: params.adminId,
-        paidAt,
-      },
-    });
-  }
 }
 
 function parseCycleKey(cycleKey: string): { year: number; month: number } | null {
@@ -758,6 +730,28 @@ router.put(
             }
           }
         }
+
+        const billingCycle = await tx.billingCycle.findFirst({
+          where: {
+            societyId,
+            financialYearId: cycle.financialYearId,
+            cycleKey: cycle.periodKey,
+          },
+          select: { id: true },
+        });
+        if (billingCycle) {
+          await applyVillaCreditAcrossSnapshots(tx, {
+            societyId,
+            villaId: body.villaId,
+            financialYearId: cycle.financialYearId,
+            throughCycleId: cycleId,
+          });
+          await ensureVillaLedgersAligned(tx, {
+            societyId,
+            villaId: body.villaId,
+            billingCycleId: billingCycle.id,
+          });
+        }
       });
 
       return res.json({
@@ -967,6 +961,13 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
           });
         });
       }
+
+      await prisma.$transaction(async (tx) => {
+        await reconcileAllVillasForBillingCycle(tx, {
+          societyId,
+          billingCycleId: billingCycle.id,
+        });
+      });
     }
 
     return res.json({
@@ -1077,6 +1078,23 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       where: { id: cycleId, societyId },
     });
     if (!cycle) return res.status(404).json({ message: "Cycle not found" });
+
+    const linkedBillingCycle = await prisma.billingCycle.findFirst({
+      where: {
+        societyId,
+        financialYearId: cycle.financialYearId,
+        cycleKey: cycle.periodKey,
+      },
+      select: { id: true },
+    });
+    if (linkedBillingCycle) {
+      await prisma.$transaction(async (tx) => {
+        await reconcileAllVillasForBillingCycle(tx, {
+          societyId,
+          billingCycleId: linkedBillingCycle.id,
+        });
+      });
+    }
 
     const [villas, snapshots, payments, existingRule, exclusions] = await Promise.all([
       prisma.villa.findMany({

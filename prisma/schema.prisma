@@ -340,6 +340,7 @@ model User {
   incidents         Incident[]
   sosAlerts         SOSAlert[]
   assignedSosAlerts SOSAlert[]           @relation("SosAssignedGuard")
+  sosCheckpoints    SOSCheckpoint[]      @relation("SOSCheckpointActor")
   assignedGate      Gate?                @relation("GuardAssignment")
   complaints        Complaint[]          @relation("ResidentComplaints")
   familyMembers     FamilyMember[]       @relation("ResidentFamilyMembers")
@@ -361,6 +362,9 @@ model User {
 
   visitorVillaApprovals VisitorVilla[] @relation("VisitorVillaResponder")
   visitorVillaAsTarget  VisitorVilla[] @relation("VisitorVillaResidentTarget")
+  visitorsCheckedIn     Visitor[]      @relation("VisitorCheckedInByGuard")
+  visitorsCheckedOut    Visitor[]      @relation("VisitorCheckedOutByGuard")
+  visitorCheckpoints    VisitorCheckpoint[] @relation("VisitorCheckpointActor")
   amenityBookings       AmenityBooking[]
   unit                  Unit?          @relation(fields: [unitId], references: [id], onDelete: Restrict)
   cycleVillaExclusions  CycleVillaExclusion[] @relation("CycleVillaExclusions")
@@ -857,12 +861,17 @@ model Visitor {
   visitorType   VisitorType @default(GUEST)
   vehicleNumber String?
   photo         String?     // Added for mobile API
+  photoUrl      String?     // Cloudinary URL for pre-approved visitors
   checkInAt     DateTime    @default(now())
   checkInTime   DateTime    @default(now()) // Alias for mobile API compatibility
   checkOutAt    DateTime?
   checkOutTime  DateTime?   // Alias for mobile API compatibility
   status        VisitorStatus @default(CHECKED_IN)
   createdBy       String?
+  /// Guard who checked in the visitor
+  checkedInByGuardId String?
+  /// Guard who checked out the visitor
+  checkedOutByGuardId String?
   /// Link back to the pre-approval that was consumed to admit this visitor (audit trail).
   preApprovedId   String?   @unique
   createdAt       DateTime    @default(now())
@@ -871,7 +880,10 @@ model Visitor {
   society        Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
   gate           Gate?                @relation(fields: [gateId], references: [id], onDelete: SetNull)
   preApproved    PreApprovedVisitor?  @relation(fields: [preApprovedId], references: [id], onDelete: SetNull)
+  checkedInByGuard  User?             @relation("VisitorCheckedInByGuard", fields: [checkedInByGuardId], references: [id], onDelete: SetNull)
+  checkedOutByGuard User?             @relation("VisitorCheckedOutByGuard", fields: [checkedOutByGuardId], references: [id], onDelete: SetNull)
   villaVisits    VisitorVilla[]
+  checkpoints    VisitorCheckpoint[]
 
   @@index([societyId])
   @@index([gateId])
@@ -881,6 +893,8 @@ model Visitor {
   @@index([societyId, checkOutAt])
   @@index([societyId, status])
   @@index([societyId, checkInAt])
+  @@index([checkedInByGuardId])
+  @@index([checkedOutByGuardId])
 }
 
 model VisitorVilla {
@@ -943,6 +957,34 @@ enum VisitorMultiVillaApprovalMode {
   ANY_ONE_APPROVAL
   /// Every selected villa must approve; any rejection denies entry.
   ALL_VILLAS_REQUIRED
+}
+
+/// Audit trail for visitor lifecycle events (check-in, approval, checkout, etc.)
+model VisitorCheckpoint {
+  id             String   @id @default(cuid())
+  visitorId      String
+  checkpointType VisitorCheckpointType
+  timestamp      DateTime
+  actorUserId    String
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  visitor Visitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  actor   User    @relation("VisitorCheckpointActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+
+  @@index([visitorId, timestamp])
+  @@index([actorUserId])
+  @@index([checkpointType])
+}
+
+enum VisitorCheckpointType {
+  ENTRY_REQUESTED
+  APPROVAL_PENDING
+  APPROVED
+  REJECTED
+  ADMITTED
+  EXITED
+  EMERGENCY_OVERRIDE
 }
 
 enum ParcelStatus {
@@ -1562,6 +1604,8 @@ model SOSAlert {
   villa         Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
   user          User?   @relation(fields: [triggeredBy], references: [id], onDelete: SetNull)
   assignedGuard User?   @relation("SosAssignedGuard", fields: [assignedGuardId], references: [id], onDelete: SetNull)
+  checkpoints   SOSCheckpoint[]
+  escalations   SOSEscalation[]
 
   @@index([societyId])
   @@index([villaId])
@@ -1569,6 +1613,56 @@ model SOSAlert {
   @@index([createdAt])
   @@index([assignedGuardId])
   @@index([societyId, status])
+}
+
+/// Audit trail for SOS state changes
+model SOSCheckpoint {
+  id             String   @id @default(cuid())
+  alertId        String
+  checkpointType SOSCheckpointType
+  timestamp      DateTime
+  actorUserId    String?
+  metadata       Json     @default("{}")
+  createdAt      DateTime @default(now())
+
+  alert SOSAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+  actor User?    @relation("SOSCheckpointActor", fields: [actorUserId], references: [id], onDelete: SetNull)
+
+  @@index([alertId, timestamp])
+  @@index([actorUserId])
+  @@index([checkpointType])
+}
+
+enum SOSCheckpointType {
+  CREATED
+  ACKNOWLEDGED
+  IN_PROGRESS
+  RESOLVED
+  CANCELLED
+  ESCALATED
+}
+
+/// Persistent escalation tracking (replaces in-memory timers)
+model SOSEscalation {
+  id          String   @id @default(cuid())
+  alertId     String
+  scheduledAt DateTime
+  processedAt DateTime?
+  status      SOSEscalationStatus @default(PENDING)
+  createdAt   DateTime @default(now())
+
+  alert SOSAlert @relation(fields: [alertId], references: [id], onDelete: Cascade)
+
+  @@index([alertId])
+  @@index([scheduledAt, status])
+  @@index([status])
+}
+
+enum SOSEscalationStatus {
+  PENDING
+  EXECUTED
+  SKIPPED
+  FAILED
 }
 
 // Water Supply Tracking

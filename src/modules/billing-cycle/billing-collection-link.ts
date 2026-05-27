@@ -1,11 +1,14 @@
+import crypto from "crypto";
 import {
   BillingPaymentSource,
   BillingUserPaymentStatus,
   MaintenanceBillingRole,
+  PaymentMode,
   Prisma,
-  UserRole,
 } from "@prisma/client";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
 import { LedgerSyncError } from "./ledger-sync-errors";
 
@@ -168,7 +171,7 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
-      role: UserRole.RESIDENT,
+      ...residentLikeRoleFilter,
       isActive: true,
       maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
     },
@@ -275,4 +278,321 @@ export async function realignVillaBillingFromSnapshots(
       source: BillingPaymentSource.CASH_MANUAL,
     });
   }
+}
+
+/**
+ * Posts a billing mark-cash amount into the maintenance-management cash ledger
+ * (MaintenancePayment + credit walker). Always ensures collection cycle + snapshot exist.
+ */
+export async function postMarkCashToMaintenanceLedger(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    villaId: string;
+    billingCycleId: string;
+    cashAmount: number;
+    paidAt: Date;
+    note?: string;
+  },
+): Promise<void> {
+  if (params.cashAmount <= 0.005) return;
+
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: { id: params.billingCycleId, societyId: params.societyId },
+    select: { id: true, financialYearId: true, amount: true },
+  });
+  if (!billingCycle?.financialYearId) return;
+
+  const { maintenanceCycleId, dueDate } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+  const { snapshotId } = await ensureVillaSnapshotForMaintenanceCycle(tx, {
+    maintenanceCycleId,
+    villaId: params.villaId,
+    fallbackExpected: Number(billingCycle.amount),
+    dueDate,
+  });
+
+  const maintenanceCycle = await tx.maintenanceCollectionCycle.findUnique({
+    where: { id: maintenanceCycleId },
+    select: { id: true, periodMonth: true, periodYear: true, dueDate: true },
+  });
+  if (!maintenanceCycle) return;
+
+  const maintenanceRow = await tx.maintenance.upsert({
+    where: {
+      villaId_month_year: {
+        villaId: params.villaId,
+        month: maintenanceCycle.periodMonth,
+        year: maintenanceCycle.periodYear,
+      },
+    },
+    create: {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      month: maintenanceCycle.periodMonth,
+      year: maintenanceCycle.periodYear,
+      amount: new Prisma.Decimal(Number(billingCycle.amount)),
+      dueDate: maintenanceCycle.dueDate,
+      status: "PENDING",
+    },
+    update: {
+      dueDate: maintenanceCycle.dueDate,
+    },
+  });
+
+  await tx.maintenancePayment.create({
+    data: {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      maintenanceId: maintenanceRow.id,
+      month: maintenanceCycle.periodMonth,
+      year: maintenanceCycle.periodYear,
+      amount: new Prisma.Decimal(params.cashAmount),
+      paymentDate: params.paidAt,
+      paymentMode: PaymentMode.CASH,
+      receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
+      remarks:
+        params.note && params.note.trim().length > 0
+          ? `Billing cash sync: ${params.note.trim()}`
+          : "Billing cash sync",
+      maintenanceCollectionCycleId: maintenanceCycle.id,
+      villaMaintenanceSnapshotId: snapshotId,
+    },
+  });
+
+  await applyVillaCreditAcrossSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    financialYearId: billingCycle.financialYearId,
+    throughCycleId: maintenanceCycle.id,
+  });
+
+  const snap = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: params.villaId } },
+    select: { paidAmount: true, status: true },
+  });
+  if (snap) {
+    await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      billingCycleId: params.billingCycleId,
+      paidAmount: Number(snap.paidAmount),
+      snapStatus: snap.status,
+      source: BillingPaymentSource.CASH_MANUAL,
+    });
+  }
+}
+
+/**
+ * When `user_payments` shows SUCCESS but maintenance snapshots still read unpaid,
+ * backfill MaintenancePayment rows from the billing ledger.
+ */
+export async function reconcileVillaLedgerFromUserCyclePayment(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    villaId: string;
+    billingCycleId: string;
+    note?: string;
+  },
+): Promise<boolean> {
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: { id: params.billingCycleId, societyId: params.societyId },
+    select: { id: true, financialYearId: true, amount: true, paymentEndDate: true },
+  });
+  if (!billingCycle?.financialYearId) return false;
+
+  const ucp = await tx.userCyclePayment.findFirst({
+    where: {
+      cycleId: params.billingCycleId,
+      paymentStatus: BillingUserPaymentStatus.SUCCESS,
+      user: {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        isActive: true,
+        maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+        ...residentLikeRoleFilter,
+      },
+    },
+    orderBy: { amountPaid: "desc" },
+    select: { amountPaid: true, paidAt: true },
+  });
+  if (!ucp) return false;
+
+  const billingPaid = Number(ucp.amountPaid);
+  if (billingPaid <= 0.005) return false;
+
+  const { maintenanceCycleId, dueDate } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+  await ensureVillaSnapshotForMaintenanceCycle(tx, {
+    maintenanceCycleId,
+    villaId: params.villaId,
+    fallbackExpected: Number(billingCycle.amount),
+    dueDate,
+  });
+
+  const cashAgg = await tx.maintenancePayment.aggregate({
+    where: {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      maintenanceCollectionCycleId: maintenanceCycleId,
+    },
+    _sum: { amount: true },
+  });
+  const cashRecorded = Number(cashAgg._sum.amount ?? 0);
+  const gap = Math.round((billingPaid - cashRecorded) * 100) / 100;
+
+  if (gap > 0.005) {
+    await postMarkCashToMaintenanceLedger(tx, {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      billingCycleId: params.billingCycleId,
+      cashAmount: gap,
+      paidAt: ucp.paidAt ?? new Date(),
+      note: params.note ?? "Reconcile billing payment → maintenance ledger",
+    });
+    return true;
+  }
+
+  await applyVillaCreditAcrossSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    financialYearId: billingCycle.financialYearId,
+    throughCycleId: maintenanceCycleId,
+  });
+
+  const snap = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: params.villaId } },
+    select: { paidAmount: true, status: true },
+  });
+  if (!snap) return false;
+
+  await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    billingCycleId: params.billingCycleId,
+    paidAmount: Number(snap.paidAmount),
+    snapStatus: snap.status,
+    source: BillingPaymentSource.CASH_MANUAL,
+  });
+
+  return snap.status === "PAID" || Number(snap.paidAmount) > 0.005;
+}
+
+/**
+ * Full villa alignment: billing `user_payments` → maintenance cash ledger → credit walker → billing rows.
+ * Call after any maintenance/billing mutation that might touch only one ledger.
+ */
+export async function ensureVillaLedgersAligned(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    villaId: string;
+    billingCycleId: string;
+    note?: string;
+  },
+): Promise<void> {
+  await reconcileVillaLedgerFromUserCyclePayment(tx, params);
+
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: { id: params.billingCycleId, societyId: params.societyId },
+    select: { financialYearId: true },
+  });
+  if (!billingCycle?.financialYearId) return;
+
+  const { maintenanceCycleId } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+
+  await applyVillaCreditAcrossSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    financialYearId: billingCycle.financialYearId,
+    throughCycleId: maintenanceCycleId,
+  });
+
+  const snap = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: params.villaId } },
+    select: { paidAmount: true, status: true },
+  });
+  if (!snap) return;
+
+  await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    billingCycleId: params.billingCycleId,
+    paidAmount: Number(snap.paidAmount),
+    snapStatus: snap.status,
+    source: BillingPaymentSource.CASH_MANUAL,
+  });
+}
+
+/** Repair every primary occupant villa for a billing cycle (admin sync / grid load). */
+export async function reconcileAllVillasForBillingCycle(
+  tx: Prisma.TransactionClient,
+  params: { societyId: string; billingCycleId: string },
+): Promise<number> {
+  const primaryOccupants = await tx.user.findMany({
+    where: {
+      societyId: params.societyId,
+      isActive: true,
+      maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+      villaId: { not: null },
+      ...residentLikeRoleFilter,
+    },
+    select: { villaId: true },
+  });
+  const villaIds = [
+    ...new Set(
+      primaryOccupants
+        .map((u) => u.villaId)
+        .filter((id): id is string => typeof id === "string" && id.length > 0),
+    ),
+  ];
+
+  let repaired = 0;
+  for (const villaId of villaIds) {
+    const changed = await reconcileVillaLedgerFromUserCyclePayment(tx, {
+      societyId: params.societyId,
+      villaId,
+      billingCycleId: params.billingCycleId,
+    });
+    if (changed) repaired += 1;
+    await ensureVillaLedgersAligned(tx, {
+      societyId: params.societyId,
+      villaId,
+      billingCycleId: params.billingCycleId,
+    });
+  }
+
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: { id: params.billingCycleId, societyId: params.societyId },
+    select: { financialYearId: true, cycleKey: true },
+  });
+  if (billingCycle?.financialYearId) {
+    const mcc = await tx.maintenanceCollectionCycle.findFirst({
+      where: {
+        societyId: params.societyId,
+        financialYearId: billingCycle.financialYearId,
+        periodKey: billingCycle.cycleKey,
+      },
+      select: { id: true, periodKey: true },
+    });
+    if (mcc) {
+      await syncAllUserCyclePaymentsForMaintenanceCycle(tx, {
+        societyId: params.societyId,
+        maintenanceCycleId: mcc.id,
+        financialYearId: billingCycle.financialYearId,
+        periodKey: mcc.periodKey,
+        source: BillingPaymentSource.CASH_MANUAL,
+      });
+    }
+  }
+
+  return repaired;
 }

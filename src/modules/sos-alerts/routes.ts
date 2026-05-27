@@ -6,14 +6,13 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { NotificationCategory, SOSType, SOSStatus, UserRole } from "@prisma/client";
-import { notifySocietyRoles } from "../../services/notification.service";
+import { SOSType, SOSStatus, UserRole } from "@prisma/client";
 import {
+  createSOSAlert,
+  transitionSOSState,
+  SOSTransitionType,
   OPEN_SOS_STATUSES,
-  scheduleSosEscalation,
-  clearSosEscalation,
-  notifyResidentSosUpdate,
-} from "../../services/sosLifecycle.service";
+} from "../../services/sos-coordinator";
 
 const router = Router();
 
@@ -52,14 +51,6 @@ const alertInclude = {
   },
 } as const;
 
-function villaLabelFromAlert(a: {
-  villa: { villaNumber: string; block: string | null };
-}): string {
-  return a.villa.block
-    ? `${a.villa.block} · ${a.villa.villaNumber}`
-    : a.villa.villaNumber;
-}
-
 /** SOS rate limit: 5 per 15 min per IP to prevent accidental spam. */
 const sosRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -81,25 +72,9 @@ router.post("/", requireAuth, sosRateLimiter, validateBody(createSOSSchema), asy
       });
     }
 
-    const duplicate = await prisma.sOSAlert.findFirst({
-      where: {
-        triggeredBy: userId,
-        societyId,
-        status: { in: OPEN_SOS_STATUSES },
-      },
-      select: { id: true },
-    });
-
-    if (duplicate) {
-      return res.status(409).json({
-        message:
-          "You already have an active SOS. Wait for resolution or cancel it from the app.",
-        existingAlertId: duplicate.id,
-      });
-    }
-
-    const alert = await prisma.sOSAlert.create({
-      data: {
+    // Use centralized coordinator
+    const alert = await prisma.$transaction(async (tx) => {
+      return await createSOSAlert(tx, {
         societyId,
         villaId,
         triggeredBy: userId,
@@ -108,34 +83,26 @@ router.post("/", requireAuth, sosRateLimiter, validateBody(createSOSSchema), asy
         location,
         latitude,
         longitude,
-        status: SOSStatus.CREATED,
-      },
+      });
+    });
+
+    // Fetch with full includes for response
+    const fullAlert = await prisma.sOSAlert.findUnique({
+      where: { id: alert.id },
       include: alertInclude,
     });
 
-    const vl = villaLabelFromAlert(alert);
-
-    void notifySocietyRoles({
-      societyId,
-      roles: [UserRole.GUARD, UserRole.ADMIN],
-      category: NotificationCategory.SOS,
-      title: `🚨 SOS: ${emergencyType}`,
-      body: `${alert.user?.name ?? "Unknown resident"} · ${vl}${message ? ` · ${message}` : ""}`,
-      data: {
-        alertId: alert.id,
-        villaId,
-        emergencyType,
-        type: "SOS_CREATED",
-      },
-    }).catch((err) => logger.error({ err }, "[notifications] SOS push failed"));
-
-    scheduleSosEscalation(alert.id, societyId, vl, emergencyType);
-
     return res.status(201).json({
-      alert,
+      alert: fullAlert,
       message: "SOS alert triggered. Guards and admin have been notified.",
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "DUPLICATE_OPEN_SOS") {
+      return res.status(409).json({
+        message:
+          "You already have an active SOS. Wait for resolution or cancel it from the app.",
+      });
+    }
     next(error);
   }
 });
@@ -234,34 +201,23 @@ router.patch(
         });
       }
 
-      clearSosEscalation(id);
-
-      const acknowledgedAt = new Date();
-      const responseTimeSec = Math.floor(
-        (acknowledgedAt.getTime() - alert.createdAt.getTime()) / 1000,
-      );
-
-      const updatedAlert = await prisma.sOSAlert.update({
-        where: { id },
-        data: {
-          status: SOSStatus.ACKNOWLEDGED,
-          acknowledgedBy: userId,
-          acknowledgedAt,
-          responseTime: responseTimeSec,
-          assignedGuardId: userId,
-        },
-        include: alertInclude,
+      // Use centralized coordinator
+      await prisma.$transaction(async (tx) => {
+        await transitionSOSState(tx, {
+          alertId: id,
+          fromStatus: alert.status,
+          toStatus: SOSStatus.ACKNOWLEDGED,
+          transitionType: SOSTransitionType.ACKNOWLEDGE,
+          actorUserId: userId,
+          societyId,
+          timestamp: new Date(),
+        });
       });
 
-      if (alert.triggeredBy) {
-        void notifyResidentSosUpdate({
-          alertId: id,
-          residentUserId: alert.triggeredBy,
-          title: "Help is on the way",
-          body: "A guard has acknowledged your SOS.",
-          extraData: { sosStatus: SOSStatus.ACKNOWLEDGED },
-        }).catch(() => undefined);
-      }
+      const updatedAlert = await prisma.sOSAlert.findUnique({
+        where: { id },
+        include: alertInclude,
+      });
 
       return res.json({
         alert: updatedAlert,
@@ -297,25 +253,23 @@ router.patch(
         });
       }
 
-      const updatedAlert = await prisma.sOSAlert.update({
-        where: { id },
-        data: {
-          status: SOSStatus.IN_PROGRESS,
-          inProgressAt: new Date(),
-          assignedGuardId: userId,
-        },
-        include: alertInclude,
+      // Use centralized coordinator
+      await prisma.$transaction(async (tx) => {
+        await transitionSOSState(tx, {
+          alertId: id,
+          fromStatus: alert.status,
+          toStatus: SOSStatus.IN_PROGRESS,
+          transitionType: SOSTransitionType.START_RESPONSE,
+          actorUserId: userId,
+          societyId,
+          timestamp: new Date(),
+        });
       });
 
-      if (alert.triggeredBy) {
-        void notifyResidentSosUpdate({
-          alertId: id,
-          residentUserId: alert.triggeredBy,
-          title: "Response in progress",
-          body: "Emergency responders are attending your SOS.",
-          extraData: { sosStatus: SOSStatus.IN_PROGRESS },
-        }).catch(() => undefined);
-      }
+      const updatedAlert = await prisma.sOSAlert.findUnique({
+        where: { id },
+        include: alertInclude,
+      });
 
       return res.json({
         alert: updatedAlert,
@@ -355,33 +309,23 @@ router.patch(
         return res.status(400).json({ message: "Cancelled SOS cannot be resolved" });
       }
 
-      clearSosEscalation(id);
-
-      const resolvedAt = new Date();
-      const resolutionSeconds = Math.floor(
-        (resolvedAt.getTime() - alert.createdAt.getTime()) / 1000,
-      );
-
-      const updatedAlert = await prisma.sOSAlert.update({
-        where: { id },
-        data: {
-          status: SOSStatus.RESOLVED,
-          resolvedBy: userId,
-          resolvedAt,
-          responseTime: alert.responseTime ?? resolutionSeconds,
-        },
-        include: alertInclude,
+      // Use centralized coordinator
+      await prisma.$transaction(async (tx) => {
+        await transitionSOSState(tx, {
+          alertId: id,
+          fromStatus: alert.status,
+          toStatus: SOSStatus.RESOLVED,
+          transitionType: SOSTransitionType.RESOLVE,
+          actorUserId: userId,
+          societyId,
+          timestamp: new Date(),
+        });
       });
 
-      if (alert.triggeredBy) {
-        void notifyResidentSosUpdate({
-          alertId: id,
-          residentUserId: alert.triggeredBy,
-          title: "SOS resolved",
-          body: "Your emergency alert has been closed by security.",
-          extraData: { sosStatus: SOSStatus.RESOLVED },
-        }).catch(() => undefined);
-      }
+      const updatedAlert = await prisma.sOSAlert.findUnique({
+        where: { id },
+        include: alertInclude,
+      });
 
       return res.json({
         alert: updatedAlert,
@@ -424,26 +368,24 @@ router.post(
         return res.status(400).json({ message: "This SOS cannot be cancelled" });
       }
 
-      clearSosEscalation(id);
-
-      const updated = await prisma.sOSAlert.update({
-        where: { id },
-        data: {
-          status: SOSStatus.CANCELLED,
-          cancelReason: reason,
-          resolvedAt: new Date(),
-        },
-        include: alertInclude,
+      // Use centralized coordinator
+      await prisma.$transaction(async (tx) => {
+        await transitionSOSState(tx, {
+          alertId: id,
+          fromStatus: alert.status,
+          toStatus: SOSStatus.CANCELLED,
+          transitionType: SOSTransitionType.CANCEL,
+          actorUserId: userId,
+          societyId,
+          timestamp: new Date(),
+          metadata: { cancelReason: reason },
+        });
       });
 
-      void notifySocietyRoles({
-        societyId,
-        roles: [UserRole.GUARD, UserRole.ADMIN],
-        category: NotificationCategory.SOS,
-        title: "SOS cancelled by resident",
-        body: reason,
-        data: { alertId: id, type: "SOS_CANCELLED" },
-      }).catch(() => undefined);
+      const updated = await prisma.sOSAlert.findUnique({
+        where: { id },
+        include: alertInclude,
+      });
 
       return res.json({ alert: updated, message: "SOS cancelled" });
     } catch (error) {

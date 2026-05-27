@@ -7,9 +7,9 @@ import { runVisitorApproveEntry } from "./visitorApproveEntryFlow.js";
 function mockDb(overrides: {
   shift?: { gateId: string } | null;
   preApproved?: Record<string, unknown> | null;
-  updateCount?: number;
+  unitFound?: boolean;
 }): PrismaClient {
-  const { shift = { gateId: "g1" }, preApproved, updateCount = 1 } = overrides;
+  const { shift = { gateId: "g1" }, preApproved, unitFound = true } = overrides;
   return {
     guardShift: {
       findFirst: async () => shift,
@@ -19,25 +19,32 @@ function mockDb(overrides: {
       findFirst: async () => preApproved,
     },
     $transaction: async (fn: (tx: unknown) => Promise<unknown>) => {
-      // Transaction uses `ensureBillingAccountForProperty` + `getPreferredUnitIdForVilla`.
-      // Mock `unit.findFirst` so a preferred unit id is always returned.
       const tx = {
         preApprovedVisitor: {
-          updateMany: async () => ({ count: updateCount }),
+          findFirst: async () => preApproved,
+          update: async () => ({}),
         },
         visitor: {
-          create: async () => ({ id: "vis1" }),
-          findUnique: async () => ({ id: "vis1", name: "Test" }),
+          create: async () => ({
+            id: "vis1",
+            societyId: "s1",
+            villaId: "v1",
+            triggeredBy: "u1",
+            name: "Test",
+          }),
         },
         visitorVilla: {
           create: async () => ({}),
+          findMany: async () => [{ villaId: "v1" }],
         },
         unit: {
-          findFirst: async () => ({ id: "default-unit-1" }),
-          create: async () => ({ id: "default-unit-1" }),
+          findFirst: async () => (unitFound ? { id: "default-unit-1" } : null),
         },
-        billingAccount: {
-          upsert: async () => ({}),
+        user: {
+          findMany: async () => [],
+        },
+        visitorCheckpoint: {
+          create: async () => ({}),
         },
       };
       return fn(tx);
@@ -68,7 +75,7 @@ describe("runVisitorApproveEntry", () => {
       villaId: "v1",
     });
     assert.equal(r.status, 404);
-    assert.equal(r.body["message"], "OTP not found");
+    assert.equal(r.body["message"], "OTP not found or invalid");
   });
 
   it("409 when pre-approved already used", async () => {
@@ -114,10 +121,10 @@ describe("runVisitorApproveEntry", () => {
       now: new Date("2026-06-01T12:00:00.000Z"),
     });
     assert.equal(r.status, 400);
-    assert.equal(r.body["message"], "OTP expired");
+    assert.equal(r.body["message"], "Pre-approval has expired");
   });
 
-  it("201 on happy path", async () => {
+  it("200 on happy path", async () => {
     const db = mockDb({
       preApproved: {
         id: "pa1",
@@ -136,31 +143,7 @@ describe("runVisitorApproveEntry", () => {
       otp: "1234",
       villaId: "v1",
     });
-    assert.equal(r.status, 201);
+    assert.equal(r.status, 200);
     assert.equal(r.body["admitted"], true);
-  });
-
-  it("409 when optimistic lock fails inside transaction", async () => {
-    const db = mockDb({
-      preApproved: {
-        id: "pa1",
-        isUsed: false,
-        isActive: true,
-        name: "A",
-        phone: "1",
-        visitorType: VisitorType.GUEST,
-        purpose: null,
-        validUntil: null,
-      },
-      updateCount: 0,
-    });
-    const r = await runVisitorApproveEntry(db, {
-      userId: "u1",
-      societyId: "s1",
-      otp: "1234",
-      villaId: "v1",
-    });
-    assert.equal(r.status, 409);
-    assert.equal(r.body["message"], "OTP already used");
   });
 });

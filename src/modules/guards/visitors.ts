@@ -20,6 +20,10 @@ import {
   resolveVisitorApprovalRecipientIds,
   type VisitorApprovalTarget,
 } from "./visitorResidentApproval.service";
+import {
+  transitionVisitorState,
+  VisitorTransitionType,
+} from "./visitor-state-manager";
 
 const router = Router();
 
@@ -316,7 +320,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 // POST /api/guards/visitor-checkout - Check-out visitor
 router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(checkOutSchema), async (req, res, next) => {
   try {
-    const { societyId } = req.auth!;
+    const { societyId, userId } = req.auth!;
     const { visitorId } = req.body;
 
     const visitor = await prisma.visitor.findFirst({
@@ -331,12 +335,28 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
       return res.status(400).json({ message: "Visitor already checked out" });
     }
 
-    const updated = await prisma.visitor.update({
+  // Use centralized state manager for checkout
+  await prisma.$transaction(async (tx) => {
+    return await transitionVisitorState(tx, {
+      visitorId,
+      fromStatus: visitor.status,
+      toStatus: VisitorStatus.CHECKED_OUT,
+      transitionType: VisitorTransitionType.GUARD_CHECKOUT,
+      actorUserId: userId,
+      societyId,
+      timestamp: new Date(),
+    });
+  });
+
+    const updated = await prisma.visitor.findUnique({
       where: { id: visitorId },
-      data: {
-        checkOutAt: new Date(),
-        checkOutTime: new Date(),
-        status: "CHECKED_OUT",
+      include: {
+        villaVisits: {
+          include: {
+            villa: { select: { villaNumber: true } },
+          },
+        },
+        gate: { select: { name: true } },
       },
     });
 
@@ -448,9 +468,21 @@ router.post(
         return res.status(400).json({ message: "Visitor already checked out" });
       }
 
-      const updated = await prisma.visitor.update({
+    // Use centralized state manager for final admission
+    await prisma.$transaction(async (tx) => {
+      return await transitionVisitorState(tx, {
+        visitorId,
+        fromStatus: visitor.status,
+        toStatus: VisitorStatus.CHECKED_IN,
+        transitionType: VisitorTransitionType.GUARD_ADMIT,
+        actorUserId: userId,
+        societyId,
+        timestamp: now,
+      });
+    });
+
+      const updated = await prisma.visitor.findUnique({
         where: { id: visitorId },
-        data: { status: "CHECKED_IN" as VisitorStatus },
         include: {
           villaVisits: {
             include: {

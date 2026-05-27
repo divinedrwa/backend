@@ -4,9 +4,9 @@ import {
   MaintenanceBillingRole,
   PaymentMode,
   Prisma,
-  UserRole,
 } from "@prisma/client";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 
 type Tx = Prisma.TransactionClient;
@@ -185,7 +185,7 @@ export async function recordPaymentAndSyncLedgers(
       where: {
         societyId,
         villaId,
-        role: UserRole.RESIDENT,
+        ...residentLikeRoleFilter,
         isActive: true,
         maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
       },

@@ -9,6 +9,7 @@ import { reconcileAllSocieties } from "./lib/reconciliation";
 import { NotificationService } from "./services/notification.service";
 import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
+import { processEscalations } from "./services/sos-coordinator";
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {
@@ -78,6 +79,14 @@ cron.schedule(
           // Check complaint SLA breaches and notify admins
           await checkComplaintSlaBreaches();
           await autoCloseResolvedComplaints();
+
+          // Process pending SOS escalations (DB-backed)
+          const escalationsProcessed = await prisma.$transaction(async (tx) => {
+            return await processEscalations(tx);
+          });
+          if (escalationsProcessed > 0) {
+            logger.info({ escalationsProcessed }, "[billing-cron] SOS escalations processed");
+          }
 
           // Deactivate expired pre-approved visitors
           const { count: deactivatedPreApprovals } = await prisma.preApprovedVisitor.updateMany({

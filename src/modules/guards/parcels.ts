@@ -6,6 +6,7 @@ import { validateBody } from "../../middlewares/validate";
 import { NotificationCategory, UserRole, ParcelStatus } from "@prisma/client";
 import { notifyUsers } from "../../services/notification.service";
 import { resolveGuardLogRange } from "./guardLogRange";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 
 const router = Router();
 
@@ -61,7 +62,12 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
     void (async () => {
       try {
         const residents = await prisma.user.findMany({
-          where: { villaId, societyId, role: UserRole.RESIDENT, isActive: true },
+          where: {
+            villaId,
+            societyId,
+            ...residentLikeRoleFilter,
+            isActive: true,
+          },
           select: { id: true },
         });
         if (residents.length > 0) {

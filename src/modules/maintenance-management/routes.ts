@@ -11,7 +11,12 @@ import { Router } from "express";
 import { z } from "zod";
 import PDFDocument from "pdfkit";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { prisma } from "../../lib/prisma";
+import {
+  ensureVillaLedgersAligned,
+  syncBillingUserCyclePaymentsFromSnapshot,
+} from "../billing-cycle/billing-collection-link";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
@@ -466,6 +471,13 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
               },
             });
           }
+          if (billingCycle) {
+            await ensureVillaLedgersAligned(tx, {
+              societyId,
+              villaId: body.villaId,
+              billingCycleId: billingCycle.id,
+            });
+          }
         }
 
         return { payment: paymentRow, maintenance: maintenanceRow };
@@ -748,36 +760,28 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
           villaId: body.villaId,
           billingCycleId: billingCycle.id,
         });
+        await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+          societyId,
+          villaId: body.villaId,
+          billingCycleId: billingCycle.id,
+          paidAmount: 0,
+          snapStatus,
+          source: BillingPaymentSource.CASH_MANUAL,
+        });
         const primaryResidents = await tx.user.findMany({
           where: {
             societyId,
             villaId: body.villaId,
-            role: UserRole.RESIDENT,
+            ...residentLikeRoleFilter,
             isActive: true,
             maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
           },
           select: { id: true },
         });
         for (const u of primaryResidents) {
-          await tx.userCyclePayment.upsert({
-            where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-            create: {
-              userId: u.id,
-              cycleId: billingCycle.id,
-              amountPaid: new Prisma.Decimal(0),
-              paymentStatus: BillingUserPaymentStatus.PENDING,
-              source: BillingPaymentSource.CASH_MANUAL,
-              manualMarkedByAdminId: adminId,
-              paidAt: null,
-            },
-            update: {
-              amountPaid: new Prisma.Decimal(0),
-              paymentStatus: BillingUserPaymentStatus.PENDING,
-              source: BillingPaymentSource.CASH_MANUAL,
-              manualMarkedByAdminId: adminId,
-              paidAt: null,
-              // Clear gateway identifiers so PhonePe/Razorpay reconciliation
-              // or delayed webhooks can't re-settle after admin reversal
+          await tx.userCyclePayment.updateMany({
+            where: { userId: u.id, cycleId: billingCycle.id },
+            data: {
               paymentGatewayOrderId: null,
               paymentGatewayPaymentId: null,
               idempotencyKey: null,

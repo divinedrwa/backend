@@ -8,6 +8,12 @@ import {
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
+import {
+  recomputeVisitorAggregateApproval as recomputeFromStateManager,
+  resolveVisitorApprovalRecipientIds as resolveFromStateManager,
+  type VisitorApprovalTarget as StateManagerTarget,
+} from "./visitor-state-manager";
 
 /** Waiting at gate for resident decision(s). */
 export const VISITOR_PENDING_APPROVAL = VisitorStatus.PENDING_APPROVAL;
@@ -26,74 +32,25 @@ const visitorWithVillas = {
   gate: { select: { id: true, name: true } },
 } as const;
 
-export type VisitorApprovalTarget = {
-  villaId: string;
-  unitId?: string | null;
-  residentUserId?: string | null;
-};
+export type VisitorApprovalTarget = StateManagerTarget;
 
-/** Resolve who would receive an approval request (no notifications). */
+/** 
+ * Resolve who would receive an approval request (no notifications).
+ * @deprecated This function now delegates to the centralized visitor-state-manager.
+ * Use the state manager directly for new code.
+ */
 export async function resolveVisitorApprovalRecipientIds(params: {
   prisma: PrismaClient;
   societyId: string;
   villaIds: string[];
   targets?: VisitorApprovalTarget[];
 }): Promise<string[]> {
-  if (params.targets && params.targets.length > 0) {
-    const ids = new Set<string>();
-    for (const t of params.targets) {
-      if (t.residentUserId) {
-        const u = await params.prisma.user.findFirst({
-          where: {
-            id: t.residentUserId,
-            societyId: params.societyId,
-            role: UserRole.RESIDENT,
-            isActive: true,
-            villaId: t.villaId,
-          },
-          select: { id: true },
-        });
-        if (u) ids.add(u.id);
-        continue;
-      }
-      if (t.unitId) {
-        const list = await params.prisma.user.findMany({
-          where: {
-            societyId: params.societyId,
-            role: UserRole.RESIDENT,
-            isActive: true,
-            villaId: t.villaId,
-            unitId: t.unitId,
-          },
-          select: { id: true },
-        });
-        for (const x of list) ids.add(x.id);
-        continue;
-      }
-      const list = await params.prisma.user.findMany({
-        where: {
-          societyId: params.societyId,
-          role: UserRole.RESIDENT,
-          isActive: true,
-          villaId: t.villaId,
-        },
-        select: { id: true },
-      });
-      for (const x of list) ids.add(x.id);
-    }
-    return [...ids];
-  }
-  const residents = await params.prisma.user.findMany({
-    where: {
-      societyId: params.societyId,
-      role: UserRole.RESIDENT,
-      isActive: true,
-      villaId: { in: params.villaIds },
-    },
-    select: { id: true },
-    distinct: ["id"],
+  return resolveFromStateManager({
+    prisma: params.prisma as Prisma.TransactionClient,
+    societyId: params.societyId,
+    villaIds: params.villaIds,
+    targets: params.targets,
   });
-  return residents.map((r) => r.id);
 }
 
 export type VisitorForApprovalPayload = Prisma.VisitorGetPayload<{
@@ -367,6 +324,8 @@ export async function notifyGuardsPreApprovedCreated(params: {
 /**
  * After a villa row is updated, aggregate visitor status (idempotent).
  * Returns updated visitor when status changes to APPROVED or REJECTED.
+ * @deprecated This function now delegates to the centralized visitor-state-manager.
+ * Use the state manager directly for new code.
  */
 export async function recomputeVisitorAggregateApproval(
   prisma: PrismaClient,
@@ -377,80 +336,30 @@ export async function recomputeVisitorAggregateApproval(
   visitor: VisitorForApprovalPayload | null;
   transitioned: boolean;
 }> {
-  const visitor = await prisma.visitor.findFirst({
+  // Get visitor before recompute
+  const before = await prisma.visitor.findFirst({
     where: { id: visitorId, societyId },
-    include: {
-      villaVisits: true,
-      society: { select: { visitorMultiVillaApprovalMode: true } },
-    },
+    select: { status: true },
   });
 
-  if (!visitor) {
-    return { previousStatus: "", visitor: null, transitioned: false };
-  }
+  const previousStatus = before?.status || "";
 
-  const prev = visitor.status;
-
-  if (prev !== VISITOR_PENDING_APPROVAL) {
-    const hydrated = await prisma.visitor.findUnique({
-      where: { id: visitorId },
-      include: visitorWithVillas,
-    });
-    return { previousStatus: prev, visitor: hydrated, transitioned: false };
-  }
-
-  const mode: VisitorMultiVillaApprovalMode = visitor.society.visitorMultiVillaApprovalMode;
-  const rows = visitor.villaVisits;
-
-  const anyApproved = rows.some((r) => r.approvalStatus === VisitorVillaApprovalStatus.APPROVED);
-  const anyRejected = rows.some((r) => r.approvalStatus === VisitorVillaApprovalStatus.REJECTED);
-  const allApproved =
-    rows.length > 0 && rows.every((r) => r.approvalStatus === VisitorVillaApprovalStatus.APPROVED);
-  const nonePending = rows.every((r) => r.approvalStatus !== VisitorVillaApprovalStatus.PENDING);
-
-  let next: VisitorStatus | null = null;
-  if (mode === VisitorMultiVillaApprovalMode.ANY_ONE_APPROVAL) {
-    if (anyApproved) next = VISITOR_APPROVED_FOR_ENTRY;
-    else if (nonePending && !anyApproved) next = VISITOR_REJECTED;
-  } else {
-    if (anyRejected) next = VISITOR_REJECTED;
-    else if (allApproved) next = VISITOR_APPROVED_FOR_ENTRY;
-  }
-
-  if (!next) {
-    const hydrated = await prisma.visitor.findUnique({
-      where: { id: visitorId },
-      include: visitorWithVillas,
-    });
-    return { previousStatus: prev, visitor: hydrated, transitioned: false };
-  }
-
-  await prisma.visitor.update({
-    where: { id: visitorId },
-    data: { status: next },
+  // Delegate to centralized state manager
+  await prisma.$transaction(async (tx) => {
+    await recomputeFromStateManager(tx, { visitorId, societyId });
   });
 
-  const hydrated = await prisma.visitor.findUnique({
+  // Get updated visitor with full payload
+  const visitor = await prisma.visitor.findUnique({
     where: { id: visitorId },
     include: visitorWithVillas,
   });
 
-  const transitioned = prev === VISITOR_PENDING_APPROVAL && next !== null;
-
-  if (transitioned && (next === VISITOR_APPROVED_FOR_ENTRY || next === VISITOR_REJECTED)) {
-    await notifyGuardsVisitorApprovalOutcome({
-      prisma,
-      societyId,
-      visitorId,
-      visitorName: visitor.name,
-      outcome: next === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
-      createdByGuardId: visitor.createdBy,
-    });
-  }
+  const transitioned = !!(before && visitor && before.status !== visitor.status);
 
   return {
-    previousStatus: prev,
-    visitor: hydrated,
+    previousStatus,
+    visitor,
     transitioned,
   };
 }

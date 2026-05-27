@@ -1,5 +1,6 @@
-import { NotificationCategory, UserRole } from "@prisma/client";
+import { NotificationCategory } from "@prisma/client";
 import { prisma } from "./prisma";
+import { residentLikeRoleFilter } from "./residentLike";
 import { notifySocietyRoles, notifyUsers } from "../services/notification.service";
 
 export type MaintenanceLedgerNotifyType =
@@ -20,7 +21,7 @@ export async function notifyVillaMaintenanceLedgerUpdate(params: {
       where: {
         societyId: params.societyId,
         villaId: params.villaId,
-        role: UserRole.RESIDENT,
+        ...residentLikeRoleFilter,
         isActive: true,
       },
       select: { id: true },
@@ -51,7 +52,7 @@ export async function notifySocietyMaintenanceLedgerUpdate(params: {
   try {
     await notifySocietyRoles({
       societyId: params.societyId,
-      roles: [UserRole.RESIDENT],
+      roles: residentLikeRoleFilter.role.in,
       title: params.title,
       body: params.body,
       data: { type: params.type },

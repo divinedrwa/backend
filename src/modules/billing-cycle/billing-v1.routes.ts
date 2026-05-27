@@ -1,4 +1,3 @@
-import crypto from "crypto";
 import { Router } from "express";
 import { z } from "zod";
 import {
@@ -6,17 +5,19 @@ import {
   BillingUserPaymentStatus,
   MaintenanceBillingRole,
   NotificationCategory,
-  Prisma,
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
-import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
+import {
+  ensureVillaLedgersAligned,
+  postMarkCashToMaintenanceLedger,
+} from "./billing-collection-link";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import {
   buildCurrentCycleResponse,
@@ -690,10 +691,10 @@ router.post(
         return;
       }
       const user = await prisma.user.findFirst({
-        where: { id: userId, societyId: auth.societyId, role: UserRole.RESIDENT },
+        where: { id: userId, societyId: auth.societyId, ...residentLikeRoleFilter },
       });
       if (!user) {
-        res.status(404).json({ message: "Resident not found" });
+        res.status(404).json({ message: "Resident or admin occupant not found" });
         return;
       }
       if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
@@ -749,119 +750,20 @@ router.post(
         });
 
         if (user.villaId && cycle.financialYearId) {
-          const maintenanceCycle = await tx.maintenanceCollectionCycle.findFirst({
-            where: {
-              societyId: auth.societyId,
-              financialYearId: cycle.financialYearId,
-              periodKey: cycle.cycleKey,
-            },
+          await postMarkCashToMaintenanceLedger(tx, {
+            societyId: auth.societyId,
+            villaId: user.villaId,
+            billingCycleId: cycleId,
+            cashAmount: amountPaid,
+            paidAt,
+            note,
           });
-
-          if (maintenanceCycle) {
-            // Lock the snapshot row to prevent concurrent mark-cash calls
-            // from reading the same paidAmount and double-counting.
-            const [snapshot] = await tx.$queryRawUnsafe<
-              { id: string; expectedAmount: string; paidAmount: string }[]
-            >(
-              `SELECT id, "expectedAmount"::text, "paidAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
-              maintenanceCycle.id,
-              user.villaId,
-            );
-
-            if (snapshot) {
-              const expected = Number(snapshot.expectedAmount);
-              const paidSoFar = Number(snapshot.paidAmount);
-              // Snapshot tracks cycle progress only — capped at expected.
-              // The excess remains visible to the resident via the rolling
-              // ledger (cycle-service.ts) as advance credit.
-              const appliedToCycle = Math.max(0, Math.min(amountPaid, expected - paidSoFar));
-              const newPaid = paidSoFar + appliedToCycle;
-              const snapStatus = refreshSnapshotStatus(expected, newPaid, maintenanceCycle.dueDate);
-
-              const maintenanceRow = await tx.maintenance.upsert({
-                where: {
-                  villaId_month_year: {
-                    villaId: user.villaId,
-                    month: maintenanceCycle.periodMonth,
-                    year: maintenanceCycle.periodYear,
-                  },
-                },
-                create: {
-                  societyId: auth.societyId,
-                  villaId: user.villaId,
-                  month: maintenanceCycle.periodMonth,
-                  year: maintenanceCycle.periodYear,
-                  amount: snapshot.expectedAmount,
-                  dueDate: maintenanceCycle.dueDate,
-                  status:
-                    snapStatus === "PAID"
-                        ? "PAID"
-                        : snapStatus === "OVERDUE"
-                            ? "OVERDUE"
-                            : "PENDING",
-                },
-                update: {
-                  amount: snapshot.expectedAmount,
-                  dueDate: maintenanceCycle.dueDate,
-                  status:
-                    snapStatus === "PAID"
-                        ? "PAID"
-                        : snapStatus === "OVERDUE"
-                            ? "OVERDUE"
-                            : "PENDING",
-                },
-              });
-
-              // Record the FULL cash received as a MaintenancePayment row,
-              // not the cycle-applied portion. This is the cash ledger that
-              // [maintenance-management/financial-dashboard] reads to compute
-              // `allTimeCollected` and `currentFundBalance`. Capping it here
-              // historically lost the overpayment — e.g. a ₹1300 payment for
-              // a ₹370 cycle would only be visible as ₹370 in the society
-              // balance, even though the full ₹1300 hit the bank account.
-              if (amountPaid > 0.005) {
-                await tx.maintenancePayment.create({
-                  data: {
-                    societyId: auth.societyId,
-                    villaId: user.villaId,
-                    maintenanceId: maintenanceRow.id,
-                    month: maintenanceCycle.periodMonth,
-                    year: maintenanceCycle.periodYear,
-                    amount: new Prisma.Decimal(amountPaid),
-                    paymentDate: paidAt,
-                    paymentMode: "CASH",
-                    receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-                    remarks:
-                      note && note.trim().length > 0
-                        ? `Billing cash sync: ${note.trim()}`
-                        : "Billing cash sync",
-                    maintenanceCollectionCycleId: maintenanceCycle.id,
-                    villaMaintenanceSnapshotId: snapshot.id,
-                  },
-                });
-              }
-
-              await tx.villaMaintenanceSnapshot.update({
-                where: { id: snapshot.id },
-                data: {
-                  paidAmount: new Prisma.Decimal(newPaid),
-                  status: snapStatus,
-                },
-              });
-            }
-
-            // Reconcile snapshots up to this cycle only. Any overpayment
-            // stays as available advance credit — admin must explicitly
-            // apply it via "Apply credit" when the resident requests.
-            if (user.villaId && maintenanceCycle) {
-              await applyVillaCreditAcrossSnapshots(tx, {
-                societyId: auth.societyId,
-                villaId: user.villaId,
-                financialYearId: cycle.financialYearId,
-                throughCycleId: maintenanceCycle.id,
-              });
-            }
-          }
+          await ensureVillaLedgersAligned(tx, {
+            societyId: auth.societyId,
+            villaId: user.villaId,
+            billingCycleId: cycleId,
+            note,
+          });
         }
 
         if (user.villaId) {
