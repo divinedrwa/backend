@@ -200,6 +200,9 @@ export function formatGatewayReconcileError(err: unknown): string {
     if (err.code === "P2034") {
       return "Payment is being processed concurrently. Tap Check again.";
     }
+    if (err.code === "P2010" && /UserCyclePayment|user_payments/i.test(String(err.message))) {
+      return "Server payment lock query failed. Deploy the latest API build.";
+    }
   }
   const msg = err instanceof Error ? err.message : String(err);
   if (/PaymentMode|"PHONEPE"|22P02|enum/i.test(msg)) {
@@ -297,7 +300,7 @@ export async function reconcilePhonePeFromPoll(
   if (gateway.outcome === "failed") {
     await prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
-        `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+        `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
         row.id,
       );
       if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;
@@ -378,7 +381,7 @@ async function settleGatewayPayment(
     await prisma.$transaction(
       async (tx) => {
         const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
-          `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+          `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
           row.id,
         );
         if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
@@ -575,7 +578,7 @@ export async function reconcileRazorpayFromPoll(
   if (gateway.outcome === "failed") {
     await prisma.$transaction(async (tx) => {
       const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
-        `SELECT "paymentStatus" FROM "UserCyclePayment" WHERE id = $1 FOR UPDATE`,
+        `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
         row.id,
       );
       if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;

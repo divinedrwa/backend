@@ -109,7 +109,7 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         { id: string; userId: string | null; cycleId: string; amountPaid: string; paymentStatus: string }[]
       >(
         `SELECT id, "userId", "cycleId", "amountPaid"::text, "paymentStatus"
-         FROM "UserCyclePayment"
+         FROM "user_payments"
          WHERE "paymentGatewayOrderId" = $1
          FOR UPDATE`,
         orderId,

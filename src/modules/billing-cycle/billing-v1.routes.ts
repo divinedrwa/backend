@@ -711,7 +711,7 @@ router.post(
         const [existing] = await tx.$queryRawUnsafe<
           { amountPaid: string }[] | []
         >(
-          `SELECT "amountPaid"::text FROM "UserCyclePayment" WHERE "userId" = $1 AND "cycleId" = $2 FOR UPDATE`,
+          `SELECT "amountPaid"::text FROM "user_payments" WHERE "userId" = $1 AND "cycleId" = $2 FOR UPDATE`,
           userId,
           cycleId,
         );

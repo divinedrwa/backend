@@ -106,7 +106,7 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
         { id: string; userId: string | null; cycleId: string; amountPaid: string; paymentStatus: string }[]
       >(
         `SELECT id, "userId", "cycleId", "amountPaid"::text, "paymentStatus"
-         FROM "UserCyclePayment"
+         FROM "user_payments"
          WHERE "paymentGatewayOrderId" = $1
          FOR UPDATE`,
         merchantTransactionId,

@@ -71,7 +71,7 @@ After a test payment, search logs for:
 
 ```sql
 SELECT id, "paymentStatus", "paymentGatewayOrderId", "paymentGatewayPaymentId", "paidAt"
-FROM "UserCyclePayment"
+FROM "user_payments"
 WHERE "paymentGatewayOrderId" = '<txn_or_order_id>';
 
 SELECT status, "createdAt", "responsePayload"
