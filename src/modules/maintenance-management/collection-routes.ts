@@ -13,6 +13,11 @@ import {
 } from "../../lib/maintenanceBillingRole";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
+import { syncAllUserCyclePaymentsForMaintenanceCycle } from "../billing-cycle/billing-collection-link";
+import {
+  notifySocietyMaintenanceLedgerUpdate,
+  notifyVillaMaintenanceLedgerUpdate,
+} from "../../lib/maintenanceLedgerNotify";
 import { applyVillaCreditAcrossSnapshots, getVillaCreditBalancesBulk } from "./credit-walker";
 import { refreshSnapshotStatus } from "./snapshot-helpers";
 
@@ -486,6 +491,51 @@ router.put(
             snapStatus,
           });
         });
+      } else {
+        const newExpected = body.amount;
+        const snapStatus = refreshSnapshotStatus(newExpected, 0, cycle.dueDate);
+        const { breakdown } = computeExpectedForVilla(
+          {
+            ruleType: "CUSTOM",
+            baseAmount: rule.baseAmount,
+            perSqftRate: rule.perSqftRate,
+            customAmounts: rule.customAmounts,
+          },
+          villa,
+        );
+        await prisma.$transaction(async (tx) => {
+          await tx.villaMaintenanceSnapshot.upsert({
+            where: { cycleId_villaId: { cycleId, villaId: body.villaId } },
+            create: {
+              cycleId,
+              villaId: body.villaId,
+              expectedAmount: new Prisma.Decimal(newExpected),
+              paidAmount: new Prisma.Decimal(0),
+              status: snapStatus,
+              breakdown: breakdown as Prisma.InputJsonValue,
+            },
+            update: {
+              expectedAmount: new Prisma.Decimal(newExpected),
+              status: snapStatus,
+              breakdown: breakdown as Prisma.InputJsonValue,
+            },
+          });
+          await syncUserCyclePaymentsFromSnapshot(tx, {
+            societyId,
+            adminId,
+            villaId: body.villaId,
+            cycle: { financialYearId: cycle.financialYearId, periodKey: cycle.periodKey },
+            newPaid: 0,
+            snapStatus,
+          });
+        });
+        void notifyVillaMaintenanceLedgerUpdate({
+          societyId,
+          villaId: body.villaId,
+          type: "MAINTENANCE_LEDGER_UPDATED",
+          title: "Maintenance amount updated",
+          body: `Your maintenance for ${cycle.periodKey} was updated by admin.`,
+        });
       }
 
       return res.json({ rule });
@@ -877,6 +927,16 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
         await prisma.villaMaintenanceSnapshot.createMany({ data: rows });
       }
 
+      await prisma.$transaction(async (tx) => {
+        await syncAllUserCyclePaymentsForMaintenanceCycle(tx, {
+          societyId,
+          maintenanceCycleId: maintenanceCycle.id,
+          financialYearId: maintenanceCycle.financialYearId,
+          periodKey: maintenanceCycle.periodKey,
+          source: BillingPaymentSource.CASH_MANUAL,
+        });
+      });
+
       // Reconcile snapshots with any payments that were already recorded
       // against this cycle (e.g. retroactive mark-paid via billing before
       // the maintenance collection cycle existed). Without this, snapshots
@@ -898,6 +958,13 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
               financialYearId: maintenanceCycle.financialYearId,
             });
           }
+          await syncAllUserCyclePaymentsForMaintenanceCycle(tx, {
+            societyId,
+            maintenanceCycleId: maintenanceCycle.id,
+            financialYearId: maintenanceCycle.financialYearId,
+            periodKey: maintenanceCycle.periodKey,
+            source: BillingPaymentSource.CASH_MANUAL,
+          });
         });
       }
     }
@@ -977,6 +1044,20 @@ router.post("/cycles/:cycleId/generate-snapshots", async (req, res, next) => {
       if (rows.length > 0) {
         await tx.villaMaintenanceSnapshot.createMany({ data: rows });
       }
+      await syncAllUserCyclePaymentsForMaintenanceCycle(tx, {
+        societyId,
+        maintenanceCycleId: cycleId,
+        financialYearId: cycle.financialYearId,
+        periodKey: cycle.periodKey,
+        source: BillingPaymentSource.CASH_MANUAL,
+      });
+    });
+
+    void notifySocietyMaintenanceLedgerUpdate({
+      societyId,
+      type: "MAINTENANCE_LEDGER_UPDATED",
+      title: "Maintenance billing updated",
+      body: `Billing for ${cycle.periodKey} was updated. Open Maintenance to review your dues.`,
     });
 
     const count = await prisma.villaMaintenanceSnapshot.count({ where: { cycleId } });

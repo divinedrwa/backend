@@ -103,7 +103,9 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
     const dueDate = cycle?.paymentEndDate ?? null;
     const { month, year } = parseCycleMonthYear(row.cycleKey, dueDate);
     const creditApplied = Math.max(0, Math.min(row.expectedAmount, row.balanceBefore));
-    const remainingDue = Math.max(0, row.expectedAmount - row.paidAmount);
+    // Cash/gateway received for this cycle only — not advance credit from prior cycles.
+    // Residents should see "to pay" when admin marks unpaid even if the villa has credit.
+    const remainingDue = Math.max(0, row.expectedAmount - row.cashPaidAmount);
     const previousDue = Math.max(0, -row.balanceBefore);
     const availableCredit = Math.max(0, row.balanceBefore);
     const isOverdue = Boolean(
@@ -324,6 +326,7 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
 // GET /api/residents/maintenance-pending - Get pending dues
 router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
+    res.setHeader("Cache-Control", "no-store");
     const { userId, societyId } = req.auth!;
 
     // Get user's villa

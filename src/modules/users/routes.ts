@@ -15,6 +15,7 @@ import { resolveResidentDwelling } from "../../lib/residentUnitResolve";
 import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
 import { auditFromRequest } from "../../services/audit.service";
 import { passwordSchema } from "../../lib/passwordSchema";
+import { realignVillaBillingFromSnapshots } from "../billing-cycle/billing-collection-link";
 
 const router = Router();
 
@@ -524,6 +525,20 @@ router.patch(
         }
         if (newVillaId) {
           await ensurePrimaryCoverageForVilla(tx, { societyId, villaId: newVillaId });
+        }
+
+        const billingRoleChanged =
+          maintenanceBillingRole !== undefined &&
+          maintenanceBillingRole !== existing.maintenanceBillingRole;
+        const villaChanged = oldVillaId !== newVillaId;
+        if (after && isResidentLike(after.role) && (billingRoleChanged || villaChanged)) {
+          const realignVillaId = newVillaId ?? oldVillaId;
+          if (realignVillaId) {
+            await realignVillaBillingFromSnapshots(tx, { societyId, villaId: realignVillaId });
+            if (oldVillaId && oldVillaId !== realignVillaId) {
+              await realignVillaBillingFromSnapshots(tx, { societyId, villaId: oldVillaId });
+            }
+          }
         }
 
         return tx.user.findUnique({

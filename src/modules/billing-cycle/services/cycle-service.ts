@@ -256,7 +256,10 @@ export async function buildCurrentCycleResponse(input: {
     } as BillingLedgerCycleRow);
   const ledgerCredit = Math.max(0, currentLedger.balanceBefore);
   const previousDue = Math.max(0, -currentLedger.balanceBefore);
-  const remainingDue = Math.max(0, currentLedger.expectedAmount - currentLedger.paidAmount);
+  const remainingDue = Math.max(
+    0,
+    currentLedger.expectedAmount - currentLedger.cashPaidAmount,
+  );
   const isPaid = remainingDue <= 0.005;
 
   // Also fetch admin-added credit from the credit-walker so it's visible to
@@ -350,7 +353,7 @@ export async function computeUserBillingLedger(
   /** When society maintenance collection snapshots exist for this villa, they are the source of truth for expected/paid (Maintenance Payment Management UI). */
   const billingCycleIdToSnap = new Map<
     string,
-    { expectedAmount: unknown; paidAmount: unknown; status: string }
+    { expectedAmount: unknown; paidAmount: unknown; status: string; lateFeeAmount: unknown }
   >();
 
   const fyPairs = cycles
@@ -369,7 +372,13 @@ export async function computeUserBillingLedger(
     if (mIds.length > 0) {
       const snaps = await prisma.villaMaintenanceSnapshot.findMany({
         where: { villaId, cycleId: { in: mIds } },
-        select: { cycleId: true, expectedAmount: true, paidAmount: true, status: true },
+        select: {
+          cycleId: true,
+          expectedAmount: true,
+          paidAmount: true,
+          status: true,
+          lateFeeAmount: true,
+        },
       });
       const snapByMcId = new Map(snaps.map((s) => [s.cycleId, s]));
       for (const c of cycles) {
@@ -394,7 +403,8 @@ export async function computeUserBillingLedger(
     let paidAt: string | null;
 
     if (snap) {
-      expectedAmount = Number(snap.expectedAmount);
+      expectedAmount =
+        Number(snap.expectedAmount) + Number(snap.lateFeeAmount ?? 0);
       let snapPaid = Number(snap.paidAmount);
       if (snap.status === "WAIVED") {
         snapPaid = expectedAmount;

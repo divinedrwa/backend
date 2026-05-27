@@ -705,35 +705,27 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
         throughCycleId: cycle.id,
       });
 
-      const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
+      // Admin reversed all cash payments for this cycle — do not leave advance
+      // credit from other months applied here (walker would re-mark as paid).
+      const dueDateUtc = new Date(
+        Date.UTC(
+          cycle.dueDate.getUTCFullYear(),
+          cycle.dueDate.getUTCMonth(),
+          cycle.dueDate.getUTCDate(),
+        ),
+      );
+      const nowUtc = new Date();
+      const snapStatus = dueDateUtc.getTime() < nowUtc.getTime() ? "OVERDUE" : "PENDING";
+
+      await tx.villaMaintenanceSnapshot.update({
         where: { id: snapshotCheck.id },
-        select: { status: true, paidAmount: true, lateFeeAmount: true, lateFeeAppliedAt: true },
+        data: {
+          paidAmount: new Prisma.Decimal(0),
+          status: snapStatus,
+          lateFeeAmount: 0,
+          lateFeeAppliedAt: null,
+        },
       });
-
-      // Admin explicitly reversed payment → force PENDING regardless of due date.
-      // The credit walker may set OVERDUE if the due date has passed, but admin
-      // intent is a clean reset; the hourly cron will re-evaluate OVERDUE later.
-      const paidAfterWalker = Number(reconciledSnapshot?.paidAmount ?? 0);
-      const snapStatus = paidAfterWalker > 0.005
-        ? (reconciledSnapshot?.status ?? "PARTIAL")
-        : "PENDING";
-
-      // Build update payload: always reset status + late fee on reversal
-      const snapUpdate: Record<string, unknown> = {};
-      if (reconciledSnapshot && reconciledSnapshot.status !== snapStatus) {
-        snapUpdate.status = snapStatus;
-      }
-      // Reset late fee so the cron can re-evaluate from scratch
-      if (reconciledSnapshot && (Number(reconciledSnapshot.lateFeeAmount) > 0 || reconciledSnapshot.lateFeeAppliedAt)) {
-        snapUpdate.lateFeeAmount = 0;
-        snapUpdate.lateFeeAppliedAt = null;
-      }
-      if (Object.keys(snapUpdate).length > 0) {
-        await tx.villaMaintenanceSnapshot.update({
-          where: { id: snapshotCheck.id },
-          data: snapUpdate,
-        });
-      }
 
       await tx.maintenance.updateMany({
         where: {
@@ -742,7 +734,7 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
           month: cycle.periodMonth,
           year: cycle.periodYear,
         },
-        data: { status: snapStatus === "PAID" ? "PAID" : snapStatus === "OVERDUE" ? "OVERDUE" : "PENDING" },
+        data: { status: snapStatus === "OVERDUE" ? "OVERDUE" : "PENDING" },
       });
 
       // Sync UserCyclePayment
@@ -756,10 +748,6 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
           villaId: body.villaId,
           billingCycleId: billingCycle.id,
         });
-        const payStatus =
-          snapStatus === "PAID" || snapStatus === "WAIVED"
-            ? BillingUserPaymentStatus.SUCCESS
-            : BillingUserPaymentStatus.PENDING;
         const primaryResidents = await tx.user.findMany({
           where: {
             societyId,
@@ -776,15 +764,15 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
             create: {
               userId: u.id,
               cycleId: billingCycle.id,
-              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
-              paymentStatus: payStatus,
+              amountPaid: new Prisma.Decimal(0),
+              paymentStatus: BillingUserPaymentStatus.PENDING,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
               paidAt: null,
             },
             update: {
-              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
-              paymentStatus: payStatus,
+              amountPaid: new Prisma.Decimal(0),
+              paymentStatus: BillingUserPaymentStatus.PENDING,
               source: BillingPaymentSource.CASH_MANUAL,
               manualMarkedByAdminId: adminId,
               paidAt: null,

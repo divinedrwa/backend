@@ -25,6 +25,7 @@ import {
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
 import { writeAdminAuditLog } from "./services/audit-log";
+import { notifyVillaMaintenanceLedgerUpdate } from "../../lib/maintenanceLedgerNotify";
 import { notifySociety } from "../../services/notification.service";
 import phonePeRoutes from "./billing-v1-phonepe.routes";
 import razorpayRoutes from "./billing-v1-razorpay.routes";
@@ -882,6 +883,16 @@ router.post(
         entityId: updated.id,
         metadata: { userId, cycleId, amountPaid, totalAmountAfter: Number(updated.amountPaid), note },
       });
+
+      if (user.villaId) {
+        void notifyVillaMaintenanceLedgerUpdate({
+          societyId: auth.societyId,
+          villaId: user.villaId,
+          type: "MAINTENANCE_PAYMENT_RECORDED",
+          title: "Maintenance payment recorded",
+          body: `Admin recorded a cash payment of ₹${amountPaid} for ${cycle.cycleKey}.`,
+        });
+      }
 
       res.json({ payment: updated });
     } catch (e) {

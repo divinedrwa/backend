@@ -202,3 +202,77 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
     });
   }
 }
+
+/** Sync every villa snapshot on a maintenance collection cycle → linked billing `user_payments` rows. */
+export async function syncAllUserCyclePaymentsForMaintenanceCycle(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    maintenanceCycleId: string;
+    financialYearId: string;
+    periodKey: string;
+    source?: BillingPaymentSource;
+  },
+): Promise<void> {
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: {
+      societyId: params.societyId,
+      financialYearId: params.financialYearId,
+      cycleKey: params.periodKey,
+    },
+    select: { id: true },
+  });
+  if (!billingCycle) return;
+
+  const snaps = await tx.villaMaintenanceSnapshot.findMany({
+    where: { cycleId: params.maintenanceCycleId },
+    select: { villaId: true, paidAmount: true, status: true },
+  });
+
+  for (const snap of snaps) {
+    await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+      societyId: params.societyId,
+      villaId: snap.villaId,
+      billingCycleId: billingCycle.id,
+      paidAmount: Number(snap.paidAmount),
+      snapStatus: snap.status,
+      source: params.source,
+    });
+  }
+}
+
+/** Realign all billing payment rows for a villa from current maintenance snapshots (after primary/villa change). */
+export async function realignVillaBillingFromSnapshots(
+  tx: Prisma.TransactionClient,
+  params: { societyId: string; villaId: string },
+): Promise<void> {
+  const snaps = await tx.villaMaintenanceSnapshot.findMany({
+    where: { villaId: params.villaId, cycle: { societyId: params.societyId } },
+    select: {
+      paidAmount: true,
+      status: true,
+      cycle: { select: { id: true, financialYearId: true, periodKey: true } },
+    },
+  });
+
+  for (const snap of snaps) {
+    const billingCycle = await tx.billingCycle.findFirst({
+      where: {
+        societyId: params.societyId,
+        financialYearId: snap.cycle.financialYearId,
+        cycleKey: snap.cycle.periodKey,
+      },
+      select: { id: true },
+    });
+    if (!billingCycle) continue;
+
+    await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      billingCycleId: billingCycle.id,
+      paidAmount: Number(snap.paidAmount),
+      snapStatus: snap.status,
+      source: BillingPaymentSource.CASH_MANUAL,
+    });
+  }
+}
