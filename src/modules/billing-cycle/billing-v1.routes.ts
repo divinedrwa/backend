@@ -942,8 +942,17 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
       payMap.set(`${p.userId}:${p.cycleId}`, p);
     }
 
-    const ledgers = await Promise.all(users.map((u) => computeUserBillingLedger(auth.societyId, u.id)));
-    const ledgerByUser = new Map(users.map((u, idx) => [u.id, ledgers[idx]]));
+    const ledgerByUser = new Map<string, Awaited<ReturnType<typeof computeUserBillingLedger>>>();
+    for (const u of users) {
+      try {
+        ledgerByUser.set(u.id, await computeUserBillingLedger(auth.societyId, u.id));
+      } catch (ledgerErr) {
+        logger.warn(
+          { err: ledgerErr, userId: u.id, societyId: auth.societyId },
+          "[admin/residents/payments] Ledger compute failed for user; row omitted",
+        );
+      }
+    }
 
       const rows: Array<Record<string, unknown>> = [];
       for (const u of users) {

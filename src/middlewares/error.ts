@@ -53,9 +53,15 @@ export function errorHandler(
       res.status(409).json({ message: "This record already exists" });
       return;
     }
-    if (err.code === "P2021") {
+    if (err.code === "P2021" || err.code === "P2022") {
+      const column =
+        err.code === "P2022" && err.meta && typeof err.meta === "object" && "column" in err.meta
+          ? String((err.meta as { column?: string }).column ?? "")
+          : "";
       res.status(503).json({
-        message: "Database schema is out of date. Run migrations and restart the API.",
+        message: column
+          ? `Database schema is out of date (missing ${column}). Run prisma migrate deploy on the API service, then restart.`
+          : "Database schema is out of date. Run prisma migrate deploy on the API service, then restart.",
       });
       return;
     }

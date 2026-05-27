@@ -8,6 +8,7 @@ import { z } from "zod";
 import {
   clearExcludedResidentsUserCyclePayments,
 } from "../../lib/maintenanceBillingRole";
+import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { validateBody } from "../../middlewares/validate";
 import {
@@ -962,12 +963,19 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
         });
       }
 
-      await prisma.$transaction(async (tx) => {
-        await reconcileAllVillasForBillingCycle(tx, {
-          societyId,
-          billingCycleId: billingCycle.id,
+      try {
+        await prisma.$transaction(async (tx) => {
+          await reconcileAllVillasForBillingCycle(tx, {
+            societyId,
+            billingCycleId: billingCycle.id,
+          });
         });
-      });
+      } catch (reconcileErr) {
+        logger.warn(
+          { err: reconcileErr, billingCycleId: billingCycle.id, societyId },
+          "[maintenance-sync] Ledger reconcile skipped (sync still returned)",
+        );
+      }
     }
 
     return res.json({
@@ -1088,12 +1096,19 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       select: { id: true },
     });
     if (linkedBillingCycle) {
-      await prisma.$transaction(async (tx) => {
-        await reconcileAllVillasForBillingCycle(tx, {
-          societyId,
-          billingCycleId: linkedBillingCycle.id,
+      try {
+        await prisma.$transaction(async (tx) => {
+          await reconcileAllVillasForBillingCycle(tx, {
+            societyId,
+            billingCycleId: linkedBillingCycle.id,
+          });
         });
-      });
+      } catch (reconcileErr) {
+        logger.warn(
+          { err: reconcileErr, billingCycleId: linkedBillingCycle.id, societyId },
+          "[maintenance-grid] Ledger reconcile skipped (grid still returned)",
+        );
+      }
     }
 
     const [villas, snapshots, payments, existingRule, exclusions] = await Promise.all([
