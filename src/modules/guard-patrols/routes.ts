@@ -10,16 +10,16 @@ const router = Router();
 
 const createPatrolSchema = z.object({
   gateId: z.string().cuid(),
-  checkpointName: z.string().min(2),
-  checkpointLocation: z.string().optional(),
+  checkpointName: z.string().trim().min(2),
+  checkpointLocation: z.string().trim().optional(),
   scheduledTime: z.string().datetime(),
-  notes: z.string().optional()
+  notes: z.string().trim().optional()
 });
 
 const updatePatrolStatusSchema = z.object({
   status: z.nativeEnum(PatrolStatus),
   actualTime: z.string().datetime().optional(),
-  notes: z.string().optional()
+  notes: z.string().trim().optional()
 });
 
 router.use(requireAuth);

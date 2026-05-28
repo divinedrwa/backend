@@ -249,7 +249,7 @@ async function settlePhonePePayment(params: {
     // Amount validation
     if (isSuccess && amountPaise > 0) {
       const expectedPaise = Math.round(maintenanceAmountNum * 100);
-      if (Math.abs(amountPaise - expectedPaise) > 1) {
+      if (amountPaise < expectedPaise - 1) {
         logger.error(
           { merchantTransactionId, expectedPaise, actualPaise: amountPaise },
           "[phonepe webhook] AMOUNT MISMATCH",
@@ -303,7 +303,7 @@ async function settlePhonePePayment(params: {
     );
 
     return { action: "settled" as const, userId: row.userId, cycleId: cycle.id, isSuccess };
-  });
+  }, { timeout: 30_000 });
 
   if (result.action === "settled" && result.userId) {
     try {

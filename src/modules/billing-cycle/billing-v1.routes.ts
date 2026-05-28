@@ -94,7 +94,7 @@ const createCycleSchema = z.object({
   societyId: z.string().optional(),
   financialYearId: z.string().min(1),
   cycleMonth: z.string().regex(/^\d{4}-\d{2}$/),
-  title: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(200),
   amount: z.number().positive(),
   paymentStartDate: z.string().datetime(),
   paymentEndDate: z.string().datetime(),
@@ -220,7 +220,7 @@ router.post(
 );
 
 const updateCycleSchema = z.object({
-  title: z.string().min(1).max(200).optional(),
+  title: z.string().trim().min(1).max(200).optional(),
   amount: z.number().positive().optional(),
   paymentStartDate: z.string().datetime().optional(),
   paymentEndDate: z.string().datetime().optional(),
@@ -513,7 +513,7 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
 });
 
 const createFinancialYearSchema = z.object({
-  label: z.string().min(2).max(80),
+  label: z.string().trim().min(2).max(80),
   startDate: z.string().datetime(),
   endDate: z.string().datetime(),
 });
@@ -579,7 +579,7 @@ router.get("/admin/financial-years", requireAuth, requireRole(UserRole.ADMIN), a
 });
 
 const updateFinancialYearSchema = z.object({
-  label: z.string().min(2).max(80),
+  label: z.string().trim().min(2).max(80),
   startDate: z.string().datetime(),
   endDate: z.string().datetime(),
 });
@@ -680,7 +680,7 @@ const markCashSchema = z.object({
   userId: z.string().min(1),
   cycleId: z.string().min(1),
   amountPaid: z.number().positive(),
-  note: z.string().max(500).optional(),
+  note: z.string().trim().max(500).optional(),
 });
 
 router.post(
@@ -818,7 +818,7 @@ router.post(
 const waiveSchema = z.object({
   userId: z.string().min(1),
   cycleId: z.string().min(1),
-  remark: z.string().max(500).optional(),
+  remark: z.string().trim().max(500).optional(),
 });
 
 router.post(

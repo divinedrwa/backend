@@ -186,7 +186,7 @@ router.get("/new-this-month", async (req, res, next) => {
 const moveOutSchema = z.object({
   userId: z.string().cuid(),
   moveOutDate: z.string().datetime(),
-  reason: z.string().optional(),
+  reason: z.string().trim().optional(),
 });
 
 router.post("/move-out", validateBody(moveOutSchema), async (req, res, next) => {

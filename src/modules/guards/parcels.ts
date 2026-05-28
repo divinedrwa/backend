@@ -15,10 +15,10 @@ router.use(requireAuth);
 // Validation schema
 const logParcelSchema = z.object({
   villaId: z.string(),
-  deliveryService: z.string().optional(),
-  trackingNumber: z.string().optional(),
-  senderName: z.string().optional(),
-  description: z.string().optional(),
+  deliveryService: z.string().trim().optional(),
+  trackingNumber: z.string().trim().optional(),
+  senderName: z.string().trim().optional(),
+  description: z.string().trim().optional(),
   photoUrl: z.string().url().optional(),
 });
 

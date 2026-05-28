@@ -10,20 +10,20 @@ const router = Router();
 
 const createVehicleSchema = z.object({
   villaId: z.string().cuid(),
-  vehicleNumber: z.string().min(2).max(20),
+  vehicleNumber: z.string().trim().min(2).max(20),
   vehicleType: z.nativeEnum(VehicleType),
-  model: z.string().optional(),
-  color: z.string().optional(),
-  parkingSlot: z.string().optional(),
+  model: z.string().trim().optional(),
+  color: z.string().trim().optional(),
+  parkingSlot: z.string().trim().optional(),
   rcCopy: z.string().optional()
 });
 
 const updateVehicleSchema = z.object({
-  vehicleNumber: z.string().min(2).max(20).optional(),
+  vehicleNumber: z.string().trim().min(2).max(20).optional(),
   vehicleType: z.nativeEnum(VehicleType).optional(),
-  model: z.string().optional(),
-  color: z.string().optional(),
-  parkingSlot: z.string().optional(),
+  model: z.string().trim().optional(),
+  color: z.string().trim().optional(),
+  parkingSlot: z.string().trim().optional(),
   rcCopy: z.string().optional()
 });
 

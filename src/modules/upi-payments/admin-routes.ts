@@ -126,7 +126,7 @@ router.post("/:id/verify", async (req, res, next) => {
 // POST /api/upi-payments/:id/reject — admin rejects with reason
 // ---------------------------------------------------------------------------
 const rejectSchema = z.object({
-  rejectionReason: z.string().min(3).max(500),
+  rejectionReason: z.string().trim().min(3).max(500),
 });
 
 router.post(

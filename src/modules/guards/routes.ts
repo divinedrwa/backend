@@ -226,7 +226,7 @@ router.get("/active-alerts", requireRole(UserRole.GUARD), async (req, res, next)
 const sosResponseSchema = z.object({
   alertId: z.string().min(1),
   status: z.enum(["ACKNOWLEDGED", "IN_PROGRESS", "RESOLVED"]),
-  notes: z.string().optional(),
+  notes: z.string().trim().optional(),
 });
 
 // POST /api/guards/sos-response — legacy mobile; prefers PATCH /sos-alerts/:id/*

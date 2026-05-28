@@ -16,14 +16,14 @@ const router = Router();
 
 const createSOSSchema = z.object({
   emergencyType: z.enum(["MEDICAL", "FIRE", "THEFT", "ACCIDENT", "SECURITY", "OTHER"]),
-  message: z.string().optional(),
-  location: z.string().optional(),
+  message: z.string().trim().optional(),
+  location: z.string().trim().optional(),
   latitude: z.number().finite().optional(),
   longitude: z.number().finite().optional(),
 });
 
 const cancelSOSSchema = z.object({
-  reason: z.string().min(3).max(500),
+  reason: z.string().trim().min(3).max(500),
 });
 
 const alertInclude = {

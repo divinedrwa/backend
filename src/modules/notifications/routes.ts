@@ -20,7 +20,7 @@ const registerDeviceSchema = z.object({
   platform: z.nativeEnum(PushPlatform),
   /** Stable hardware id (Android ID / iOS identifierForVendor). Must match login upsert. */
   deviceId: z.string().min(1).optional(),
-  deviceName: z.string().max(200).optional(),
+  deviceName: z.string().trim().max(200).optional(),
 });
 
 const removeDeviceSchema = z.object({
@@ -30,8 +30,8 @@ const removeDeviceSchema = z.object({
 });
 
 const broadcastSchema = z.object({
-  title: z.string().min(1).max(120),
-  body: z.string().min(1).max(500),
+  title: z.string().trim().min(1).max(120),
+  body: z.string().trim().min(1).max(500),
   category: z.nativeEnum(NotificationCategory).optional(),
   /** Roles that should receive this message within your society */
   targetRoles: z.array(z.nativeEnum(UserRole)).min(1),

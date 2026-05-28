@@ -12,10 +12,10 @@ const router = Router();
 const createVisitorSchema = z.object({
   villaIds: z.array(z.string().cuid()).min(1),
   gateId: z.string().cuid().optional(),
-  name: z.string().min(2).max(100),
-  phone: z.string().min(10).max(15),
-  vehicleNumber: z.string().optional(),
-  purpose: z.string().min(3).max(200),
+  name: z.string().trim().min(2).max(100),
+  phone: z.string().trim().min(10).max(15),
+  vehicleNumber: z.string().trim().optional(),
+  purpose: z.string().trim().min(3).max(200),
   visitorType: z.nativeEnum(VisitorType).optional(),
 });
 

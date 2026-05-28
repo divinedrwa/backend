@@ -60,61 +60,95 @@ cron.schedule(
       const ran = await withAdvisoryLock(
         AdvisoryLockKeys.billingCycleHourly,
         async () => {
-          await syncAllBillingCycleStatuses();
-          await runBillingReminderJobs();
-          
-          // 🔥 NEW: Run financial reconciliation
-          logger.info("[billing-cron] Running ledger reconciliation");
-          const reconResult = await reconcileAllSocieties();
-          logger.info({
-            total: reconResult.total,
-            successful: reconResult.successful,
-            failed: reconResult.failed,
-            alertsCreated: reconResult.totalAlerts,
-          }, "[billing-cron] Reconciliation complete");
-
-          // Apply late fees to overdue maintenance snapshots
-          await applyLateFees();
-
-          // Check complaint SLA breaches and notify admins
-          await checkComplaintSlaBreaches();
-          await autoCloseResolvedComplaints();
-
-          // Process pending SOS escalations (DB-backed)
-          const escalationsProcessed = await prisma.$transaction(async (tx) => {
-            return await processEscalations(tx);
-          });
-          if (escalationsProcessed > 0) {
-            logger.info({ escalationsProcessed }, "[billing-cron] SOS escalations processed");
-          }
-
-          // Deactivate expired pre-approved visitors
-          const { count: deactivatedPreApprovals } = await prisma.preApprovedVisitor.updateMany({
-            where: {
-              isActive: true,
-              isUsed: false,
-              validUntil: { lt: new Date() },
+          const steps: Array<{ name: string; fn: () => Promise<void> }> = [
+            {
+              name: "syncBillingCycleStatuses",
+              fn: async () => { await syncAllBillingCycleStatuses(); },
             },
-            data: { isActive: false },
-          });
-          if (deactivatedPreApprovals > 0) {
-            logger.info({ deactivatedPreApprovals }, "[billing-cron] Deactivated expired pre-approvals");
-          }
-
-          // Clean up stale inactive push devices (>90 days)
-          await NotificationService.cleanupInactiveDevices();
-
-          // Purge expired or revoked refresh tokens (>7 days past expiry)
-          const { count: purgedTokens } = await prisma.refreshToken.deleteMany({
-            where: {
-              OR: [
-                { expiresAt: { lt: new Date() }, revoked: false },
-                { revoked: true },
-              ],
+            {
+              name: "billingReminders",
+              fn: async () => { await runBillingReminderJobs(); },
             },
-          });
-          if (purgedTokens > 0) {
-            logger.info({ purgedTokens }, "[billing-cron] Purged expired/revoked refresh tokens");
+            {
+              name: "ledgerReconciliation",
+              fn: async () => {
+                logger.info("[billing-cron] Running ledger reconciliation");
+                const reconResult = await reconcileAllSocieties();
+                logger.info({
+                  total: reconResult.total,
+                  successful: reconResult.successful,
+                  failed: reconResult.failed,
+                  alertsCreated: reconResult.totalAlerts,
+                }, "[billing-cron] Reconciliation complete");
+              },
+            },
+            {
+              name: "applyLateFees",
+              fn: async () => { await applyLateFees(); },
+            },
+            {
+              name: "complaintSlaBreaches",
+              fn: async () => { await checkComplaintSlaBreaches(); },
+            },
+            {
+              name: "autoCloseComplaints",
+              fn: async () => { await autoCloseResolvedComplaints(); },
+            },
+            {
+              name: "sosEscalations",
+              fn: async () => {
+                const escalationsProcessed = await prisma.$transaction(async (tx) => {
+                  return await processEscalations(tx);
+                });
+                if (escalationsProcessed > 0) {
+                  logger.info({ escalationsProcessed }, "[billing-cron] SOS escalations processed");
+                }
+              },
+            },
+            {
+              name: "deactivateExpiredPreApprovals",
+              fn: async () => {
+                const { count: deactivatedPreApprovals } = await prisma.preApprovedVisitor.updateMany({
+                  where: {
+                    isActive: true,
+                    isUsed: false,
+                    validUntil: { lt: new Date() },
+                  },
+                  data: { isActive: false },
+                });
+                if (deactivatedPreApprovals > 0) {
+                  logger.info({ deactivatedPreApprovals }, "[billing-cron] Deactivated expired pre-approvals");
+                }
+              },
+            },
+            {
+              name: "cleanupInactiveDevices",
+              fn: async () => { await NotificationService.cleanupInactiveDevices(); },
+            },
+            {
+              name: "purgeExpiredRefreshTokens",
+              fn: async () => {
+                const { count: purgedTokens } = await prisma.refreshToken.deleteMany({
+                  where: {
+                    OR: [
+                      { expiresAt: { lt: new Date() }, revoked: false },
+                      { revoked: true },
+                    ],
+                  },
+                });
+                if (purgedTokens > 0) {
+                  logger.info({ purgedTokens }, "[billing-cron] Purged expired/revoked refresh tokens");
+                }
+              },
+            },
+          ];
+
+          for (const step of steps) {
+            try {
+              await step.fn();
+            } catch (stepErr) {
+              logger.error({ err: stepErr, step: step.name }, `[billing-cron] step "${step.name}" failed, continuing`);
+            }
           }
 
           return true;

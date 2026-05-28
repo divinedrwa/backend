@@ -4,7 +4,7 @@ import { encryptSecret, decryptSecret, isEncrypted } from "../../lib/paymentSecr
 /** Fields that contain secrets and should be encrypted at rest / masked for display. */
 const SECRET_FIELDS: Record<string, string[]> = {
   RAZORPAY: ["keySecret", "webhookSecret"],
-  PHONEPE: ["saltKey"],
+  PHONEPE: ["saltKey", "clientSecret"],
 };
 
 /** Mask a string with "***" (for admin view of secret fields). */

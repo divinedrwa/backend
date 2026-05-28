@@ -37,13 +37,13 @@ router.use(requireRole(UserRole.ADMIN));
 router.use("/collection", collectionRoutes);
 
 const additionalFundSchema = z.object({
-  title: z.string().min(2).max(120),
+  title: z.string().trim().min(2).max(120),
   amount: z.number().positive(),
   receivedDate: z.string().datetime(),
   destination: z.enum(["MERGE_WITH_MAINTENANCE", "KEEP_SEPARATE"]),
   // Free-text source, e.g. donation, event sponsorship, corpus transfer, penalties, etc.
-  source: z.string().max(250).optional(),
-  notes: z.string().max(500).optional(),
+  source: z.string().trim().max(250).optional(),
+  notes: z.string().trim().max(500).optional(),
 });
 
 function parseMonthYear(query: Record<string, unknown>) {
@@ -261,7 +261,7 @@ const markPaidSchema = z.object({
   paymentMode: z.enum(["CASH", "UPI", "CHEQUE", "BANK_TRANSFER"]),
   transactionId: z.string().optional(),
   bankAccountId: z.string().min(1).optional(),
-  remarks: z.string().optional(),
+  remarks: z.string().trim().optional(),
   /// When set, payment is allocated to a billing-cycle snapshot (partial payments allowed).
   maintenanceCollectionCycleId: z.string().min(1).optional(),
   /// When true with amount=0, triggers credit walker to settle via advance credit.
@@ -663,7 +663,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
 const reversePaymentSchema = z.object({
   villaId: z.string().min(1),
   maintenanceCollectionCycleId: z.string().min(1),
-  reason: z.string().max(500).optional(),
+  reason: z.string().trim().max(500).optional(),
 });
 
 router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, res, next) => {
@@ -1032,7 +1032,7 @@ const manualCreditAdjustmentSchema = z.object({
   villaId: z.string().min(1),
   maintenanceCollectionCycleId: z.string().min(1),
   amount: z.number().refine((v) => v !== 0, "Amount must not be zero"),
-  remarks: z.string().min(1, "Remarks are required"),
+  remarks: z.string().trim().min(1, "Remarks are required"),
 });
 
 router.post(

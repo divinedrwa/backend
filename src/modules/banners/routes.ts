@@ -52,8 +52,8 @@ function notifyResidentsAboutBanner(banner: {
 
 // Validation schemas
 const createBannerSchema = z.object({
-  title: z.string().min(3).max(200),
-  description: z.string().optional(),
+  title: z.string().trim().min(3).max(200),
+  description: z.string().trim().optional(),
   imageUrl: z.string().url().optional(),
   type: z.nativeEnum(BannerType).default(BannerType.ANNOUNCEMENT),
   priority: z.number().int().min(0).max(100).default(0),
@@ -64,8 +64,8 @@ const createBannerSchema = z.object({
 });
 
 const updateBannerSchema = z.object({
-  title: z.string().min(3).max(200).optional(),
-  description: z.string().optional(),
+  title: z.string().trim().min(3).max(200).optional(),
+  description: z.string().trim().optional(),
   imageUrl: z.string().url().optional(),
   type: z.nativeEnum(BannerType).optional(),
   priority: z.number().int().min(0).max(100).optional(),

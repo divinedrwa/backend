@@ -9,15 +9,15 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 const createGateSchema = z.object({
-  name: z.string().min(2).max(100),
-  location: z.string().optional(),
-  description: z.string().optional()
+  name: z.string().trim().min(2).max(100),
+  location: z.string().trim().optional(),
+  description: z.string().trim().optional()
 });
 
 const updateGateSchema = z.object({
-  name: z.string().min(2).max(100).optional(),
-  location: z.string().optional(),
-  description: z.string().optional(),
+  name: z.string().trim().min(2).max(100).optional(),
+  location: z.string().trim().optional(),
+  description: z.string().trim().optional(),
   isActive: z.boolean().optional()
 });
 

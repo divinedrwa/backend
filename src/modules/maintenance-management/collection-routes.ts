@@ -28,15 +28,15 @@ import { refreshSnapshotStatus } from "./snapshot-helpers";
 const router = Router();
 
 const createFinancialYearSchema = z.object({
-  label: z.string().min(2).max(80),
+  label: z.string().trim().min(2).max(80),
   startDate: z.string(),
   endDate: z.string(),
 });
 
 const createCycleSchema = z.object({
   financialYearId: z.string().min(1),
-  periodKey: z.string().min(2).max(40),
-  title: z.string().min(1).max(120),
+  periodKey: z.string().trim().min(2).max(40),
+  title: z.string().trim().min(1).max(120),
   periodMonth: z.number().int().min(1).max(12),
   periodYear: z.number().int().min(2000).max(2100),
   dueDate: z.string(),
@@ -1380,7 +1380,7 @@ router.get("/financial-years/:fyId/year-report", async (req, res, next) => {
 
 const excludeVillaSchema = z.object({
   villaId: z.string().min(1),
-  reason: z.string().max(500).optional(),
+  reason: z.string().trim().max(500).optional(),
 });
 
 // POST /api/maintenance-management/collection/cycles/:cycleId/exclude-villa

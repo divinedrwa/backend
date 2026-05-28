@@ -14,19 +14,19 @@ function maskAccountNumber(acct: string): string {
 
 // Validation schemas
 const createBankAccountSchema = z.object({
-  bankName: z.string().min(1),
-  accountNumber: z.string().min(1),
-  ifscCode: z.string().min(1),
-  accountHolderName: z.string().min(1),
-  accountType: z.string().min(1),
+  bankName: z.string().trim().min(1),
+  accountNumber: z.string().trim().min(1),
+  ifscCode: z.string().trim().min(1),
+  accountHolderName: z.string().trim().min(1),
+  accountType: z.string().trim().min(1),
   isActive: z.boolean().optional(),
 });
 
 const updateBankAccountSchema = z.object({
-  bankName: z.string().min(1).optional(),
-  ifscCode: z.string().min(1).optional(),
-  accountHolderName: z.string().min(1).optional(),
-  accountType: z.string().optional(),
+  bankName: z.string().trim().min(1).optional(),
+  ifscCode: z.string().trim().min(1).optional(),
+  accountHolderName: z.string().trim().min(1).optional(),
+  accountType: z.string().trim().optional(),
   isActive: z.boolean().optional(),
 });
 

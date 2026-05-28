@@ -16,8 +16,8 @@ const router = Router();
 
 // Validation schemas
 const unitInputSchema = z.object({
-  unitCode: z.string().min(1).max(64),
-  label: z.string().min(1).max(120),
+  unitCode: z.string().trim().min(1).max(64),
+  label: z.string().trim().min(1).max(120),
   sortOrder: z.number().int().min(0).max(999).optional(),
 });
 
@@ -45,13 +45,13 @@ function assertUniqueUnitLabels(
 
 const createVillaSchema = z
   .object({
-    villaNumber: z.string().min(1),
+    villaNumber: z.string().trim().min(1),
     floors: z.number().int().min(1).max(10),
     area: z.number().positive().optional(),
-    block: z.string().optional(),
-    ownerName: z.string().min(1),
-    ownerEmail: z.string().email().optional(),
-    ownerPhone: z.string().optional(),
+    block: z.string().trim().optional(),
+    ownerName: z.string().trim().min(1),
+    ownerEmail: z.string().trim().email().optional(),
+    ownerPhone: z.string().trim().optional(),
     monthlyMaintenance: z.number().positive(),
     /** At least one occupant unit (e.g. suggested GF/FF or custom). No implicit `_DEFAULT` row. */
     units: z.array(unitInputSchema).min(1),
@@ -62,10 +62,10 @@ const updateVillaSchema = z
   .object({
     floors: z.number().int().min(1).max(10).optional(),
     area: z.number().positive().optional(),
-    block: z.string().optional(),
-    ownerName: z.string().min(1).optional(),
-    ownerEmail: z.string().email().optional(),
-    ownerPhone: z.string().optional(),
+    block: z.string().trim().optional(),
+    ownerName: z.string().trim().min(1).optional(),
+    ownerEmail: z.string().trim().email().optional(),
+    ownerPhone: z.string().trim().optional(),
     monthlyMaintenance: z.number().positive().optional(),
     /** Upsert units by `unitCode`. With `unitsSync`, removes units not listed and reassigns residents/visitors. */
     units: z.array(unitInputSchema).optional(),

@@ -74,7 +74,7 @@ const submitSchema = z.object({
   year: z.number().int().min(2020),
   upiTransactionRef: z.string().min(6).max(30).optional(),
   cycleId: z.string().optional(),
-  remark: z.string().max(500).optional(),
+  remark: z.string().trim().max(500).optional(),
 });
 
 router.post(

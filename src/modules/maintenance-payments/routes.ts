@@ -53,7 +53,7 @@ const recordPaymentSchema = z.object({
   paymentMode: z.enum(["CASH", "UPI", "BANK_TRANSFER", "CHEQUE", "ONLINE"]),
   transactionId: z.string().optional(),
   bankAccountId: z.string().optional(),
-  remarks: z.string().optional(),
+  remarks: z.string().trim().optional(),
   idempotencyKey: z.string().min(10).max(255).optional(), // Prevent duplicates
 });
 

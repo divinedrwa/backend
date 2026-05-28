@@ -13,7 +13,7 @@ const router = Router();
 const toggleWaterSupplySchema = z.object({
   gateId: z.string(),
   turnedOn: z.boolean(),
-  reason: z.string().optional(),
+  reason: z.string().trim().optional(),
 });
 
 // POST /api/water-supply/toggle - Turn water ON/OFF (guards only)

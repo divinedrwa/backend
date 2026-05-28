@@ -17,15 +17,15 @@ function maskPhone(phone: string | null | undefined): string | null {
 }
 
 const vehicleEntrySchema = z.object({
-  registrationNumber: z.string().min(3).max(32),
+  registrationNumber: z.string().trim().min(3).max(32),
   kind: z.enum(["RESIDENT", "VISITOR"]),
   villaId: z.string().optional(),
-  notes: z.string().optional(),
+  notes: z.string().trim().optional(),
 });
 
 const socSchema = z.object({
   kind: z.enum(["FIRE", "MEDICAL", "SECURITY"]),
-  note: z.string().optional(),
+  note: z.string().trim().optional(),
 });
 
 // POST /api/guards/gate-vehicle/entry
@@ -211,9 +211,9 @@ router.get("/residents-directory", requireRole(UserRole.GUARD), async (req, res,
 
 // POST /api/guards/incidents — validated guard incident API
 const incidentGuardSchema = z.object({
-  title: z.string().min(3),
-  description: z.string().min(3),
-  location: z.string().optional(),
+  title: z.string().trim().min(3),
+  description: z.string().trim().min(3),
+  location: z.string().trim().optional(),
   severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
 });
 

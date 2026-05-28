@@ -9,26 +9,26 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 const createStaffSchema = z.object({
-  name: z.string().min(2).max(100),
+  name: z.string().trim().min(2).max(100),
   type: z.nativeEnum(StaffType),
-  phone: z.string().min(10).max(15),
-  address: z.string().optional(),
-  idProof: z.string().optional(),
+  phone: z.string().trim().min(10).max(15),
+  address: z.string().trim().optional(),
+  idProof: z.string().trim().optional(),
   photo: z.string().optional(),
   villaIds: z.array(z.string().cuid()).min(1), // Array of villa IDs
 });
 
 const assignVillaSchema = z.object({
   villaId: z.string().cuid(),
-  notes: z.string().optional(),
+  notes: z.string().trim().optional(),
 });
 
 const updateStaffSchema = z.object({
-  name: z.string().min(2).max(100).optional(),
+  name: z.string().trim().min(2).max(100).optional(),
   type: z.nativeEnum(StaffType).optional(),
-  phone: z.string().min(10).max(15).optional(),
-  address: z.string().optional(),
-  idProof: z.string().optional(),
+  phone: z.string().trim().min(10).max(15).optional(),
+  address: z.string().trim().optional(),
+  idProof: z.string().trim().optional(),
   photo: z.string().optional(),
   isActive: z.boolean().optional(),
 });

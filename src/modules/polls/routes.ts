@@ -9,11 +9,11 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 const createPollSchema = z.object({
-  title: z.string().min(5).max(200),
-  description: z.string().optional(),
+  title: z.string().trim().min(5).max(200),
+  description: z.string().trim().optional(),
   startDate: z.string().datetime(),
   endDate: z.string().datetime(),
-  options: z.array(z.string().min(1).max(200)).min(2)
+  options: z.array(z.string().trim().min(1).max(200)).min(2)
 }).refine((d) => new Date(d.endDate) > new Date(d.startDate), {
   message: "End date must be after start date",
   path: ["endDate"],

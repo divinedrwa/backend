@@ -12,21 +12,21 @@ router.use(requireAuth);
 
 // Validation schemas
 const startPatrolSchema = z.object({
-  location: z.string().min(2),
-  notes: z.string().optional(),
+  location: z.string().trim().min(2),
+  notes: z.string().trim().optional(),
 });
 
 const patrolCheckpointSchema = z.object({
-  location: z.string().min(2),
-  notes: z.string().optional(),
+  location: z.string().trim().min(2),
+  notes: z.string().trim().optional(),
   issuesFound: z.boolean().optional(),
 });
 
 const createIncidentSchema = z.object({
-  title: z.string().min(1),
-  description: z.string().min(1),
+  title: z.string().trim().min(1),
+  description: z.string().trim().min(1),
   severity: z.enum(["LOW", "MEDIUM", "HIGH", "CRITICAL"]).optional(),
-  location: z.string().optional(),
+  location: z.string().trim().optional(),
 });
 
 // POST /api/guards/start-patrol - Start patrol

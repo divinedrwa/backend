@@ -51,6 +51,17 @@ const refreshRateLimiter = rateLimit({
   },
 });
 
+const registerRateLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000, // 1 hour
+  limit: 10,
+  standardHeaders: "draft-7",
+  legacyHeaders: false,
+  skipSuccessfulRequests: true,
+  message: {
+    message: "Too many registration attempts. Please try again later.",
+  },
+});
+
 class InviteRegisterError extends Error {
   constructor(
     public readonly statusCode: number,
@@ -110,11 +121,11 @@ async function applyLoginDevice(opts: {
 
 const registerWithInvitationSchema = z.object({
   token: z.string().min(16),
-  username: z.string().min(3).max(50),
-  name: z.string().min(2),
-  email: z.string().email(),
+  username: z.string().trim().min(3).max(50),
+  name: z.string().trim().min(2),
+  email: z.string().trim().email(),
   password: passwordSchema,
-  phone: z.string().optional(),
+  phone: z.string().trim().optional(),
   villaId: z.string().optional(),
   fcmToken: z.string().nullable().optional(),
   deviceId: z.string().nullable().optional(),
@@ -285,6 +296,7 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
  */
 router.post(
   "/register-with-invitation",
+  registerRateLimiter,
   validateBody(registerWithInvitationSchema),
   async (req, res, next) => {
     try {
@@ -460,7 +472,7 @@ const deviceFieldsSchema = z.object({
 
 const superAdminLoginSchema = z
   .object({
-    username: z.string().min(3),
+    username: z.string().trim().min(3),
     password: z.string().min(6),
   })
   .merge(deviceFieldsSchema);
@@ -524,7 +536,7 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
 const adminLoginSchema = z
   .object({
     societyId: z.string().min(1),
-    username: z.string().min(3),
+    username: z.string().trim().min(3),
     password: z.string().min(6),
   })
   .merge(deviceFieldsSchema);
@@ -587,7 +599,7 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
 const tenantLoginSchema = z
   .object({
     societyId: z.string().min(1),
-    username: z.string().min(3),
+    username: z.string().trim().min(3),
     password: z.string().min(6),
   })
   .merge(deviceFieldsSchema);

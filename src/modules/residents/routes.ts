@@ -19,19 +19,19 @@ import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
 
 const updateProfileSchema = z.object({
-  name: z.string().min(2).optional(),
-  phone: z.string().optional(),
-  email: z.string().email().optional(),
+  name: z.string().trim().min(2).optional(),
+  phone: z.string().trim().optional(),
+  email: z.string().trim().email().optional(),
   notifyEmail: z.boolean().optional(),
   notifyPush: z.boolean().optional(),
 });
 
 const updateFamilyMemberSchema = z.object({
-  name: z.string().min(1).max(100).optional(),
-  relationship: z.string().min(1).max(50).optional(),
+  name: z.string().trim().min(1).max(100).optional(),
+  relationship: z.string().trim().min(1).max(50).optional(),
   age: z.number().int().min(0).max(120).optional(),
-  phone: z.string().max(20).optional(),
-  idProof: z.string().max(200).optional(),
+  phone: z.string().trim().max(20).optional(),
+  idProof: z.string().trim().max(200).optional(),
 });
 
 const router = Router();
@@ -135,18 +135,18 @@ router.use(requireAuth);
 
 // Validation schemas
 const addFamilyMemberSchema = z.object({
-  name: z.string().min(2),
-  relationship: z.string().min(2),
+  name: z.string().trim().min(2),
+  relationship: z.string().trim().min(2),
   age: z.number().int().positive().optional(),
-  phone: z.string().optional(),
-  idProof: z.string().optional(),
+  phone: z.string().trim().optional(),
+  idProof: z.string().trim().optional(),
 });
 
 const emergencyContactSchema = z.object({
-  name: z.string().min(2),
-  relationship: z.string().min(2),
-  phone: z.string().min(10),
-  address: z.string().optional(),
+  name: z.string().trim().min(2),
+  relationship: z.string().trim().min(2),
+  phone: z.string().trim().min(10),
+  address: z.string().trim().optional(),
 });
 
 // ========================================

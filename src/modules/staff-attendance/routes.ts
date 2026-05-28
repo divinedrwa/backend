@@ -9,11 +9,11 @@ const router = Router();
 
 const checkInSchema = z.object({
   staffId: z.string().min(1),
-  notes: z.string().max(500).optional(),
+  notes: z.string().trim().max(500).optional(),
 });
 
 const checkOutSchema = z.object({
-  notes: z.string().max(500).optional(),
+  notes: z.string().trim().max(500).optional(),
 });
 
 router.use(requireAuth);

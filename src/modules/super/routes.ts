@@ -15,8 +15,8 @@ router.use(requireAuth);
 router.use(requireRole(UserRole.SUPER_ADMIN));
 
 const createSocietySchema = z.object({
-  name: z.string().min(2).max(200),
-  address: z.string().max(500).optional(),
+  name: z.string().trim().min(2).max(200),
+  address: z.string().trim().max(500).optional(),
 });
 
 /**
@@ -47,11 +47,11 @@ router.post("/societies", validateBody(createSocietySchema), async (req, res, ne
 });
 
 const createSocietyAdminSchema = z.object({
-  username: z.string().min(3).max(50),
-  name: z.string().min(2),
-  email: z.string().email(),
+  username: z.string().trim().min(3).max(50),
+  name: z.string().trim().min(2),
+  email: z.string().trim().email(),
   password: passwordSchema,
-  phone: z.string().min(5).optional(),
+  phone: z.string().trim().min(5).optional(),
 });
 
 /**
@@ -222,8 +222,8 @@ router.get("/societies", async (_req, res, next) => {
 });
 
 const updateSocietySchema = z.object({
-  name: z.string().min(2).max(200).optional(),
-  address: z.union([z.string().max(500), z.null()]).optional(),
+  name: z.string().trim().min(2).max(200).optional(),
+  address: z.union([z.string().trim().max(500), z.null()]).optional(),
   status: z.nativeEnum(SocietyStatus).optional(),
 });
 

@@ -12,8 +12,8 @@ const createSchema = z.object({
   title: z.string().trim().min(2).max(300),
   type: z.nativeEnum(MeetingType).optional().default("GENERAL"),
   scheduledAt: z.string().pipe(z.coerce.date()),
-  location: z.string().max(300).optional(),
-  agenda: z.string().max(10000).optional(),
+  location: z.string().trim().max(300).optional(),
+  agenda: z.string().trim().max(10000).optional(),
   documentUrl: z.string().url().optional(),
 });
 
@@ -23,9 +23,9 @@ const updateSchema = z.object({
   status: z.nativeEnum(MeetingStatus).optional(),
   scheduledAt: z.string().pipe(z.coerce.date()).optional(),
   endedAt: z.string().pipe(z.coerce.date()).optional().nullable(),
-  location: z.string().max(300).optional().nullable(),
-  agenda: z.string().max(10000).optional().nullable(),
-  minutes: z.string().max(50000).optional().nullable(),
+  location: z.string().trim().max(300).optional().nullable(),
+  agenda: z.string().trim().max(10000).optional().nullable(),
+  minutes: z.string().trim().max(50000).optional().nullable(),
   attendeeCount: z.number().int().min(0).optional().nullable(),
   documentUrl: z.string().url().optional().nullable(),
 });

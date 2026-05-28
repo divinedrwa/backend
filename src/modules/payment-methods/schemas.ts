@@ -3,12 +3,12 @@ import { z } from "zod";
 // ── Config schemas per type ──────────────────────────────────────────
 
 const bankTransferConfigSchema = z.object({
-  bankName: z.string().min(1),
-  accountNumber: z.string().min(5),
+  bankName: z.string().trim().min(1),
+  accountNumber: z.string().trim().min(5),
   ifscCode: z
     .string()
     .regex(/^[A-Z]{4}0[A-Z0-9]{6}$/, "IFSC must match format like ABCD0123456"),
-  accountHolderName: z.string().min(1),
+  accountHolderName: z.string().trim().min(1),
   accountType: z.enum(["SAVINGS", "CURRENT"]),
 });
 
@@ -43,7 +43,7 @@ const phonepeConfigSchema = z.object({
 // ── Create schema (discriminated union) ──────────────────────────────
 
 const baseCreate = {
-  displayName: z.string().min(1).max(100),
+  displayName: z.string().trim().min(1).max(100),
   isEnabled: z.boolean().default(true),
   sortOrder: z.number().int().min(0).default(0),
 };
@@ -59,7 +59,7 @@ export const createPaymentMethodSchema = z.discriminatedUnion("type", [
 // ── Update schema ────────────────────────────────────────────────────
 
 export const updatePaymentMethodSchema = z.object({
-  displayName: z.string().min(1).max(100).optional(),
+  displayName: z.string().trim().min(1).max(100).optional(),
   isEnabled: z.boolean().optional(),
   sortOrder: z.number().int().min(0).optional(),
   config: z.record(z.unknown()).optional(),

@@ -36,9 +36,9 @@ const corsAllowList = (process.env.CORS_ORIGINS ?? "")
   .map((s) => s.trim())
   .filter(Boolean);
 if (corsAllowList.length === 0 && process.env.NODE_ENV === "production") {
-  logger.warn(
-    "CORS_ORIGINS is not set in production — defaulting to restrictive CORS. " +
-    "Set CORS_ORIGINS to a comma-separated allow-list of origins."
+  logger.error(
+    "CORS_ORIGINS is not set in production — defaulting to restrictive CORS (no cross-origin allowed). " +
+    "Set CORS_ORIGINS to a comma-separated allow-list of origins (e.g. https://admin.example.com)."
   );
 }
 app.use(

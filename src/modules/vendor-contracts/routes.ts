@@ -11,28 +11,28 @@ const router = Router();
 const createSchema = z.object({
   vendorId: z.string().min(1),
   title: z.string().trim().min(2).max(200),
-  description: z.string().max(5000).optional(),
+  description: z.string().trim().max(5000).optional(),
   status: z.nativeEnum(ContractStatus).optional().default("DRAFT"),
   startDate: z.string().pipe(z.coerce.date()),
   endDate: z.string().pipe(z.coerce.date()),
   amount: z.number().min(0),
-  paymentTerms: z.string().max(500).optional(),
+  paymentTerms: z.string().trim().max(500).optional(),
   autoRenew: z.boolean().optional().default(false),
   documentUrl: z.string().url().optional(),
-  notes: z.string().max(5000).optional(),
+  notes: z.string().trim().max(5000).optional(),
 });
 
 const updateSchema = z.object({
   title: z.string().trim().min(2).max(200).optional(),
-  description: z.string().max(5000).optional().nullable(),
+  description: z.string().trim().max(5000).optional().nullable(),
   status: z.nativeEnum(ContractStatus).optional(),
   startDate: z.string().pipe(z.coerce.date()).optional(),
   endDate: z.string().pipe(z.coerce.date()).optional(),
   amount: z.number().min(0).optional(),
-  paymentTerms: z.string().max(500).optional().nullable(),
+  paymentTerms: z.string().trim().max(500).optional().nullable(),
   autoRenew: z.boolean().optional(),
   documentUrl: z.string().url().optional().nullable(),
-  notes: z.string().max(5000).optional().nullable(),
+  notes: z.string().trim().max(5000).optional().nullable(),
 });
 
 router.use(requireAuth);

@@ -1,8 +1,9 @@
 import { Resend } from "resend";
 import { logger } from "../lib/logger";
+import { APP_NAME, APP_TAGLINE, DEFAULT_EMAIL_FROM } from "../lib/branding";
 
 const RESEND_API_KEY = process.env.RESEND_API_KEY;
-const EMAIL_FROM = process.env.EMAIL_FROM || "GatePass+ <noreply@gatepass.app>";
+const EMAIL_FROM = process.env.EMAIL_FROM || DEFAULT_EMAIL_FROM;
 
 let resend: Resend | null = null;
 
@@ -51,14 +52,14 @@ export async function sendPasswordResetEmail(opts: {
 }): Promise<boolean> {
   return sendEmail({
     to: opts.to,
-    subject: "Reset your GatePass+ password",
+    subject: `Reset your ${APP_NAME} password`,
     html: `
 <!DOCTYPE html>
 <html>
 <head><meta charset="utf-8"></head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; max-width: 480px; margin: 0 auto; padding: 24px; color: #1e293b;">
   <div style="text-align: center; margin-bottom: 24px;">
-    <h2 style="margin: 0; color: #0f172a;">GatePass+</h2>
+    <h2 style="margin: 0; color: #0f172a;">${APP_NAME}</h2>
     <p style="color: #64748b; font-size: 13px; margin-top: 4px;">Password Reset</p>
   </div>
   <p>Hi ${opts.name},</p>
@@ -70,7 +71,7 @@ export async function sendPasswordResetEmail(opts: {
   <p style="font-size: 13px; color: #64748b;">If the button doesn't work, copy and paste this URL into your browser:</p>
   <p style="font-size: 12px; color: #94a3b8; word-break: break-all;">${opts.resetUrl}</p>
   <hr style="border: none; border-top: 1px solid #e2e8f0; margin: 24px 0;">
-  <p style="font-size: 11px; color: #94a3b8; text-align: center;">GatePass+ — Society Management Platform</p>
+  <p style="font-size: 11px; color: #94a3b8; text-align: center;">${APP_NAME} — ${APP_TAGLINE}</p>
 </body>
 </html>`,
   });

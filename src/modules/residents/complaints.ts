@@ -12,15 +12,15 @@ router.use(requireAuth);
 
 // Validation schemas
 const createComplaintSchema = z.object({
-  title: z.string().min(5),
-  description: z.string().min(10),
-  category: z.string().optional(),
+  title: z.string().trim().min(5),
+  description: z.string().trim().min(10),
+  category: z.string().trim().optional(),
   priority: z.nativeEnum(ComplaintPriority).optional(),
 });
 
 const updateComplaintSchema = z.object({
-  title: z.string().min(5).optional(),
-  description: z.string().min(10).optional(),
+  title: z.string().trim().min(5).optional(),
+  description: z.string().trim().min(10).optional(),
 });
 
 // GET /api/residents/my-complaints - Get my complaints

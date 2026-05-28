@@ -11,13 +11,13 @@ router.use(requireAuth);
 
 // Validation schemas
 const registerVehicleSchema = z.object({
-  registrationNumber: z.string().min(5).max(20),
+  registrationNumber: z.string().trim().min(5).max(20),
   // Accept legacy mobile values and map to Prisma enum values.
   type: z.enum(["TWO_WHEELER", "FOUR_WHEELER", "HEAVY_VEHICLE", "BICYCLE", "OTHER"]),
-  make: z.string().optional(),
-  model: z.string().optional(),
-  color: z.string().optional(),
-  parkingSlot: z.string().optional(),
+  make: z.string().trim().optional(),
+  model: z.string().trim().optional(),
+  color: z.string().trim().optional(),
+  parkingSlot: z.string().trim().optional(),
 });
 
 // GET /api/residents/my-vehicles - Get my vehicles

@@ -16,7 +16,7 @@ const patchSocietySchema = z
     visitorMultiVillaApprovalMode: z.nativeEnum(VisitorMultiVillaApprovalMode).optional(),
     visitorApprovalRequired: z.boolean().optional(),
     guardCanApproveVisitors: z.boolean().optional(),
-    upiVpa: z.string().min(3).regex(/@/, "Must contain @").nullable().optional(),
+    upiVpa: z.string().trim().min(3).regex(/@/, "Must contain @").nullable().optional(),
     upiQrCodeUrl: z.string().url().nullable().optional(),
   })
   .refine(

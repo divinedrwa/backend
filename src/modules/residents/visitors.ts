@@ -35,7 +35,7 @@ const preApproveVisitorSchema = z.object({
     .max(18)
     .transform((s) => s.replace(/\D/g, ""))
     .refine((d) => d.length >= 10, { message: "phone must have at least 10 digits" }),
-  purpose: z.string().max(2000).optional(),
+  purpose: z.string().trim().max(2000).optional(),
   validUntil: z.string().datetime().optional(),
   /** Accept legacy client value `SERVICE` and normalize to `SERVICE_PROVIDER` (Prisma enum). */
   visitorType: z.preprocess(
@@ -60,7 +60,7 @@ const updatePreApprovedVisitorSchema = z.object({
     .transform((s) => s.replace(/\D/g, ""))
     .refine((d) => d.length >= 10, { message: "phone must have at least 10 digits" })
     .optional(),
-  purpose: z.string().max(2000).optional(),
+  purpose: z.string().trim().max(2000).optional(),
   validUntil: z.string().datetime().optional().nullable(),
 });
 

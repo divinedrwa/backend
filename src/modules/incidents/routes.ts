@@ -17,10 +17,10 @@ const incidentCreateRateLimiter = rateLimit({
 });
 
 const createIncidentSchema = z.object({
-  title: z.string().min(3).max(200),
-  description: z.string().min(10),
+  title: z.string().trim().min(3).max(200),
+  description: z.string().trim().min(10),
   severity: z.nativeEnum(IncidentSeverity),
-  location: z.string().optional(),
+  location: z.string().trim().optional(),
   photoUrl: z.string().url().optional()
 });
 

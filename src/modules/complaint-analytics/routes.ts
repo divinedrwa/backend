@@ -415,7 +415,7 @@ router.get("/trend", async (req, res, next) => {
 // Quick status update for complaints
 const quickUpdateSchema = z.object({
   status: z.enum(["OPEN", "IN_PROGRESS", "RESOLVED", "CLOSED"]),
-  adminNotes: z.string().optional(),
+  adminNotes: z.string().trim().optional(),
 });
 
 router.patch(

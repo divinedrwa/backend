@@ -22,8 +22,8 @@ router.use(requireRole(UserRole.ADMIN));
 // ==========================================
 
 const createCategorySchema = z.object({
-  name: z.string().min(1).max(100),
-  description: z.string().max(500).optional(),
+  name: z.string().trim().min(1).max(100),
+  description: z.string().trim().max(500).optional(),
   type: z.nativeEnum(ExpenseType).optional(),
   icon: z.string().max(64).optional(),
   color: z.string().max(32).optional(),
@@ -32,8 +32,8 @@ const createCategorySchema = z.object({
 });
 
 const updateCategorySchema = z.object({
-  name: z.string().min(1).max(100).optional(),
-  description: z.string().max(500).optional().nullable(),
+  name: z.string().trim().min(1).max(100).optional(),
+  description: z.string().trim().max(500).optional().nullable(),
   icon: z.string().max(64).optional().nullable(),
   color: z.string().max(32).optional().nullable(),
   isActive: z.boolean().optional(),
@@ -42,7 +42,7 @@ const updateCategorySchema = z.object({
 });
 
 const expenseAttachmentSchema = z.object({
-  fileName: z.string().min(1).max(255),
+  fileName: z.string().trim().min(1).max(255),
   fileUrl: z.string().url().max(2048),
   fileType: z.string().max(64),
   fileSize: z.number().int().nonnegative(),
@@ -50,17 +50,17 @@ const expenseAttachmentSchema = z.object({
 
 const createExpenseSchema = z.object({
   categoryId: z.string().min(1),
-  title: z.string().min(1).max(200),
-  description: z.string().max(2000).optional(),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(2000).optional(),
   amount: z.number().nonnegative(),
   paymentDate: z.string().datetime().or(z.string().min(1)),
   paymentMode: z.nativeEnum(PaymentMode),
-  paymentRef: z.string().max(200).optional(),
-  paidTo: z.string().min(1).max(200),
-  paidToContact: z.string().max(64).optional(),
+  paymentRef: z.string().trim().max(200).optional(),
+  paidTo: z.string().trim().min(1).max(200),
+  paidToContact: z.string().trim().max(64).optional(),
   receiptUrl: z.string().url().max(2048).optional(),
-  receiptNumber: z.string().max(100).optional(),
-  invoiceNumber: z.string().max(100).optional(),
+  receiptNumber: z.string().trim().max(100).optional(),
+  invoiceNumber: z.string().trim().max(100).optional(),
   month: z.number().int().min(1).max(12).optional(),
   year: z.number().int().min(2000).max(2100).optional(),
   financialYearId: z.string().optional(),
@@ -68,8 +68,8 @@ const createExpenseSchema = z.object({
   gstPercentage: z.number().nonnegative().optional(),
   tdsAmount: z.number().nonnegative().optional(),
   tdsPercentage: z.number().nonnegative().optional(),
-  notes: z.string().max(2000).optional(),
-  tags: z.array(z.string().max(64)).max(50).optional(),
+  notes: z.string().trim().max(2000).optional(),
+  tags: z.array(z.string().trim().max(64)).max(50).optional(),
   attachments: z.array(expenseAttachmentSchema).max(20).optional(),
 });
 

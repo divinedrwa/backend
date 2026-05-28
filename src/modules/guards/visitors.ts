@@ -46,15 +46,15 @@ const visitTargetSchema = z.object({
 
 const checkInSchema = z
   .object({
-    name: z.string().min(2),
-    phone: z.string().min(10),
+    name: z.string().trim().min(2),
+    phone: z.string().trim().min(10),
     /** Legacy: property ids only (uses default unit per property). */
     villaIds: z.array(z.string()).optional(),
     /** Preferred: property + unit + optional specific resident. */
     visitTargets: z.array(visitTargetSchema).optional(),
     visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
-    purpose: z.string().optional(),
-    vehicleNumber: z.string().optional(),
+    purpose: z.string().trim().optional(),
+    vehicleNumber: z.string().trim().optional(),
     photo: z.string().optional(),
     /** When true, visitor stays pending until resident(s) approve; then guard confirms entry. */
     awaitResidentApproval: z.boolean().optional().default(false),
@@ -71,8 +71,8 @@ const checkOutSchema = z.object({
 });
 
 const verifyPreApprovedSchema = z.object({
-  name: z.string(),
-  phone: z.string(),
+  name: z.string().trim(),
+  phone: z.string().trim(),
   villaId: z.string(),
 });
 
@@ -83,18 +83,18 @@ const otpVerifySchema = z.object({
 
 const visitorNotifySchema = z.object({
   villaId: z.string(),
-  visitorName: z.string().min(1),
-  visitorPhone: z.string().min(8),
-  message: z.string().optional(),
+  visitorName: z.string().trim().min(1),
+  visitorPhone: z.string().trim().min(8),
+  message: z.string().trim().optional(),
 });
 
 const approveEntrySchema = z.object({
   otp: z.string().min(4),
   villaId: z.string(),
-  visitorName: z.string().optional(),
-  visitorPhone: z.string().optional(),
-  purpose: z.string().optional(),
-  vehicleNumber: z.string().optional(),
+  visitorName: z.string().trim().optional(),
+  visitorPhone: z.string().trim().optional(),
+  purpose: z.string().trim().optional(),
+  vehicleNumber: z.string().trim().optional(),
 });
 
 const preApprovedAdmitSchema = z.object({

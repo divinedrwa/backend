@@ -12,7 +12,7 @@ const router = Router();
 // Validation schemas
 const logEntrySchema = z.object({
   gateId: z.string(),
-  notes: z.string().optional(),
+  notes: z.string().trim().optional(),
 });
 
 // POST /api/garbage-collection/entry - Log garbage collector entry (guards only)

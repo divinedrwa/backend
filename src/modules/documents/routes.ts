@@ -9,16 +9,16 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 const createDocumentSchema = z.object({
-  title: z.string().min(3).max(200),
+  title: z.string().trim().min(3).max(200),
   category: z.nativeEnum(DocumentCategory),
-  description: z.string().optional(),
+  description: z.string().trim().optional(),
   fileUrl: z.string().url()
 });
 
 const updateDocumentSchema = z.object({
-  title: z.string().min(3).max(200).optional(),
+  title: z.string().trim().min(3).max(200).optional(),
   category: z.nativeEnum(DocumentCategory).optional(),
-  description: z.string().optional()
+  description: z.string().trim().optional()
 });
 
 router.use(requireAuth);

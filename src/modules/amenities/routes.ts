@@ -9,26 +9,26 @@ import { validateBody } from "../../middlewares/validate";
 const router = Router();
 
 const createAmenitySchema = z.object({
-  name: z.string().min(2).max(100),
+  name: z.string().trim().min(2).max(100),
   type: z.nativeEnum(AmenityType),
-  description: z.string().optional(),
+  description: z.string().trim().optional(),
   capacity: z.number().int().positive().optional(),
   /** 0 = free booking */
   pricePerHour: z.number().min(0).optional(),
   isActive: z.boolean().optional().default(true),
-  openTime: z.string().optional(),
-  closeTime: z.string().optional()
+  openTime: z.string().trim().optional(),
+  closeTime: z.string().trim().optional()
 });
 
 const updateAmenitySchema = z.object({
-  name: z.string().min(2).max(100).optional(),
+  name: z.string().trim().min(2).max(100).optional(),
   type: z.nativeEnum(AmenityType).optional(),
-  description: z.string().optional(),
+  description: z.string().trim().optional(),
   capacity: z.number().int().positive().optional(),
   pricePerHour: z.number().min(0).optional(),
   isActive: z.boolean().optional(),
-  openTime: z.string().optional(),
-  closeTime: z.string().optional()
+  openTime: z.string().trim().optional(),
+  closeTime: z.string().trim().optional()
 });
 
 router.use(requireAuth);

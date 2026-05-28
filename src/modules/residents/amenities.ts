@@ -14,7 +14,7 @@ const bookAmenitySchema = z.object({
   amenityId: z.string().min(1),
   startTime: z.string().datetime(),
   endTime: z.string().datetime(),
-  notes: z.string().optional(),
+  notes: z.string().trim().optional(),
 });
 
 // GET /api/residents/my-bookings - Get my bookings

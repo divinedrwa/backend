@@ -39,7 +39,7 @@ const createShiftSchema = z
     endTime: z.string().datetime().optional(),
     recurringStartMinutes: z.number().int().min(0).max(1439).optional(),
     recurringEndMinutes: z.number().int().min(0).max(1440).optional(),
-    notes: z.string().optional(),
+    notes: z.string().trim().optional(),
   })
   .superRefine((data, ctx) => {
     if (data.recurringDaily) {
@@ -72,7 +72,7 @@ const updateShiftSchema = z.object({
   shiftType: z.nativeEnum(ShiftType).optional(),
   startTime: z.string().datetime().optional(),
   endTime: z.string().datetime().optional(),
-  notes: z.string().optional()
+  notes: z.string().trim().optional()
 });
 
 router.use(requireAuth);

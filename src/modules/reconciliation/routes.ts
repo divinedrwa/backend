@@ -76,7 +76,7 @@ router.get(
 
 // POST /api/reconciliation/alerts/:id/resolve - Resolve an alert
 const resolveSchema = z.object({
-  notes: z.string().min(1, "Resolution notes are required"),
+  notes: z.string().trim().min(1, "Resolution notes are required"),
 });
 
 router.post(

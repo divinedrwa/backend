@@ -11,11 +11,11 @@ router.use(requireAuth);
 
 // Validation schema
 const addStaffSchema = z.object({
-  name: z.string().min(2),
+  name: z.string().trim().min(2),
   type: z.enum(["COOK", "MAID", "DRIVER", "GARDENER", "OTHER"]),
-  phone: z.string().min(10),
-  address: z.string().optional(),
-  idProof: z.string().optional(),
+  phone: z.string().trim().min(10),
+  address: z.string().trim().optional(),
+  idProof: z.string().trim().optional(),
 });
 
 // GET /api/residents/my-staff - Get my domestic staff

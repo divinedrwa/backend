@@ -25,16 +25,16 @@ const isResidentLike = (role: UserRole | string) =>
 
 const createUserSchema = z
   .object({
-    username: z.string().min(3).max(50),
-    name: z.string().min(2),
-    email: z.string().email(),
+    username: z.string().trim().min(3).max(50),
+    name: z.string().trim().min(2),
+    email: z.string().trim().email(),
     password: passwordSchema,
-    phone: z.string().optional(),
+    phone: z.string().trim().optional(),
     role: z.enum(["ADMIN", "RESIDENT", "GUARD", "RESIDENT_CUM_ADMIN"]),
     residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
     villaId: z.string().optional(),
     /** When set without villaId, matches CSV import: create shell villa in this society if needed */
-    villaNumber: z.string().min(1).optional(),
+    villaNumber: z.string().trim().min(1).optional(),
     /** Required for residents: occupant unit (Ground floor, First floor, or custom). */
     unitId: z.string().optional(),
     moveInDate: z.string().datetime().optional(),
@@ -75,7 +75,7 @@ const createUserSchema = z
   );
 
 const updateUserSchema = z.object({
-  name: z.string().min(1).optional(),
+  name: z.string().trim().min(1).optional(),
   email: z.string().email().optional(),
   phone: z
     .preprocess((v) => (v === "" ? null : v), z.string().nullable().optional()),

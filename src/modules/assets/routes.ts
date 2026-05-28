@@ -11,29 +11,29 @@ const router = Router();
 const createSchema = z.object({
   name: z.string().trim().min(2).max(200),
   category: z.string().trim().min(1).max(100),
-  location: z.string().max(200).optional(),
-  serialNumber: z.string().max(100).optional(),
+  location: z.string().trim().max(200).optional(),
+  serialNumber: z.string().trim().max(100).optional(),
   purchaseDate: z.string().pipe(z.coerce.date()).optional(),
   purchaseValue: z.number().min(0).optional(),
   currentValue: z.number().min(0).optional(),
   condition: z.nativeEnum(AssetCondition).optional().default("GOOD"),
   warrantyExpiry: z.string().pipe(z.coerce.date()).optional(),
-  assignedTo: z.string().max(200).optional(),
-  notes: z.string().max(5000).optional(),
+  assignedTo: z.string().trim().max(200).optional(),
+  notes: z.string().trim().max(5000).optional(),
 });
 
 const updateSchema = z.object({
   name: z.string().trim().min(2).max(200).optional(),
   category: z.string().trim().min(1).max(100).optional(),
-  location: z.string().max(200).optional().nullable(),
-  serialNumber: z.string().max(100).optional().nullable(),
+  location: z.string().trim().max(200).optional().nullable(),
+  serialNumber: z.string().trim().max(100).optional().nullable(),
   purchaseDate: z.string().pipe(z.coerce.date()).optional().nullable(),
   purchaseValue: z.number().min(0).optional().nullable(),
   currentValue: z.number().min(0).optional().nullable(),
   condition: z.nativeEnum(AssetCondition).optional(),
   warrantyExpiry: z.string().pipe(z.coerce.date()).optional().nullable(),
-  assignedTo: z.string().max(200).optional().nullable(),
-  notes: z.string().max(5000).optional().nullable(),
+  assignedTo: z.string().trim().max(200).optional().nullable(),
+  notes: z.string().trim().max(5000).optional().nullable(),
 });
 
 router.use(requireAuth);

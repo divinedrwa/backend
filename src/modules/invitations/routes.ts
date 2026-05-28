@@ -110,8 +110,8 @@ const createInvitationSchema = z
   .object({
     role: z.nativeEnum(UserRole),
     villaId: z.string().min(1).optional(),
-    phone: z.string().min(5).nullable().optional(),
-    email: z.string().email().nullable().optional(),
+    phone: z.string().trim().min(5).nullable().optional(),
+    email: z.string().trim().email().nullable().optional(),
     expiresAt: z.coerce.date().optional(),
   })
   .superRefine((data, ctx) => {

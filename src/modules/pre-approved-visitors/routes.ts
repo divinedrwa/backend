@@ -13,9 +13,9 @@ const router = Router();
 
 const createPreApprovedVisitorSchema = z.object({
   villaId: z.string().cuid(),
-  name: z.string().min(2).max(100),
-  phone: z.string().min(10).max(15),
-  purpose: z.string().optional(),
+  name: z.string().trim().min(2).max(100),
+  phone: z.string().trim().min(10).max(15),
+  purpose: z.string().trim().optional(),
   validFrom: z.string().datetime(),
   validUntil: z.string().datetime()
 });

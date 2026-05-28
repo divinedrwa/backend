@@ -26,16 +26,16 @@ const contributionItemSchema = z.object({
 });
 
 const createProjectSchema = z.object({
-  title: z.string().min(1).max(200),
-  description: z.string().max(2000).optional(),
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(2000).optional(),
   type: z.enum(["REPAIR", "UPGRADE", "PURCHASE", "EVENT", "OTHER"]).default("OTHER"),
   targetAmount: z.number().positive(),
   contributions: z.array(contributionItemSchema).min(1),
 });
 
 const updateProjectSchema = z.object({
-  title: z.string().min(1).max(200).optional(),
-  description: z.string().max(2000).optional(),
+  title: z.string().trim().min(1).max(200).optional(),
+  description: z.string().trim().max(2000).optional(),
   type: z.enum(["REPAIR", "UPGRADE", "PURCHASE", "EVENT", "OTHER"]).optional(),
   targetAmount: z.number().positive().optional(),
 });
@@ -47,23 +47,23 @@ const updateStatusSchema = z.object({
 const recordPaymentSchema = z.object({
   amount: z.number().positive(),
   method: z.enum(["CASH", "UPI", "BANK_TRANSFER", "CHEQUE", "ONLINE"]).default("CASH"),
-  reference: z.string().max(255).optional(),
+  reference: z.string().trim().max(255).optional(),
   paidAt: z.string().datetime().optional(),
   idempotencyKey: z.string().min(10).max(255).optional(),
 });
 
 const addExpenseSchema = z.object({
-  description: z.string().min(1).max(500),
+  description: z.string().trim().min(1).max(500),
   amount: z.number().positive(),
-  vendor: z.string().max(200).optional(),
+  vendor: z.string().trim().max(200).optional(),
   receiptUrl: z.string().url().optional(),
   expenseDate: z.string().datetime().optional(),
 });
 
 const updateExpenseSchema = z.object({
-  description: z.string().min(1).max(500).optional(),
+  description: z.string().trim().min(1).max(500).optional(),
   amount: z.number().positive().optional(),
-  vendor: z.string().max(200).optional(),
+  vendor: z.string().trim().max(200).optional(),
   receiptUrl: z.string().url().nullable().optional(),
   expenseDate: z.string().datetime().optional(),
 });

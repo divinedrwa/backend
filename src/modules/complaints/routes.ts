@@ -31,9 +31,9 @@ function computeSlaDeadline(priority: ComplaintPriority, from: Date = new Date()
 
 const createComplaintSchema = z.object({
   villaId: z.string().cuid(),
-  title: z.string().min(3).max(200),
-  description: z.string().min(10),
-  category: z.string().max(100).optional(),
+  title: z.string().trim().min(3).max(200),
+  description: z.string().trim().min(10),
+  category: z.string().trim().max(100).optional(),
   priority: z.nativeEnum(ComplaintPriority).optional(),
 });
 

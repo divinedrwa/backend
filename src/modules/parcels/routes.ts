@@ -12,7 +12,7 @@ const router = Router();
 
 const createParcelSchema = z.object({
   villaId: z.string().cuid(),
-  description: z.string().min(3).max(200)
+  description: z.string().trim().min(3).max(200)
 });
 
 const updateParcelStatusSchema = z.object({
@@ -118,7 +118,7 @@ router.post(
 );
 
 const updateParcelSchema = z.object({
-  description: z.string().min(3).max(200),
+  description: z.string().trim().min(3).max(200),
 });
 
 router.put(

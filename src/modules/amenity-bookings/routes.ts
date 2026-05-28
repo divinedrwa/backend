@@ -13,7 +13,7 @@ const createBookingSchema = z.object({
   amenityId: z.string().cuid(),
   startTime: z.string().datetime(),
   endTime: z.string().datetime(),
-  notes: z.string().optional()
+  notes: z.string().trim().optional()
 });
 
 const updateBookingStatusSchema = z.object({
