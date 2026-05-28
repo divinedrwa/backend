@@ -35,17 +35,45 @@ const corsAllowList = (process.env.CORS_ORIGINS ?? "")
   .split(",")
   .map((s) => s.trim())
   .filter(Boolean);
-if (corsAllowList.length === 0 && process.env.NODE_ENV === "production") {
+
+/**
+ * Optional: Vercel project slug for matching preview-deploy origins.
+ * Set VERCEL_PROJECT_SLUG (e.g. "divinedrwa-2575s-projects") and all
+ * `https://<deployment>-<slug>.vercel.app` origins are accepted automatically
+ * so you don't need to update CORS_ORIGINS on every preview push.
+ */
+const vercelSlug = (process.env.VERCEL_PROJECT_SLUG ?? "").trim();
+
+if (corsAllowList.length === 0 && !vercelSlug && process.env.NODE_ENV === "production") {
   logger.error(
     "CORS_ORIGINS is not set in production — defaulting to restrictive CORS (no cross-origin allowed). " +
     "Set CORS_ORIGINS to a comma-separated allow-list of origins (e.g. https://admin.example.com)."
   );
 }
+
+function corsOriginCheck(
+  origin: string | undefined,
+  callback: (err: Error | null, allow?: boolean) => void,
+) {
+  // Allow requests with no origin (server-to-server, curl, mobile apps)
+  if (!origin) return callback(null, true);
+
+  // Exact match against allow-list
+  if (corsAllowList.includes(origin)) return callback(null, true);
+
+  // Vercel preview deployments: https://<anything>-<slug>.vercel.app
+  if (vercelSlug && origin.endsWith(`-${vercelSlug}.vercel.app`) && origin.startsWith("https://")) {
+    return callback(null, true);
+  }
+
+  callback(null, false);
+}
+
 app.use(
   cors({
     origin:
-      corsAllowList.length > 0
-        ? corsAllowList
+      corsAllowList.length > 0 || vercelSlug
+        ? corsOriginCheck
         : process.env.NODE_ENV === "production"
           ? false
           : true,
