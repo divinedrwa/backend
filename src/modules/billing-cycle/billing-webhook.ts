@@ -140,11 +140,12 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       const maintenanceAmountNum = Number(lockedRow.amountPaid);
       const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
 
-      // Amount validation: gateway-reported amount must match the expected total.
-      // When platform fees are enabled the Razorpay order includes
-      // maintenance + platformFee + GST.  The order notes carry the
-      // original `maintenanceAmountPaise` so we can reconstruct the
-      // expected total.  Tolerance of 1 paisa for floating-point rounding.
+      // Amount validation: the gateway-reported amount must be at least the
+      // expected total.  When Razorpay's "Customer Fee Bearer" (convenience
+      // fee) is enabled, payment.amount includes Razorpay's processing fee
+      // on top of the order amount, so the payment amount will be HIGHER
+      // than our expected total — that's fine.  We only reject when the
+      // payment is LESS than expected (possible tampering / partial pay).
       if (isSuccess && amountPaise > 0) {
         const maintenancePaiseFromNotes = Number(notes?.maintenanceAmountPaise || 0);
         const platformFeePaiseFromNotes = Number(notes?.platformFeePaise || 0);
@@ -154,10 +155,12 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         const expectedPaise = maintenancePaiseFromNotes > 0
           ? maintenancePaiseFromNotes + platformFeePaiseFromNotes + platformFeeGstPaiseFromNotes
           : Math.round(maintenanceAmountNum * 100);
-        if (Math.abs(amountPaise - expectedPaise) > 1) {
+        // Allow amountPaise >= expectedPaise (Razorpay convenience fee on top).
+        // Reject only if charged LESS than expected (tolerance 1 paisa).
+        if (amountPaise < expectedPaise - 1) {
           logger.error(
             { orderId, paymentId, expectedPaise, actualPaise: amountPaise, maintenancePaiseFromNotes, platformFeePaiseFromNotes, platformFeeGstPaiseFromNotes },
-            "[billing webhook] AMOUNT MISMATCH — gateway charged different amount than order",
+            "[billing webhook] AMOUNT UNDERPAID — gateway charged less than expected order amount",
           );
           return { action: "skip" as const, reason: "amount_mismatch" };
         }
