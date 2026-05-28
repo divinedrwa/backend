@@ -28,6 +28,62 @@ import {
 } from "./services/razorpay-gateway-fee";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
 
+/** Razorpay orders expire in ~15 min. After this threshold a PENDING order
+ *  whose gateway status is also still PENDING is treated as abandoned. */
+const STALE_ORDER_MINUTES = 10;
+
+/**
+ * Reconcile an existing PENDING Razorpay order before deciding whether to
+ * return it (still active → reuse) or fall through (failed/stale → new order).
+ *
+ * Returns a partial JSON response object when the order should be reused.
+ * Returns `null` when the order is confirmed FAILED or stale (>10 min,
+ * gateway still PENDING) → caller should fall through to create a fresh order.
+ */
+async function reconcileExistingRazorpayOrder(
+  societyId: string,
+  orderId: string,
+  paymentId: string,
+  totalDue: number,
+): Promise<{ autoSettled?: boolean } | null> {
+  try {
+    const poll = await reconcileRazorpayFromPoll(societyId, orderId);
+
+    if (poll.status === BillingUserPaymentStatus.SUCCESS) {
+      return { autoSettled: true };
+    }
+
+    if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
+      return null;
+    }
+  } catch (err) {
+    logger.warn({ err, orderId }, "[razorpay] reconcile of existing order failed");
+  }
+
+  // Still PENDING — check staleness
+  try {
+    const row = await prisma.userCyclePayment.findFirst({
+      where: { paymentGatewayOrderId: orderId },
+      select: { updatedAt: true },
+    });
+    if (row) {
+      const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
+      if (ageMinutes > STALE_ORDER_MINUTES) {
+        logger.info(
+          { orderId, ageMinutes: Math.round(ageMinutes) },
+          "[razorpay] stale PENDING order — allowing fresh initiation",
+        );
+        return null;
+      }
+    }
+  } catch {
+    // If we can't check staleness, fall through to return the existing order
+  }
+
+  // Fresh PENDING order — reuse it
+  return {};
+}
+
 const router = Router();
 
 const createOrderSchema = z
@@ -63,19 +119,40 @@ router.post(
           },
         });
         if (idempotentRow?.paymentGatewayOrderId) {
-          const feeConfigIdem = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
-          const breakupIdem = computeRazorpayCheckoutBreakup(Number(idempotentRow.amountPaid), feeConfigIdem);
-          res.status(200).json({
-            orderId: idempotentRow.paymentGatewayOrderId,
-            amountPaise: breakupIdem.totalPayablePaise,
-            currency: "INR",
-            key: await getPublishableKeyForSociety(auth.societyId),
-            paymentId: idempotentRow.id,
-            totalDue: Number(idempotentRow.amountPaid),
-            existingOrder: true,
-            idempotent: true,
-          });
-          return;
+          const reconciled = await reconcileExistingRazorpayOrder(
+            auth.societyId,
+            idempotentRow.paymentGatewayOrderId,
+            idempotentRow.id,
+            Number(idempotentRow.amountPaid),
+          );
+          if (reconciled?.autoSettled) {
+            res.status(200).json({
+              orderId: idempotentRow.paymentGatewayOrderId,
+              paymentId: idempotentRow.id,
+              totalDue: Number(idempotentRow.amountPaid),
+              existingOrder: true,
+              autoSettled: true,
+              idempotent: true,
+            });
+            return;
+          }
+          if (reconciled !== null) {
+            // Fresh PENDING — return existing order for SDK reuse
+            const feeConfigIdem = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+            const breakupIdem = computeRazorpayCheckoutBreakup(Number(idempotentRow.amountPaid), feeConfigIdem);
+            res.status(200).json({
+              orderId: idempotentRow.paymentGatewayOrderId,
+              amountPaise: breakupIdem.totalPayablePaise,
+              currency: "INR",
+              key: await getPublishableKeyForSociety(auth.societyId),
+              paymentId: idempotentRow.id,
+              totalDue: Number(idempotentRow.amountPaid),
+              existingOrder: true,
+              idempotent: true,
+            });
+            return;
+          }
+          // reconciled === null → failed or stale, fall through to create new order
         }
       }
 
@@ -163,27 +240,46 @@ router.post(
       }
 
       // Prevent race: if a PENDING payment already has a gateway order,
-      // return the existing order so the client retries checkout with it
-      // instead of creating a second order (which would orphan the first).
+      // reconcile with gateway first, then decide whether to reuse or create new.
       if (
         existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
         existing.paymentGatewayOrderId
       ) {
-        const feeConfigExisting = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
-        const breakupExisting = computeRazorpayCheckoutBreakup(adjustedDue, feeConfigExisting);
-        res.status(200).json({
-          orderId: existing.paymentGatewayOrderId,
-          amountPaise: breakupExisting.totalPayablePaise,
-          currency: "INR",
-          key: await getPublishableKeyForSociety(auth.societyId),
-          paymentId: existing.id,
-          totalDue: adjustedDue,
-          unadjustedDue: due.totalDue,
-          availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
-          autoSettledFromCredit: false,
-          existingOrder: true,
-        });
-        return;
+        const reconciled = await reconcileExistingRazorpayOrder(
+          auth.societyId,
+          existing.paymentGatewayOrderId,
+          existing.id,
+          adjustedDue,
+        );
+        if (reconciled?.autoSettled) {
+          res.status(200).json({
+            orderId: existing.paymentGatewayOrderId,
+            paymentId: existing.id,
+            totalDue: adjustedDue,
+            existingOrder: true,
+            autoSettled: true,
+          });
+          return;
+        }
+        if (reconciled !== null) {
+          // Fresh PENDING — return existing order for SDK reuse
+          const feeConfigExisting = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+          const breakupExisting = computeRazorpayCheckoutBreakup(adjustedDue, feeConfigExisting);
+          res.status(200).json({
+            orderId: existing.paymentGatewayOrderId,
+            amountPaise: breakupExisting.totalPayablePaise,
+            currency: "INR",
+            key: await getPublishableKeyForSociety(auth.societyId),
+            paymentId: existing.id,
+            totalDue: adjustedDue,
+            unadjustedDue: due.totalDue,
+            availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
+            autoSettledFromCredit: false,
+            existingOrder: true,
+          });
+          return;
+        }
+        // reconciled === null → failed or stale, fall through to create new order
       }
 
       if (!(await isRazorpayConfiguredForSociety(auth.societyId))) {

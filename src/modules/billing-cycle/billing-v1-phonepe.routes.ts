@@ -26,6 +26,87 @@ function buildMerchantTransactionId(cycleKey: string, userId: string): string {
   return `pp${safeKey}${safeUser}${suffix}`.slice(0, 35);
 }
 
+/** PhonePe checkout pages expire in 5-15 minutes. After this threshold
+ *  a PENDING order whose gateway status is also still PENDING is treated
+ *  as abandoned — the caller falls through to create a fresh payment. */
+const STALE_ORDER_MINUTES = 10;
+
+/**
+ * Reconcile an existing PENDING PhonePe order before deciding whether to
+ * return it (still pending → poll) or fall through (failed → new payment).
+ *
+ * Returns a JSON-ready response object when the client should NOT create a
+ * new order (either already settled or recently initiated and still pending).
+ * Returns null when the payment is confirmed FAILED **or** the order is stale
+ * (>10 min, PhonePe still says PENDING) → caller should fall through to
+ * create a fresh PhonePe order.
+ */
+async function reconcileExistingOrder(
+  societyId: string,
+  merchantTransactionId: string,
+  paymentId: string,
+  totalDue: number,
+  payAllPending?: boolean,
+  pendingCycleCount?: number,
+): Promise<Record<string, unknown> | null> {
+  try {
+    const poll = await reconcilePhonePeFromPoll(societyId, merchantTransactionId);
+
+    if (poll.status === BillingUserPaymentStatus.SUCCESS) {
+      // Already settled at PhonePe — tell client
+      return {
+        merchantTransactionId,
+        paymentId,
+        totalDue,
+        existingOrder: true,
+        autoSettled: true,
+        ...(payAllPending != null && { payAllPending }),
+        ...(pendingCycleCount != null && { pendingCycleCount }),
+      };
+    }
+
+    if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
+      // PhonePe confirmed failure — caller should create a new payment
+      return null;
+    }
+  } catch (err) {
+    logger.warn({ err, merchantTransactionId }, "[phonepe] reconcile of existing order failed");
+  }
+
+  // Still PENDING — check if the order is stale (checkout page expired).
+  // PhonePe pages expire in 5-15 min; if the order is older than that and
+  // PhonePe still reports PENDING, the user never completed payment → safe
+  // to create a new one.
+  try {
+    const row = await prisma.userCyclePayment.findFirst({
+      where: { paymentGatewayOrderId: merchantTransactionId },
+      select: { updatedAt: true },
+    });
+    if (row) {
+      const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
+      if (ageMinutes > STALE_ORDER_MINUTES) {
+        logger.info(
+          { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
+          "[phonepe] stale PENDING order — allowing fresh initiation",
+        );
+        return null;
+      }
+    }
+  } catch {
+    // If we can't check staleness, fall through to return the existing order
+  }
+
+  // Fresh PENDING order — return for client-side polling
+  return {
+    merchantTransactionId,
+    paymentId,
+    totalDue,
+    existingOrder: true,
+    ...(payAllPending != null && { payAllPending }),
+    ...(pendingCycleCount != null && { pendingCycleCount }),
+  };
+}
+
 const router = Router();
 
 const phonePeInitiateSchema = z
@@ -50,7 +131,7 @@ router.post(
       const { idempotencyKey, payAllPending } = body;
 
       // Server-side idempotency: if the same key was already used for a
-      // PENDING order, return that order to prevent duplicate gateway charges.
+      // PENDING order, reconcile with PhonePe before deciding what to do.
       if (idempotencyKey) {
         const idempotentRow = await prisma.userCyclePayment.findFirst({
           where: {
@@ -59,16 +140,20 @@ router.post(
             paymentStatus: BillingUserPaymentStatus.PENDING,
             paymentGatewayOrderId: { not: null },
           },
+          include: { cycle: { select: { societyId: true, id: true } } },
         });
         if (idempotentRow?.paymentGatewayOrderId) {
-          res.status(200).json({
-            merchantTransactionId: idempotentRow.paymentGatewayOrderId,
-            paymentId: idempotentRow.id,
-            totalDue: Number(idempotentRow.amountPaid),
-            existingOrder: true,
-            idempotent: true,
-          });
-          return;
+          const resolved = await reconcileExistingOrder(
+            auth.societyId,
+            idempotentRow.paymentGatewayOrderId,
+            idempotentRow.id,
+            Number(idempotentRow.amountPaid),
+          );
+          if (resolved) {
+            res.status(200).json(resolved);
+            return;
+          }
+          // resolved === null means FAILED at PhonePe → fall through to create new payment
         }
       }
 
@@ -118,21 +203,25 @@ router.post(
       }
 
       // Prevent orphaned orders: if a PENDING payment already has a gateway
-      // transaction, return it so the client retries with the same txnId
-      // instead of creating a second (which would orphan the first).
+      // transaction, reconcile with PhonePe first. If still PENDING, return
+      // for client-side polling. If failed, fall through to create a new one.
       if (
         existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
         existing.paymentGatewayOrderId
       ) {
-        res.status(200).json({
-          merchantTransactionId: existing.paymentGatewayOrderId,
-          paymentId: existing.id,
-          totalDue: adjustedDue,
-          payAllPending: payAllPending === true,
-          pendingCycleCount: payAllQuote?.pendingCount ?? 1,
-          existingOrder: true,
-        });
-        return;
+        const resolved = await reconcileExistingOrder(
+          auth.societyId,
+          existing.paymentGatewayOrderId,
+          existing.id,
+          adjustedDue,
+          payAllPending === true,
+          payAllQuote?.pendingCount ?? 1,
+        );
+        if (resolved) {
+          res.status(200).json(resolved);
+          return;
+        }
+        // resolved === null means FAILED at PhonePe → fall through to create new payment
       }
 
       if (!(await isPhonePeConfiguredForSociety(auth.societyId))) {
