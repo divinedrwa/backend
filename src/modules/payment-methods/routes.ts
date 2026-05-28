@@ -330,15 +330,22 @@ residentPaymentMethodsRouter.get(
         config: sanitizeConfigForResident(m.type, m.config as Record<string, unknown>),
       }));
 
-      // Env-only PhonePe (Render credentials) — show in picker without duplicating admin config.
+      // Env-only PhonePe — only inject if no PhonePe row exists at all in the DB
+      // (neither enabled nor disabled). If admin created one and disabled it, respect that.
       if (isPhonePeConfigured() && !sanitized.some((m) => m.type === PaymentMethodType.PHONEPE)) {
-        sanitized.push({
-          id: "env-default-phonepe",
-          type: PaymentMethodType.PHONEPE,
-          displayName: getEnvPhonePeDisplayName(),
-          sortOrder: 999,
-          config: {},
+        const phonePeRowExists = await prisma.paymentMethod.findFirst({
+          where: { societyId, type: PaymentMethodType.PHONEPE },
+          select: { id: true },
         });
+        if (!phonePeRowExists) {
+          sanitized.push({
+            id: "env-default-phonepe",
+            type: PaymentMethodType.PHONEPE,
+            displayName: getEnvPhonePeDisplayName(),
+            sortOrder: 999,
+            config: {},
+          });
+        }
       }
 
       return res.json({ methods: sanitized });
