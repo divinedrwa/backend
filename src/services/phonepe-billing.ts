@@ -111,10 +111,11 @@ async function getPhonePeConfigFromDb(societyId: string): Promise<PhonePeConfig 
 /**
  * PhonePe credentials for a society: PaymentMethod row first, then env fallback.
  */
-export async function getPhonePeConfig(societyId: string): Promise<PhonePeConfig | null> {
+export async function getPhonePeConfig(societyId: string): Promise<PhonePeConfig & { _source: "db" | "env" } | null> {
   const fromDb = await getPhonePeConfigFromDb(societyId);
-  if (fromDb) return fromDb;
-  return getEnvPhonePeConfig();
+  if (fromDb) return { ...fromDb, _source: "db" };
+  const fromEnv = getEnvPhonePeConfig();
+  return fromEnv ? { ...fromEnv, _source: "env" } : null;
 }
 
 /**
@@ -164,19 +165,55 @@ export async function initiatePhonePePayment(
       body: JSON.stringify({ request: base64Payload }),
     });
 
-    const data = (await response.json()) as {
+    const rawText = await response.text();
+    let data: {
       success: boolean;
+      code?: string;
+      message?: string;
       data?: { instrumentResponse?: { redirectInfo?: { url: string } } };
     };
+    try {
+      data = JSON.parse(rawText);
+    } catch {
+      logger.error(
+        { merchantTransactionId: params.merchantTransactionId, httpStatus: response.status, rawText: rawText.slice(0, 500) },
+        "[phonepe] initiate returned non-JSON body",
+      );
+      return null;
+    }
 
-    if (data.success && data.data?.instrumentResponse?.redirectInfo?.url) {
+    const redirectUrl = data.data?.instrumentResponse?.redirectInfo?.url;
+
+    logger.info(
+      {
+        merchantTransactionId: params.merchantTransactionId,
+        amount: params.amount,
+        httpStatus: response.status,
+        success: data.success,
+        code: data.code,
+        message: data.message,
+        redirectUrl: redirectUrl ?? null,
+        callbackUrl: params.callbackUrl,
+        merchantRedirectUrl: params.redirectUrl,
+        environment: config.environment,
+        merchantId: config.merchantId,
+        configSource: config._source,
+        baseUrl,
+      },
+      "[phonepe] initiate response",
+    );
+
+    if (data.success && redirectUrl) {
       return {
-        redirectUrl: data.data.instrumentResponse.redirectInfo.url,
+        redirectUrl,
         merchantTransactionId: params.merchantTransactionId,
       };
     }
 
-    logger.warn({ data }, "[phonepe] payment initiation failed");
+    logger.warn(
+      { code: data.code, message: data.message, httpStatus: response.status, fullResponse: rawText.slice(0, 1000) },
+      "[phonepe] payment initiation failed",
+    );
     return null;
   } catch (error) {
     logger.error({ err: error }, "[phonepe] payment initiation error");
