@@ -20,8 +20,8 @@ import { realignVillaBillingFromSnapshots } from "../billing-cycle/billing-colle
 const router = Router();
 
 /** ADMIN users are also residents (they keep villa/unit/billing). */
-const isResidentLike = (role: UserRole) =>
-  role === UserRole.RESIDENT || role === UserRole.ADMIN;
+const isResidentLike = (role: UserRole | string) =>
+  role === UserRole.RESIDENT || role === UserRole.ADMIN || role === UserRole.RESIDENT_CUM_ADMIN;
 
 const createUserSchema = z
   .object({
@@ -30,7 +30,7 @@ const createUserSchema = z
     email: z.string().email(),
     password: passwordSchema,
     phone: z.string().optional(),
-    role: z.enum(["ADMIN", "RESIDENT", "GUARD"]),
+    role: z.enum(["ADMIN", "RESIDENT", "GUARD", "RESIDENT_CUM_ADMIN"]),
     residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
     villaId: z.string().optional(),
     /** When set without villaId, matches CSV import: create shell villa in this society if needed */
@@ -81,7 +81,7 @@ const updateUserSchema = z.object({
     .preprocess((v) => (v === "" ? null : v), z.string().nullable().optional()),
   /** Admin password reset — omit or empty to leave unchanged */
   password: passwordSchema.optional().or(z.literal("")),
-  role: z.enum(["ADMIN", "RESIDENT", "GUARD"]).optional(),
+  role: z.enum(["ADMIN", "RESIDENT", "GUARD", "RESIDENT_CUM_ADMIN"]).optional(),
   villaId: z.string().optional().nullable(),
   unitId: z.string().optional().nullable(),
   residentType: z.enum(["OWNER", "TENANT", "FAMILY_MEMBER"]).optional(),
@@ -239,7 +239,7 @@ router.post(
             where: {
               societyId,
               villaId: resolvedVillaId,
-              role: UserRole.RESIDENT,
+              role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
               isActive: true,
             },
           });
@@ -425,7 +425,7 @@ router.patch(
           where: {
             societyId,
             villaId: nextVillaId,
-            role: UserRole.RESIDENT,
+            role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
             isActive: true,
             NOT: { id },
           },

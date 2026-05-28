@@ -34,7 +34,7 @@ router.get("/overview", async (req, res, next) => {
     // Build filter
     const where: Prisma.UserWhereInput = {
       societyId,
-      role: UserRole.RESIDENT,
+      role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
     };
 
     if (status === "active") {
@@ -159,7 +159,7 @@ router.get("/new-this-month", async (req, res, next) => {
     const newResidents = await prisma.user.findMany({
       where: {
         societyId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
         moveInDate: {
           gte: startOfMonth,
         },
@@ -201,7 +201,7 @@ router.post("/move-out", validateBody(moveOutSchema), async (req, res, next) => 
       where: {
         id: userId,
         societyId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       },
     });
 
@@ -252,7 +252,7 @@ router.patch("/:id/reactivate", async (req, res, next) => {
       where: {
         id,
         societyId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       },
     });
 
@@ -313,7 +313,7 @@ router.get("/villa/:villaId", async (req, res, next) => {
     const residents = await prisma.user.findMany({
       where: {
         villaId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       },
       orderBy: [
         { isActive: "desc" },
@@ -351,7 +351,7 @@ router.get("/statistics", async (req, res, next) => {
     const allResidents = await prisma.user.findMany({
       where: {
         societyId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       },
     });
 

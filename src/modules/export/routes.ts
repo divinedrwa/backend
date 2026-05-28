@@ -27,7 +27,7 @@ router.get("/villas-csv", async (req, res, next) => {
       where: {
         societyId,
         villaId: { in: villaIds },
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
         residentType: ResidentType.OWNER,
         isActive: true,
       },
@@ -105,7 +105,7 @@ router.get("/residents-csv", async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const users = await prisma.user.findMany({
-      where: { societyId, role: UserRole.RESIDENT },
+      where: { societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] } },
       include: {
         villa: {
           select: {

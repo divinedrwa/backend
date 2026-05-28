@@ -670,7 +670,7 @@ router.post(
               where: {
                 societyId,
                 villaId: resolvedVillaId,
-                role: UserRole.RESIDENT,
+                role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
                 isActive: true,
               },
               select: { id: true },
@@ -785,7 +785,7 @@ router.post(
                 where: {
                   societyId,
                   villaId,
-                  role: UserRole.RESIDENT,
+                  role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
                   isActive: true,
                 },
                 select: { id: true },
@@ -856,7 +856,7 @@ router.post("/visitor-entry-notify", requireRole(UserRole.GUARD), validateBody(v
       where: {
         societyId,
         villaId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
         isActive: true,
       },
       select: { id: true },

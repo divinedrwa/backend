@@ -452,7 +452,7 @@ router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req,
     const { userId, societyId } = req.auth!;
 
     const existing = await prisma.user.findFirst({
-      where: { id: userId, societyId, role: UserRole.RESIDENT },
+      where: { id: userId, societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] } },
       select: { id: true, isActive: true, name: true },
     });
 
@@ -1105,7 +1105,7 @@ router.get("/community-directory", requireRole(UserRole.RESIDENT, UserRole.ADMIN
 
     const where = {
       societyId,
-      role: { in: [UserRole.RESIDENT, UserRole.ADMIN] },
+      role: { in: [UserRole.RESIDENT, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
       isActive: true,
       ...(q
         ? {

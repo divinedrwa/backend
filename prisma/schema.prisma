@@ -13,6 +13,7 @@ enum UserRole {
   ADMIN
   RESIDENT
   GUARD
+  RESIDENT_CUM_ADMIN
 }
 
 enum ResidentType {

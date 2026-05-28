@@ -3,7 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { notifyResidentAmenityBookingStatusChanged } from "../../services/amenityBookingNotification.service";
 
@@ -266,7 +266,7 @@ router.delete("/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req
       data: { status: BookingStatus.CANCELLED },
     });
 
-    if (role === UserRole.ADMIN) {
+    if (isAdminLikeRole(role)) {
       void notifyResidentAmenityBookingStatusChanged({
         residentUserId: existing.residentId,
         societyId,

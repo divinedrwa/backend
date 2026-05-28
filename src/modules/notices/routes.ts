@@ -60,7 +60,7 @@ async function resolveValidatedResidentRecipientIds(
     where: {
       id: { in: unique },
       societyId,
-      role: UserRole.RESIDENT,
+      role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       isActive: true,
     },
     select: { id: true },

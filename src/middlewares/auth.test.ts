@@ -114,7 +114,7 @@ function buildMiddleware(fakeUsers: Map<string, UserRow>) {
         res.status(403).json({ message: "Society is archived" });
         return;
       }
-      if (user.society?.status === "INACTIVE" && user.role !== "ADMIN") {
+      if (user.society?.status === "INACTIVE" && user.role !== "ADMIN" && user.role !== "RESIDENT_CUM_ADMIN") {
         res.status(403).json({ message: "Society is inactive" });
         return;
       }

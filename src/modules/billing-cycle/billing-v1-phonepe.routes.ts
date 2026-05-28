@@ -7,7 +7,7 @@ import {
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { logger } from "../../lib/logger";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { computeUserBillingLedger } from "./services/cycle-service";
@@ -247,7 +247,7 @@ router.get(
         where: {
           paymentGatewayOrderId: txnId,
           cycle: { societyId: auth.societyId },
-          ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
+          ...(!isAdminLikeRole(auth.role) ? { userId: auth.userId } : {}),
         },
         select: {
           id: true,

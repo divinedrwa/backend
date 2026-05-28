@@ -12,7 +12,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import {
   ensureVillaLedgersAligned,
@@ -51,9 +51,7 @@ router.get("/cycles/current", requireAuth, async (req, res, next) => {
       res.status(403).json({ message: "societyId mismatch" });
       return;
     }
-    if (role === UserRole.RESIDENT) {
-      /* ok */
-    } else if (role === UserRole.ADMIN) {
+    if (role === UserRole.RESIDENT || isAdminLikeRole(role)) {
       /* ok */
     } else {
       res.status(403).json({ message: "Forbidden" });
@@ -842,7 +840,7 @@ router.post(
       }
 
       const waiveUser = await prisma.user.findFirst({
-        where: { id: userId, societyId: auth.societyId, role: UserRole.RESIDENT },
+        where: { id: userId, societyId: auth.societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] } },
         select: { maintenanceBillingRole: true },
       });
       if (!waiveUser) {
@@ -1080,7 +1078,7 @@ router.get(
         where: {
           id: paymentId,
           cycle: { societyId: auth.societyId },
-          ...(auth.role !== "ADMIN" ? { userId: auth.userId } : {}),
+          ...(!isAdminLikeRole(auth.role) ? { userId: auth.userId } : {}),
         },
         include: {
           cycle: true,

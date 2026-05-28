@@ -3,7 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
 const router = Router();
@@ -35,7 +35,7 @@ router.use(requireAuth);
 
 router.get("/", async (req, res, next) => {
   try {
-    const isAdmin = req.auth!.role === UserRole.ADMIN;
+    const isAdmin = isAdminLikeRole(req.auth!.role);
     const pagination = getPagination(req);
     const where = {
       societyId: req.auth!.societyId,

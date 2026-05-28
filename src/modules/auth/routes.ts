@@ -342,7 +342,7 @@ router.post(
         }
 
         let villaId: string | null = null;
-        if (inv.role === UserRole.RESIDENT) {
+        if (inv.role === UserRole.RESIDENT || inv.role === UserRole.RESIDENT_CUM_ADMIN) {
           const invitedVillaId = inv.villaId?.trim() ?? null;
           const bodyVillaId = body.villaId?.trim() ?? null;
 
@@ -549,7 +549,7 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
     const candidates = await prisma.user.findMany({
       where: {
         societyId,
-        role: UserRole.ADMIN,
+        role: { in: [UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
         ...identifierWhere(identifier),
       },
       include: loginUserInclude,
@@ -612,7 +612,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
     const candidates = await prisma.user.findMany({
       where: {
         societyId,
-        role: { in: [UserRole.RESIDENT, UserRole.GUARD, UserRole.ADMIN] },
+        role: { in: [UserRole.RESIDENT, UserRole.GUARD, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
         ...identifierWhere(identifier),
       },
       include: loginUserInclude,

@@ -84,7 +84,8 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
       }
       if (
         user.society?.status === SocietyStatus.INACTIVE &&
-        user.role !== UserRole.ADMIN
+        user.role !== UserRole.ADMIN &&
+        user.role !== UserRole.RESIDENT_CUM_ADMIN
       ) {
         res.status(403).json({ message: "Society is inactive" });
         return;
@@ -122,13 +123,25 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 }
 
+function roleMatches(userRole: UserRole | string, allowedRole: UserRole | string): boolean {
+  if (userRole === allowedRole) return true;
+  if (userRole === UserRole.RESIDENT_CUM_ADMIN) {
+    return allowedRole === UserRole.ADMIN || allowedRole === UserRole.RESIDENT;
+  }
+  return false;
+}
+
+export function isAdminLikeRole(role: UserRole | string): boolean {
+  return role === UserRole.ADMIN || role === UserRole.RESIDENT_CUM_ADMIN;
+}
+
 export function requireRole(...roles: (UserRole | string)[]) {
   return (req: Request, res: Response, next: NextFunction): void => {
     if (!req.auth) {
       res.status(401).json({ message: "Unauthorized" });
       return;
     }
-    if (!roles.includes(req.auth.role)) {
+    if (!roles.some((r) => roleMatches(req.auth!.role, r))) {
       res.status(403).json({ message: "Forbidden" });
       return;
     }

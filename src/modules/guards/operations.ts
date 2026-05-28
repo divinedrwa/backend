@@ -124,7 +124,7 @@ router.post("/soc-broadcast", requireRole(UserRole.GUARD), validateBody(socSchem
     });
 
     const admins = await prisma.user.findMany({
-      where: { societyId, role: UserRole.ADMIN, isActive: true },
+      where: { societyId, role: { in: [UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] }, isActive: true },
       select: { id: true },
     });
 
@@ -160,7 +160,7 @@ router.get("/residents-directory", requireRole(UserRole.GUARD), async (req, res,
     const residents = await prisma.user.findMany({
       where: {
         societyId,
-        role: UserRole.RESIDENT,
+        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
         isActive: true,
         ...(q
           ? {

@@ -129,10 +129,10 @@ const createInvitationSchema = z
         path: ["phone"],
       });
     }
-    if (data.role !== UserRole.RESIDENT && data.villaId?.trim()) {
+    if (data.role !== UserRole.RESIDENT && data.role !== UserRole.RESIDENT_CUM_ADMIN && data.villaId?.trim()) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
-        message: "villaId is only allowed for RESIDENT invitations",
+        message: "villaId is only allowed for resident-like invitations",
         path: ["villaId"],
       });
     }
