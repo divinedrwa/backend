@@ -26,20 +26,32 @@ function buildMerchantTransactionId(cycleKey: string, userId: string): string {
   return `pp${safeKey}${safeUser}${suffix}`.slice(0, 35);
 }
 
-/** PhonePe checkout pages expire in 5-15 minutes. After this threshold
- *  a PENDING order whose gateway status is also still PENDING is treated
- *  as abandoned — the caller falls through to create a fresh payment. */
-const STALE_ORDER_MINUTES = 10;
+/**
+ * Fresh-order window: below this age, return the existing PENDING order
+ * immediately for client-side polling WITHOUT calling PhonePe's status API.
+ * This keeps the initiate endpoint fast (~100 ms vs ~5 s).
+ */
+const FRESH_ORDER_MINUTES = 25;
 
 /**
- * Reconcile an existing PENDING PhonePe order before deciding whether to
- * return it (still pending → poll) or fall through (failed → new payment).
+ * After this age, a PENDING order is almost certainly abandoned.
+ * If PhonePe STILL says PENDING at this point, allow creating a new order.
+ * Between FRESH and MAX, if PhonePe says PENDING we keep the existing order
+ * to protect against orphaning in-flight UPI payments.
+ */
+const MAX_PENDING_MINUTES = 60;
+
+/**
+ * Decide what to do with an existing PENDING PhonePe order.
  *
- * Returns a JSON-ready response object when the client should NOT create a
- * new order (either already settled or recently initiated and still pending).
- * Returns null when the payment is confirmed FAILED **or** the order is stale
- * (>10 min, PhonePe still says PENDING) → caller should fall through to
- * create a fresh PhonePe order.
+ * - **Fresh (< 25 min)**: return immediately for client polling (no gateway API call).
+ * - **Stale (25–60 min)**: call PhonePe status; SUCCESS → autoSettled, FAILED → new,
+ *   PENDING → keep existing (UPI can be slow).
+ * - **Abandoned (> 60 min)**: call PhonePe status; SUCCESS → autoSettled, anything
+ *   else → allow new order.
+ *
+ * Returns a response object when the caller should NOT create a new order.
+ * Returns `null` when it's safe to create a fresh one.
  */
 async function reconcileExistingOrder(
   societyId: string,
@@ -49,62 +61,82 @@ async function reconcileExistingOrder(
   payAllPending?: boolean,
   pendingCycleCount?: number,
 ): Promise<Record<string, unknown> | null> {
-  try {
-    const poll = await reconcilePhonePeFromPoll(societyId, merchantTransactionId);
+  const extraFields = {
+    ...(payAllPending != null && { payAllPending }),
+    ...(pendingCycleCount != null && { pendingCycleCount }),
+  };
 
-    if (poll.status === BillingUserPaymentStatus.SUCCESS) {
-      // Already settled at PhonePe — tell client
-      return {
-        merchantTransactionId,
-        paymentId,
-        totalDue,
-        existingOrder: true,
-        autoSettled: true,
-        ...(payAllPending != null && { payAllPending }),
-        ...(pendingCycleCount != null && { pendingCycleCount }),
-      };
-    }
-
-    if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
-      // PhonePe confirmed failure — caller should create a new payment
-      return null;
-    }
-  } catch (err) {
-    logger.warn({ err, merchantTransactionId }, "[phonepe] reconcile of existing order failed");
-  }
-
-  // Still PENDING — check if the order is stale (checkout page expired).
-  // PhonePe pages expire in 5-15 min; if the order is older than that and
-  // PhonePe still reports PENDING, the user never completed payment → safe
-  // to create a new one.
-  try {
-    const row = await prisma.userCyclePayment.findFirst({
-      where: { paymentGatewayOrderId: merchantTransactionId },
-      select: { updatedAt: true },
-    });
-    if (row) {
-      const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
-      if (ageMinutes > STALE_ORDER_MINUTES) {
-        logger.info(
-          { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
-          "[phonepe] stale PENDING order — allowing fresh initiation",
-        );
-        return null;
-      }
-    }
-  } catch {
-    // If we can't check staleness, fall through to return the existing order
-  }
-
-  // Fresh PENDING order — return for client-side polling
-  return {
+  const makeExisting = (extra?: Record<string, unknown>) => ({
     merchantTransactionId,
     paymentId,
     totalDue,
     existingOrder: true,
-    ...(payAllPending != null && { payAllPending }),
-    ...(pendingCycleCount != null && { pendingCycleCount }),
-  };
+    ...extraFields,
+    ...extra,
+  });
+
+  // --- 1. Read the current row state ---
+  const row = await prisma.userCyclePayment.findFirst({
+    where: { paymentGatewayOrderId: merchantTransactionId },
+    select: { updatedAt: true, paymentStatus: true },
+  });
+
+  if (!row) return null; // Row deleted or overwritten — create new
+
+  // Already settled (e.g., webhook arrived) → tell client immediately
+  if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+    return makeExisting({ autoSettled: true });
+  }
+
+  // Already marked FAILED → safe to create new
+  if (row.paymentStatus === BillingUserPaymentStatus.FAILED) {
+    return null;
+  }
+
+  // --- 2. Decide based on age ---
+  const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
+
+  // Fresh PENDING order: return immediately for client-side polling.
+  // Don't call PhonePe's status API — the client will poll the status
+  // endpoint which handles full reconciliation.
+  if (ageMinutes < FRESH_ORDER_MINUTES) {
+    return makeExisting();
+  }
+
+  // --- 3. Stale or abandoned: check PhonePe to decide ---
+  try {
+    const poll = await reconcilePhonePeFromPoll(societyId, merchantTransactionId);
+
+    if (poll.status === BillingUserPaymentStatus.SUCCESS) {
+      return makeExisting({ autoSettled: true });
+    }
+
+    if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
+      // Terminal failure → safe to create new
+      return null;
+    }
+  } catch (err) {
+    logger.warn({ err, merchantTransactionId }, "[phonepe] reconcile of stale order failed");
+    // Can't reach PhonePe → don't orphan the order, return for polling
+    return makeExisting();
+  }
+
+  // PhonePe still says PENDING. If the order is very old (> 60 min),
+  // it's almost certainly abandoned — allow a new order.
+  if (ageMinutes > MAX_PENDING_MINUTES) {
+    logger.info(
+      { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
+      "[phonepe] order exceeded max pending age — allowing fresh initiation",
+    );
+    return null;
+  }
+
+  // Between 25-60 min and PhonePe says PENDING → don't orphan (UPI can be slow)
+  logger.info(
+    { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
+    "[phonepe] stale PENDING order but PhonePe not terminal — returning for polling",
+  );
+  return makeExisting();
 }
 
 const router = Router();
@@ -277,23 +309,40 @@ router.post(
         return;
       }
 
-      const paymentRow = await prisma.userCyclePayment.upsert({
-        where: { userId_cycleId: { userId: auth.userId, cycleId } },
-        create: {
-          userId: auth.userId,
-          cycleId,
-          amountPaid: adjustedDue,
-          paymentStatus: BillingUserPaymentStatus.PENDING,
-          paymentGatewayOrderId: merchantTransactionId,
-          idempotencyKey: idempotencyKey ?? null,
-        },
-        update: {
-          amountPaid: adjustedDue,
-          paymentStatus: BillingUserPaymentStatus.PENDING,
-          paymentGatewayOrderId: merchantTransactionId,
-          idempotencyKey: idempotencyKey ?? undefined,
-        },
+      // Atomically create or update the payment row. The transaction ensures
+      // a concurrent webhook can't settle the row to SUCCESS between our
+      // earlier read and this write.
+      const paymentRow = await prisma.$transaction(async (tx) => {
+        const current = await tx.userCyclePayment.findUnique({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+        });
+        // Guard: if a webhook just settled this to SUCCESS, don't overwrite
+        if (current?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+          return null;
+        }
+        return tx.userCyclePayment.upsert({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+          create: {
+            userId: auth.userId,
+            cycleId,
+            amountPaid: adjustedDue,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: merchantTransactionId,
+            idempotencyKey: idempotencyKey ?? null,
+          },
+          update: {
+            amountPaid: adjustedDue,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: merchantTransactionId,
+            idempotencyKey: idempotencyKey ?? undefined,
+          },
+        });
       });
+
+      if (!paymentRow) {
+        res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
 
       await prisma.billingPaymentLog.create({
         data: {

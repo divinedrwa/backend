@@ -74,6 +74,10 @@ export async function phonePeCallbackHandler(req: Request, res: Response): Promi
     });
 
     if (!preRow) {
+      logger.warn(
+        { merchantTransactionId, phonepeTransactionId, state, isSuccess, isFailure, amountPaise },
+        "[phonepe webhook] no payment row found for this txnId — may be orphaned from a retry that overwrote paymentGatewayOrderId",
+      );
       res.status(200).json({ ok: true, skipped: true, reason: "unknown_order" });
       return;
     }

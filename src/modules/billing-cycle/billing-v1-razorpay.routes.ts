@@ -28,59 +28,78 @@ import {
 } from "./services/razorpay-gateway-fee";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
 
-/** Razorpay orders expire in ~15 min. After this threshold a PENDING order
- *  whose gateway status is also still PENDING is treated as abandoned. */
-const STALE_ORDER_MINUTES = 10;
+/**
+ * Fresh-order window: below this age, return the existing PENDING order
+ * immediately without calling Razorpay's status API.
+ */
+const FRESH_ORDER_MINUTES = 25;
 
 /**
- * Reconcile an existing PENDING Razorpay order before deciding whether to
- * return it (still active → reuse) or fall through (failed/stale → new order).
+ * After this age, a PENDING order is almost certainly abandoned.
+ * If Razorpay STILL says PENDING, allow creating a new order.
+ */
+const MAX_PENDING_MINUTES = 60;
+
+/**
+ * Decide what to do with an existing PENDING Razorpay order.
  *
- * Returns a partial JSON response object when the order should be reused.
- * Returns `null` when the order is confirmed FAILED or stale (>10 min,
- * gateway still PENDING) → caller should fall through to create a fresh order.
+ * - **Fresh (< 25 min)**: return immediately for SDK reuse (no gateway API call).
+ * - **Stale (25–60 min)**: call Razorpay status; SUCCESS → autoSettled, FAILED → new,
+ *   PENDING → keep existing.
+ * - **Abandoned (> 60 min)**: SUCCESS → autoSettled, anything else → allow new order.
+ *
+ * Returns `{ autoSettled: true }` or `{}` (reuse) or `null` (create new).
  */
 async function reconcileExistingRazorpayOrder(
   societyId: string,
   orderId: string,
-  paymentId: string,
-  totalDue: number,
 ): Promise<{ autoSettled?: boolean } | null> {
+  // Read current row state
+  const row = await prisma.userCyclePayment.findFirst({
+    where: { paymentGatewayOrderId: orderId },
+    select: { updatedAt: true, paymentStatus: true },
+  });
+
+  if (!row) return null;
+
+  if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+    return { autoSettled: true };
+  }
+  if (row.paymentStatus === BillingUserPaymentStatus.FAILED) {
+    return null;
+  }
+
+  const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
+
+  // Fresh PENDING → return immediately for client-side SDK/polling
+  if (ageMinutes < FRESH_ORDER_MINUTES) {
+    return {};
+  }
+
+  // Stale or abandoned: check Razorpay
   try {
     const poll = await reconcileRazorpayFromPoll(societyId, orderId);
 
     if (poll.status === BillingUserPaymentStatus.SUCCESS) {
       return { autoSettled: true };
     }
-
     if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
       return null;
     }
   } catch (err) {
-    logger.warn({ err, orderId }, "[razorpay] reconcile of existing order failed");
+    logger.warn({ err, orderId }, "[razorpay] reconcile of stale order failed");
+    return {};
   }
 
-  // Still PENDING — check staleness
-  try {
-    const row = await prisma.userCyclePayment.findFirst({
-      where: { paymentGatewayOrderId: orderId },
-      select: { updatedAt: true },
-    });
-    if (row) {
-      const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
-      if (ageMinutes > STALE_ORDER_MINUTES) {
-        logger.info(
-          { orderId, ageMinutes: Math.round(ageMinutes) },
-          "[razorpay] stale PENDING order — allowing fresh initiation",
-        );
-        return null;
-      }
-    }
-  } catch {
-    // If we can't check staleness, fall through to return the existing order
+  // Razorpay still says PENDING — abandon after MAX
+  if (ageMinutes > MAX_PENDING_MINUTES) {
+    logger.info(
+      { orderId, ageMinutes: Math.round(ageMinutes) },
+      "[razorpay] order exceeded max pending age — allowing fresh initiation",
+    );
+    return null;
   }
 
-  // Fresh PENDING order — reuse it
   return {};
 }
 
@@ -122,8 +141,6 @@ router.post(
           const reconciled = await reconcileExistingRazorpayOrder(
             auth.societyId,
             idempotentRow.paymentGatewayOrderId,
-            idempotentRow.id,
-            Number(idempotentRow.amountPaid),
           );
           if (reconciled?.autoSettled) {
             res.status(200).json({
@@ -137,7 +154,6 @@ router.post(
             return;
           }
           if (reconciled !== null) {
-            // Fresh PENDING — return existing order for SDK reuse
             const feeConfigIdem = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
             const breakupIdem = computeRazorpayCheckoutBreakup(Number(idempotentRow.amountPaid), feeConfigIdem);
             res.status(200).json({
@@ -239,8 +255,8 @@ router.post(
         return;
       }
 
-      // Prevent race: if a PENDING payment already has a gateway order,
-      // reconcile with gateway first, then decide whether to reuse or create new.
+      // Prevent orphaned orders: if a PENDING payment already has a gateway order,
+      // check its age and status before deciding whether to reuse or create new.
       if (
         existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
         existing.paymentGatewayOrderId
@@ -248,8 +264,6 @@ router.post(
         const reconciled = await reconcileExistingRazorpayOrder(
           auth.societyId,
           existing.paymentGatewayOrderId,
-          existing.id,
-          adjustedDue,
         );
         if (reconciled?.autoSettled) {
           res.status(200).json({
@@ -262,7 +276,6 @@ router.post(
           return;
         }
         if (reconciled !== null) {
-          // Fresh PENDING — return existing order for SDK reuse
           const feeConfigExisting = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
           const breakupExisting = computeRazorpayCheckoutBreakup(adjustedDue, feeConfigExisting);
           res.status(200).json({
@@ -317,23 +330,39 @@ router.post(
         },
       });
 
-      const paymentRow = await prisma.userCyclePayment.upsert({
-        where: { userId_cycleId: { userId: auth.userId, cycleId } },
-        create: {
-          userId: auth.userId,
-          cycleId,
-          amountPaid: breakup.maintenanceAmount,
-          paymentStatus: BillingUserPaymentStatus.PENDING,
-          paymentGatewayOrderId: order.id,
-          idempotencyKey: idempotencyKey ?? null,
-        },
-        update: {
-          amountPaid: breakup.maintenanceAmount,
-          paymentStatus: BillingUserPaymentStatus.PENDING,
-          paymentGatewayOrderId: order.id,
-          idempotencyKey: idempotencyKey ?? undefined,
-        },
+      // Atomically create or update. The transaction ensures a concurrent
+      // webhook can't settle the row to SUCCESS between our earlier read
+      // and this write.
+      const paymentRow = await prisma.$transaction(async (tx) => {
+        const current = await tx.userCyclePayment.findUnique({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+        });
+        if (current?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+          return null;
+        }
+        return tx.userCyclePayment.upsert({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+          create: {
+            userId: auth.userId,
+            cycleId,
+            amountPaid: breakup.maintenanceAmount,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: order.id,
+            idempotencyKey: idempotencyKey ?? null,
+          },
+          update: {
+            amountPaid: breakup.maintenanceAmount,
+            paymentStatus: BillingUserPaymentStatus.PENDING,
+            paymentGatewayOrderId: order.id,
+            idempotencyKey: idempotencyKey ?? undefined,
+          },
+        });
       });
+
+      if (!paymentRow) {
+        res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
 
       await prisma.billingPaymentLog.create({
         data: {
