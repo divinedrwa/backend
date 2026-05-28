@@ -27,31 +27,13 @@ function buildMerchantTransactionId(cycleKey: string, userId: string): string {
 }
 
 /**
- * Fresh-order window: below this age, return the existing PENDING order
- * immediately for client-side polling WITHOUT calling PhonePe's status API.
- * This keeps the initiate endpoint fast (~100 ms vs ~5 s).
- */
-const FRESH_ORDER_MINUTES = 25;
-
-/**
- * After this age, a PENDING order is almost certainly abandoned.
- * If PhonePe STILL says PENDING at this point, allow creating a new order.
- * Between FRESH and MAX, if PhonePe says PENDING we keep the existing order
- * to protect against orphaning in-flight UPI payments.
- */
-const MAX_PENDING_MINUTES = 60;
-
-/**
  * Decide what to do with an existing PENDING PhonePe order.
  *
- * - **Fresh (< 25 min)**: return immediately for client polling (no gateway API call).
- * - **Stale (25–60 min)**: call PhonePe status; SUCCESS → autoSettled, FAILED → new,
- *   PENDING → keep existing (UPI can be slow).
- * - **Abandoned (> 60 min)**: call PhonePe status; SUCCESS → autoSettled, anything
- *   else → allow new order.
- *
- * Returns a response object when the caller should NOT create a new order.
- * Returns `null` when it's safe to create a fresh one.
+ * Only blocks new-order creation when the payment is already SUCCESS
+ * (returns `autoSettled`). For PENDING or FAILED orders, always returns
+ * `null` so the caller creates a fresh PhonePe transaction with a new
+ * redirect URL — the user clicked "Pay", so give them the checkout page
+ * instead of a "Verifying…" spinner.
  */
 async function reconcileExistingOrder(
   societyId: string,
@@ -66,77 +48,28 @@ async function reconcileExistingOrder(
     ...(pendingCycleCount != null && { pendingCycleCount }),
   };
 
-  const makeExisting = (extra?: Record<string, unknown>) => ({
-    merchantTransactionId,
-    paymentId,
-    totalDue,
-    existingOrder: true,
-    ...extraFields,
-    ...extra,
-  });
-
-  // --- 1. Read the current row state ---
   const row = await prisma.userCyclePayment.findFirst({
     where: { paymentGatewayOrderId: merchantTransactionId },
-    select: { updatedAt: true, paymentStatus: true },
+    select: { paymentStatus: true },
   });
 
-  if (!row) return null; // Row deleted or overwritten — create new
+  if (!row) return null;
 
   // Already settled (e.g., webhook arrived) → tell client immediately
   if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-    return makeExisting({ autoSettled: true });
+    return {
+      merchantTransactionId,
+      paymentId,
+      totalDue,
+      existingOrder: true,
+      autoSettled: true,
+      ...extraFields,
+    };
   }
 
-  // Already marked FAILED → safe to create new
-  if (row.paymentStatus === BillingUserPaymentStatus.FAILED) {
-    return null;
-  }
-
-  // --- 2. Decide based on age ---
-  const ageMinutes = (Date.now() - row.updatedAt.getTime()) / 60_000;
-
-  // Fresh PENDING order: return immediately for client-side polling.
-  // Don't call PhonePe's status API — the client will poll the status
-  // endpoint which handles full reconciliation.
-  if (ageMinutes < FRESH_ORDER_MINUTES) {
-    return makeExisting();
-  }
-
-  // --- 3. Stale or abandoned: check PhonePe to decide ---
-  try {
-    const poll = await reconcilePhonePeFromPoll(societyId, merchantTransactionId);
-
-    if (poll.status === BillingUserPaymentStatus.SUCCESS) {
-      return makeExisting({ autoSettled: true });
-    }
-
-    if (poll.status === BillingUserPaymentStatus.FAILED || poll.outcome === "failed") {
-      // Terminal failure → safe to create new
-      return null;
-    }
-  } catch (err) {
-    logger.warn({ err, merchantTransactionId }, "[phonepe] reconcile of stale order failed");
-    // Can't reach PhonePe → don't orphan the order, return for polling
-    return makeExisting();
-  }
-
-  // PhonePe still says PENDING. If the order is very old (> 60 min),
-  // it's almost certainly abandoned — allow a new order.
-  if (ageMinutes > MAX_PENDING_MINUTES) {
-    logger.info(
-      { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
-      "[phonepe] order exceeded max pending age — allowing fresh initiation",
-    );
-    return null;
-  }
-
-  // Between 25-60 min and PhonePe says PENDING → don't orphan (UPI can be slow)
-  logger.info(
-    { merchantTransactionId, ageMinutes: Math.round(ageMinutes) },
-    "[phonepe] stale PENDING order but PhonePe not terminal — returning for polling",
-  );
-  return makeExisting();
+  // FAILED or PENDING → always create a fresh PhonePe order.
+  // The user explicitly wants to pay, so show them the checkout page.
+  return null;
 }
 
 const router = Router();
