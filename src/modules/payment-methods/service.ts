@@ -54,11 +54,7 @@ export function sanitizeConfigForResident(
     delete out.currency;
   }
 
-  // Mask bank account numbers
-  if (type === "BANK_TRANSFER" && typeof out.accountNumber === "string") {
-    const acct = out.accountNumber as string;
-    out.accountNumber = acct.length > 4 ? "****" + acct.slice(-4) : "****";
-  }
+  // Bank account number is shown in full so residents can use it for payment
 
   return out;
 }
