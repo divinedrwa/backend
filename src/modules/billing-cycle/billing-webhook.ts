@@ -140,13 +140,23 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       const maintenanceAmountNum = Number(lockedRow.amountPaid);
       const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
 
-      // Amount validation: gateway-reported amount must match the stored order amount.
-      // Tolerance of 1 paisa (₹0.01) to handle floating-point rounding.
+      // Amount validation: gateway-reported amount must match the expected total.
+      // When platform fees are enabled the Razorpay order includes
+      // maintenance + platformFee + GST.  The order notes carry the
+      // original `maintenanceAmountPaise` so we can reconstruct the
+      // expected total.  Tolerance of 1 paisa for floating-point rounding.
       if (isSuccess && amountPaise > 0) {
-        const expectedPaise = Math.round(maintenanceAmountNum * 100);
+        const maintenancePaiseFromNotes = Number(notes?.maintenanceAmountPaise || 0);
+        const platformFeePaiseFromNotes = Number(notes?.platformFeePaise || 0);
+        const platformFeeGstPaiseFromNotes = Number(notes?.platformFeeGstPaise || 0);
+        // If notes carry a fee breakdown, expected = maintenance + fee + GST.
+        // Otherwise fall back to DB-stored amountPaid (no fees).
+        const expectedPaise = maintenancePaiseFromNotes > 0
+          ? maintenancePaiseFromNotes + platformFeePaiseFromNotes + platformFeeGstPaiseFromNotes
+          : Math.round(maintenanceAmountNum * 100);
         if (Math.abs(amountPaise - expectedPaise) > 1) {
           logger.error(
-            { orderId, paymentId, expectedPaise, actualPaise: amountPaise },
+            { orderId, paymentId, expectedPaise, actualPaise: amountPaise, maintenancePaiseFromNotes, platformFeePaiseFromNotes, platformFeeGstPaiseFromNotes },
             "[billing webhook] AMOUNT MISMATCH — gateway charged different amount than order",
           );
           return { action: "skip" as const, reason: "amount_mismatch" };
