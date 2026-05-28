@@ -172,6 +172,88 @@ export function buildPhonePeStatusUnavailable(detail: string): PhonePeStatusResu
   };
 }
 
+/**
+ * Classify a V2 status response (simpler structure: root-level `state` field).
+ */
+export function classifyPhonePeV2StatusPayload(
+  body: {
+    orderId?: string;
+    state?: string;
+    amount?: number;
+    errorCode?: string;
+    detailedErrorCode?: string;
+    code?: string;
+    message?: string;
+    paymentDetails?: Array<{
+      transactionId?: string;
+      state?: string;
+      amount?: number;
+    }>;
+    errorContext?: {
+      errorCode?: string;
+      description?: string;
+    };
+  },
+): Pick<
+  PhonePeStatusResult,
+  "outcome" | "paymentStatus" | "rawState" | "rawCode" | "gatewaySuccessFlag" | "amountPaise" | "gatewayTransactionId"
+> {
+  const rawState = body.state ?? "UNKNOWN";
+  const rawCode = body.errorCode ?? body.code ?? body.errorContext?.errorCode;
+  const state = rawState.toUpperCase();
+  const code = rawCode?.toUpperCase();
+  const gatewaySuccessFlag = state === "COMPLETED";
+
+  // Extract transaction ID from first payment detail if available
+  const gatewayTransactionId = body.paymentDetails?.[0]?.transactionId;
+
+  if (PHONEPE_COMPLETED_STATES.has(state)) {
+    return {
+      outcome: "completed",
+      paymentStatus: "SUCCESS",
+      rawState,
+      rawCode,
+      gatewaySuccessFlag,
+      amountPaise: body.amount,
+      gatewayTransactionId,
+    };
+  }
+
+  if (PHONEPE_FAILED_STATES.has(state)) {
+    return {
+      outcome: "failed",
+      paymentStatus: "FAILED",
+      rawState,
+      rawCode,
+      gatewaySuccessFlag,
+      amountPaise: body.amount,
+      gatewayTransactionId,
+    };
+  }
+
+  if (isPhonePePaymentPending(state, code)) {
+    return {
+      outcome: "pending",
+      paymentStatus: "PENDING",
+      rawState,
+      rawCode,
+      gatewaySuccessFlag,
+      amountPaise: body.amount,
+      gatewayTransactionId,
+    };
+  }
+
+  return {
+    outcome: "unknown",
+    paymentStatus: "UNKNOWN",
+    rawState,
+    rawCode,
+    gatewaySuccessFlag,
+    amountPaise: body.amount,
+    gatewayTransactionId,
+  };
+}
+
 export function buildPhonePeStatusPending(
   detail: string,
   httpStatus?: number,
