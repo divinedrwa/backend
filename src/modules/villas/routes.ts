@@ -426,7 +426,7 @@ router.delete("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res,
 
     // Check if villa has active residents
     const activeResidents = await prisma.user.count({
-      where: { villaId: id, isActive: true },
+      where: { villaId: id, isActive: true, societyId },
     });
 
     if (activeResidents > 0) {

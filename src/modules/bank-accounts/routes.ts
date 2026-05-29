@@ -5,6 +5,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -140,8 +141,8 @@ router.patch("/:id", requireAuth, requireRole(UserRole.ADMIN), validateBody(upda
       return res.status(404).json({ message: "Bank account not found" });
     }
 
-    const updatedAccount = await prisma.bankAccount.findUnique({
-      where: { id },
+    const updatedAccount = await prisma.bankAccount.findFirst({
+      where: { id, societyId },
     });
 
     return res.json({ account: updatedAccount });
@@ -158,7 +159,7 @@ router.delete("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res,
 
     // Check if account has payments
     const paymentsCount = await prisma.maintenancePayment.count({
-      where: { bankAccountId: id },
+      where: { bankAccountId: id, societyId },
     });
 
     if (paymentsCount > 0) {
@@ -169,6 +170,14 @@ router.delete("/:id", requireAuth, requireRole(UserRole.ADMIN), async (req, res,
 
     await prisma.bankAccount.deleteMany({
       where: { id, societyId },
+    });
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "BANK_ACCOUNT_DELETED",
+      entityType: "BankAccount",
+      entityId: id,
     });
 
     return res.json({ message: "Bank account deleted successfully" });

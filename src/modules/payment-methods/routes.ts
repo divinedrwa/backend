@@ -157,7 +157,7 @@ router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
     // Guard: don't delete BANK_TRANSFER if it has linked maintenance payments
     if (existing.type === PaymentMethodType.BANK_TRANSFER && existing.legacyBankAccountId) {
       const linkedPayments = await prisma.maintenancePayment.count({
-        where: { bankAccountId: existing.legacyBankAccountId },
+        where: { bankAccountId: existing.legacyBankAccountId, societyId },
       });
       if (linkedPayments > 0) {
         return res.status(409).json({

@@ -154,7 +154,7 @@ router.get("/society-expenses/:id", async (req, res, next) => {
     });
 
     if (!expense) {
-      return res.status(404).json({ error: "Expense not found" });
+      return res.status(404).json({ message: "Expense not found" });
     }
 
     res.json(expense);

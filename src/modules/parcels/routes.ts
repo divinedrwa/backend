@@ -1,4 +1,4 @@
-import { NotificationCategory, ParcelStatus, UserRole } from "@prisma/client";
+import { NotificationCategory, Prisma, ParcelStatus, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
@@ -25,7 +25,24 @@ router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, ne
   try {
     const pagination = getPagination(req);
     const societyId = req.auth!.societyId;
-    const where = { societyId };
+    const { search, status, startDate, endDate } = req.query;
+    const where: Prisma.ParcelWhereInput = { societyId };
+
+    if (typeof search === "string" && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        { description: { contains: term, mode: "insensitive" } },
+        { villa: { villaNumber: { contains: term, mode: "insensitive" } } },
+        { villa: { ownerName: { contains: term, mode: "insensitive" } } },
+      ];
+    }
+    if (typeof status === "string" && status.trim()) {
+      where.status = status.trim() as ParcelStatus;
+    }
+    if (typeof startDate === "string" && typeof endDate === "string") {
+      where.receivedAt = { gte: new Date(startDate), lte: new Date(endDate) };
+    }
+
     const [parcels, total, pendingCount] = await Promise.all([
       prisma.parcel.findMany({
         where,
@@ -176,6 +193,29 @@ router.patch(
       }
 
       return res.json({ message: "Parcel status updated" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Delete parcel (admin only)
+router.delete(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+
+      const parcel = await prisma.parcel.deleteMany({
+        where: { id, societyId: req.auth!.societyId },
+      });
+
+      if (parcel.count === 0) {
+        return res.status(404).json({ message: "Parcel not found" });
+      }
+
+      return res.json({ message: "Parcel deleted" });
     } catch (error) {
       next(error);
     }

@@ -1,11 +1,11 @@
 import { Router } from 'express';
 import { ExpenseStatus, ExpenseType, PaymentMode, Prisma, UserRole } from '@prisma/client';
 import { z } from 'zod';
-import { logger } from '../../lib/logger';
 import { getPagination, paginationMeta } from '../../lib/pagination';
 import { prisma } from '../../lib/prisma';
 import { requireAuth, requireRole } from '../../middlewares/auth';
 import { validateBody } from '../../middlewares/validate';
+import { auditFromRequest } from '../../services/audit.service';
 import { expenseAttachmentMemory } from '../../lib/expenseAttachmentUpload';
 import {
   isCloudinaryConfigured,
@@ -82,10 +82,10 @@ const updateExpenseSchema = createExpenseSchema
 // ==========================================
 
 // Get all categories
-router.get('/categories', async (req, res) => {
+router.get('/categories', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
-    
+
     const categories = await prisma.expenseCategory.findMany({
       where: { societyId },
       include: {
@@ -95,10 +95,10 @@ router.get('/categories', async (req, res) => {
       },
       orderBy: { name: 'asc' }
     });
-    
+
     res.json(categories);
   } catch (error) {
-    res.status(500).json({ error: 'Failed to fetch categories' });
+    next(error);
   }
 });
 
@@ -122,6 +122,14 @@ router.post('/categories', validateBody(createCategorySchema), async (req, res, 
       },
     });
 
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_CATEGORY_CREATED",
+      entityType: "ExpenseCategory",
+      entityId: category.id,
+    });
+
     res.json(category);
   } catch (error) {
     next(error);
@@ -141,10 +149,19 @@ router.put('/categories/:id', validateBody(updateCategorySchema), async (req, re
     });
 
     if (result.count === 0) {
-      return res.status(404).json({ error: 'Category not found' });
+      return res.status(404).json({ message: 'Category not found' });
     }
 
-    const category = await prisma.expenseCategory.findUnique({ where: { id } });
+    const category = await prisma.expenseCategory.findFirst({ where: { id, societyId } });
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_CATEGORY_UPDATED",
+      entityType: "ExpenseCategory",
+      entityId: id,
+    });
+
     res.json(category);
   } catch (error) {
     next(error);
@@ -163,17 +180,25 @@ router.delete('/categories/:id', async (req, res, next) => {
       select: { id: true },
     });
     if (!category) {
-      return res.status(404).json({ error: 'Category not found' });
+      return res.status(404).json({ message: 'Category not found' });
     }
 
     const count = await prisma.expense.count({ where: { categoryId: id, deletedAt: null } });
     if (count > 0) {
       return res.status(400).json({
-        error: 'Cannot delete category with existing expenses',
+        message: 'Cannot delete category with existing expenses',
       });
     }
 
     await prisma.expenseCategory.delete({ where: { id } });
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_CATEGORY_DELETED",
+      entityType: "ExpenseCategory",
+      entityId: id,
+    });
 
     res.json({ message: 'Category deleted' });
   } catch (error) {
@@ -198,10 +223,10 @@ router.post(
     try {
       const files = req.files as Express.Multer.File[] | undefined;
       if (!files || files.length === 0) {
-        return res.status(400).json({ error: 'No files provided' });
+        return res.status(400).json({ message: 'No files provided' });
       }
       if (!isCloudinaryConfigured()) {
-        return res.status(503).json({ error: 'File storage is not configured' });
+        return res.status(503).json({ message: 'File storage is not configured' });
       }
 
       const societyId = req.auth!.societyId;
@@ -223,7 +248,7 @@ router.post(
             fileSize: uploaded.bytes,
           });
         } catch {
-          return res.status(502).json({ error: 'File upload failed' });
+          return res.status(502).json({ message: 'File upload failed' });
         }
       }
 
@@ -249,13 +274,13 @@ router.post(
         include: { attachments: { select: { id: true } } },
       });
       if (!expense) {
-        return res.status(404).json({ error: 'Expense not found' });
+        return res.status(404).json({ message: 'Expense not found' });
       }
 
       const totalAfter = expense.attachments.length + body.attachments.length;
       if (totalAfter > 20) {
         return res.status(400).json({
-          error: `Too many attachments. Current: ${expense.attachments.length}, adding: ${body.attachments.length}, max: 20.`,
+          message: `Too many attachments. Current: ${expense.attachments.length}, adding: ${body.attachments.length}, max: 20.`,
         });
       }
 
@@ -296,7 +321,7 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
       select: { id: true },
     });
     if (!expense) {
-      return res.status(404).json({ error: 'Expense not found' });
+      return res.status(404).json({ message: 'Expense not found' });
     }
 
     const attachment = await prisma.expenseAttachment.findFirst({
@@ -304,7 +329,7 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
       select: { id: true },
     });
     if (!attachment) {
-      return res.status(404).json({ error: 'Attachment not found' });
+      return res.status(404).json({ message: 'Attachment not found' });
     }
 
     await prisma.expenseAttachment.delete({ where: { id: attachmentId } });
@@ -409,7 +434,7 @@ router.get('/:id', async (req, res, next) => {
     });
 
     if (!expense) {
-      return res.status(404).json({ error: 'Expense not found' });
+      return res.status(404).json({ message: 'Expense not found' });
     }
 
     res.json(expense);
@@ -430,7 +455,7 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
       select: { id: true },
     });
     if (!category) {
-      return res.status(404).json({ error: 'Category not found' });
+      return res.status(404).json({ message: 'Category not found' });
     }
 
     const payDate = new Date(body.paymentDate);
@@ -455,53 +480,66 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
     const tdsAmount = body.tdsAmount ?? 0;
     const netAmount = body.amount + gstAmount - tdsAmount;
 
-    const expense = await prisma.expense.create({
-      data: {
-        societyId,
-        categoryId: body.categoryId,
-        title: body.title,
-        description: body.description,
-        amount: body.amount,
-        paymentDate: payDate,
-        paymentMode: body.paymentMode,
-        paymentRef: body.paymentRef,
-        paidTo: body.paidTo,
-        paidToContact: body.paidToContact,
-        receiptUrl: body.receiptUrl,
-        receiptNumber: body.receiptNumber,
-        invoiceNumber: body.invoiceNumber,
-        month: expMonth,
-        year: expYear,
-        financialYearId,
-        gstAmount,
-        gstPercentage: body.gstPercentage ?? 0,
-        tdsAmount,
-        tdsPercentage: body.tdsPercentage ?? 0,
-        netAmount,
-        status: 'APPROVED', // Auto-approve for now
-        notes: body.notes,
-        tags: body.tags ?? [],
-        createdBy: req.auth!.userId,
-        attachments: body.attachments && body.attachments.length > 0
-          ? {
-              create: body.attachments.map((a) => ({
-                fileName: a.fileName,
-                fileUrl: a.fileUrl,
-                fileType: a.fileType,
-                fileSize: a.fileSize,
-                uploadedBy: req.auth!.userId,
-              })),
-            }
-          : undefined,
-      },
-      include: {
-        category: true,
-        attachments: true,
-        financialYear: { select: { id: true, label: true } },
-      },
+    const expense = await prisma.$transaction(async (tx) => {
+      const created = await tx.expense.create({
+        data: {
+          societyId,
+          categoryId: body.categoryId,
+          title: body.title,
+          description: body.description,
+          amount: body.amount,
+          paymentDate: payDate,
+          paymentMode: body.paymentMode,
+          paymentRef: body.paymentRef,
+          paidTo: body.paidTo,
+          paidToContact: body.paidToContact,
+          receiptUrl: body.receiptUrl,
+          receiptNumber: body.receiptNumber,
+          invoiceNumber: body.invoiceNumber,
+          month: expMonth,
+          year: expYear,
+          financialYearId,
+          gstAmount,
+          gstPercentage: body.gstPercentage ?? 0,
+          tdsAmount,
+          tdsPercentage: body.tdsPercentage ?? 0,
+          netAmount,
+          status: 'APPROVED', // Auto-approve for now
+          notes: body.notes,
+          tags: body.tags ?? [],
+          createdBy: req.auth!.userId,
+          attachments: body.attachments && body.attachments.length > 0
+            ? {
+                create: body.attachments.map((a) => ({
+                  fileName: a.fileName,
+                  fileUrl: a.fileUrl,
+                  fileType: a.fileType,
+                  fileSize: a.fileSize,
+                  uploadedBy: req.auth!.userId,
+                })),
+              }
+            : undefined,
+        },
+        include: {
+          category: true,
+          attachments: true,
+          financialYear: { select: { id: true, label: true } },
+        },
+      });
+
+      await updateMonthlySummary(societyId, expMonth, expYear, tx);
+
+      return created;
     });
 
-    await updateMonthlySummary(societyId, expMonth, expYear);
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_CREATED",
+      entityType: "Expense",
+      entityId: expense.id,
+      metadata: { title: expense.title, amount: expense.amount },
+    });
 
     res.json(expense);
   } catch (error) {
@@ -521,7 +559,7 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       where: { id, societyId, deletedAt: null },
     });
     if (!existing) {
-      return res.status(404).json({ error: 'Expense not found' });
+      return res.status(404).json({ message: 'Expense not found' });
     }
 
     // If categoryId is being changed, the new category must also belong to
@@ -532,7 +570,7 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
         select: { id: true },
       });
       if (!category) {
-        return res.status(404).json({ error: 'Category not found' });
+        return res.status(404).json({ message: 'Category not found' });
       }
     }
 
@@ -562,51 +600,63 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
     const tdsAmount = Number(body.tdsAmount ?? existing.tdsAmount ?? 0);
     const netAmount = amount + gstAmount - tdsAmount;
 
-    const expense = await prisma.expense.update({
-      where: { id },
-      data: {
-        ...(body.categoryId ? { categoryId: body.categoryId } : {}),
-        title: body.title,
-        description: body.description,
-        amount: body.amount,
-        paymentDate: body.paymentDate ? new Date(body.paymentDate) : undefined,
-        paymentMode: body.paymentMode,
-        paymentRef: body.paymentRef,
-        paidTo: body.paidTo,
-        paidToContact: body.paidToContact,
-        receiptUrl: body.receiptUrl,
-        receiptNumber: body.receiptNumber,
-        invoiceNumber: body.invoiceNumber,
-        gstAmount,
-        gstPercentage: body.gstPercentage ?? 0,
-        tdsAmount,
-        tdsPercentage: body.tdsPercentage ?? 0,
-        netAmount,
-        ...(expMonth !== undefined ? { month: expMonth } : {}),
-        ...(expYear !== undefined ? { year: expYear } : {}),
-        ...(financialYearId !== undefined ? { financialYearId } : {}),
-        notes: body.notes,
-        ...(body.tags !== undefined ? { tags: body.tags } : {}),
-      },
-      include: {
-        category: true,
-        attachments: true,
-        financialYear: { select: { id: true, label: true } },
-      },
+    const expense = await prisma.$transaction(async (tx) => {
+      const updated = await tx.expense.update({
+        where: { id },
+        data: {
+          ...(body.categoryId ? { categoryId: body.categoryId } : {}),
+          title: body.title,
+          description: body.description,
+          amount: body.amount,
+          paymentDate: body.paymentDate ? new Date(body.paymentDate) : undefined,
+          paymentMode: body.paymentMode,
+          paymentRef: body.paymentRef,
+          paidTo: body.paidTo,
+          paidToContact: body.paidToContact,
+          receiptUrl: body.receiptUrl,
+          receiptNumber: body.receiptNumber,
+          invoiceNumber: body.invoiceNumber,
+          gstAmount,
+          gstPercentage: body.gstPercentage ?? 0,
+          tdsAmount,
+          tdsPercentage: body.tdsPercentage ?? 0,
+          netAmount,
+          ...(expMonth !== undefined ? { month: expMonth } : {}),
+          ...(expYear !== undefined ? { year: expYear } : {}),
+          ...(financialYearId !== undefined ? { financialYearId } : {}),
+          notes: body.notes,
+          ...(body.tags !== undefined ? { tags: body.tags } : {}),
+        },
+        include: {
+          category: true,
+          attachments: true,
+          financialYear: { select: { id: true, label: true } },
+        },
+      });
+
+      // Recalculate new month's summary
+      if (updated.month && updated.year) {
+        await updateMonthlySummary(updated.societyId, updated.month, updated.year, tx);
+      }
+
+      // If month/year changed, also recalculate the OLD month's summary so stale
+      // totals don't linger (e.g. expense moved from Feb → Jan).
+      const oldMonth = existing.month;
+      const oldYear = existing.year;
+      if (oldMonth && oldYear && (oldMonth !== updated.month || oldYear !== updated.year)) {
+        await updateMonthlySummary(updated.societyId, oldMonth, oldYear, tx);
+      }
+
+      return updated;
     });
 
-    // Recalculate new month's summary
-    if (expense.month && expense.year) {
-      await updateMonthlySummary(expense.societyId, expense.month, expense.year);
-    }
-
-    // If month/year changed, also recalculate the OLD month's summary so stale
-    // totals don't linger (e.g. expense moved from Feb → Jan).
-    const oldMonth = existing.month;
-    const oldYear = existing.year;
-    if (oldMonth && oldYear && (oldMonth !== expense.month || oldYear !== expense.year)) {
-      await updateMonthlySummary(expense.societyId, oldMonth, oldYear);
-    }
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_UPDATED",
+      entityType: "Expense",
+      entityId: id,
+    });
 
     res.json(expense);
   } catch (error) {
@@ -626,7 +676,7 @@ router.delete('/:id', async (req, res, next) => {
       select: { id: true, month: true, year: true },
     });
     if (!existing) {
-      return res.status(404).json({ error: 'Expense not found' });
+      return res.status(404).json({ message: 'Expense not found' });
     }
 
     await prisma.expense.update({ where: { id: existing.id }, data: { deletedAt: new Date() } });
@@ -634,6 +684,14 @@ router.delete('/:id', async (req, res, next) => {
     if (existing.month && existing.year) {
       await updateMonthlySummary(societyId, existing.month, existing.year);
     }
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId,
+      action: "EXPENSE_DELETED",
+      entityType: "Expense",
+      entityId: id,
+    });
 
     res.json({ message: 'Expense deleted' });
   } catch (error) {
@@ -646,15 +704,15 @@ router.delete('/:id', async (req, res, next) => {
 // ==========================================
 
 // Get monthly summary
-router.get('/summary/monthly', async (req, res) => {
+router.get('/summary/monthly', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { month, year } = req.query;
-    
+
     if (!month || !year) {
-      return res.status(400).json({ error: 'Month and year required' });
+      return res.status(400).json({ message: 'Month and year required' });
     }
-    
+
     let summary = await prisma.monthlyExpenseSummary.findUnique({
       where: {
         societyId_month_year: {
@@ -664,7 +722,7 @@ router.get('/summary/monthly', async (req, res) => {
         }
       }
     });
-    
+
     // If not exists, calculate and create
     if (!summary) {
       summary = await calculateAndSaveMonthlySummary(
@@ -673,19 +731,15 @@ router.get('/summary/monthly', async (req, res) => {
         parseInt(year as string)
       );
     }
-    
+
     res.json(summary);
   } catch (error) {
-    logger.error({ err: error }, '[expenses] GET /summary/monthly');
-    res.status(500).json({
-      message: 'Failed to fetch summary',
-      error: 'Failed to fetch summary'
-    });
+    next(error);
   }
 });
 
 // Get yearly summary (supports financialYearId or calendar year)
-router.get('/summary/yearly', async (req, res) => {
+router.get('/summary/yearly', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { year, financialYearId } = req.query;
@@ -698,7 +752,7 @@ router.get('/summary/yearly', async (req, res) => {
       const fy = await prisma.financialYear.findFirst({
         where: { id: financialYearId as string, societyId },
       });
-      if (!fy) return res.status(404).json({ error: 'Financial year not found' });
+      if (!fy) return res.status(404).json({ message: 'Financial year not found' });
       fyLabel = fy.label;
       const cursor = new Date(fy.startDate.getFullYear(), fy.startDate.getMonth(), 1);
       const end = fy.endDate;
@@ -710,7 +764,7 @@ router.get('/summary/yearly', async (req, res) => {
       const y = parseInt(year as string);
       monthPairs = Array.from({ length: 12 }, (_, i) => ({ month: i + 1, year: y }));
     } else {
-      return res.status(400).json({ error: 'Year or financialYearId required' });
+      return res.status(400).json({ message: 'Year or financialYearId required' });
     }
 
     const summaries = await Promise.all(
@@ -741,16 +795,12 @@ router.get('/summary/yearly', async (req, res) => {
       }
     });
   } catch (error) {
-    logger.error({ err: error }, '[expenses] GET /summary/yearly');
-    res.status(500).json({
-      message: 'Failed to fetch yearly summary',
-      error: 'Failed to fetch yearly summary'
-    });
+    next(error);
   }
 });
 
 // Get category-wise breakdown
-router.get('/summary/category-breakdown', async (req, res) => {
+router.get('/summary/category-breakdown', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { month, year, financialYearId } = req.query;
@@ -793,11 +843,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
 
     res.json(breakdown);
   } catch (error) {
-    logger.error({ err: error }, '[expenses] GET /summary/category-breakdown');
-    res.status(500).json({
-      message: 'Failed to fetch breakdown',
-      error: 'Failed to fetch breakdown'
-    });
+    next(error);
   }
 });
 
@@ -806,7 +852,7 @@ router.get('/summary/category-breakdown', async (req, res) => {
 // ==========================================
 
 // Get expense trends (FY months or last 12 months fallback)
-router.get('/analytics/trends', async (req, res) => {
+router.get('/analytics/trends', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { financialYearId } = req.query;
@@ -817,7 +863,7 @@ router.get('/analytics/trends', async (req, res) => {
       const fy = await prisma.financialYear.findFirst({
         where: { id: financialYearId as string, societyId },
       });
-      if (!fy) return res.status(404).json({ error: 'Financial year not found' });
+      if (!fy) return res.status(404).json({ message: 'Financial year not found' });
       const cursor = new Date(fy.startDate.getFullYear(), fy.startDate.getMonth(), 1);
       const end = fy.endDate;
       while (cursor <= end) {
@@ -855,16 +901,12 @@ router.get('/analytics/trends', async (req, res) => {
 
     res.json(trends);
   } catch (error) {
-    logger.error({ err: error }, '[expenses] GET /analytics/trends');
-    res.status(500).json({
-      message: 'Failed to fetch trends',
-      error: 'Failed to fetch trends'
-    });
+    next(error);
   }
 });
 
 // Get top categories
-router.get('/analytics/top-categories', async (req, res) => {
+router.get('/analytics/top-categories', async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
     const { year, financialYearId, limit = 10 } = req.query;
@@ -884,13 +926,13 @@ router.get('/analytics/top-categories', async (req, res) => {
       orderBy: { _sum: { amount: 'desc' } },
       take: parseInt(limit as string)
     });
-    
+
     // Get category details
     const categoryIds = expenses.map(e => e.categoryId);
     const categories = await prisma.expenseCategory.findMany({
       where: { id: { in: categoryIds } }
     });
-    
+
     const result = expenses.map(expense => {
       const category = categories.find(c => c.id === expense.categoryId);
       return {
@@ -901,14 +943,10 @@ router.get('/analytics/top-categories', async (req, res) => {
         count: expense._count.id
       };
     });
-    
+
     res.json(result);
   } catch (error) {
-    logger.error({ err: error }, '[expenses] GET /analytics/top-categories');
-    res.status(500).json({
-      message: 'Failed to fetch top categories',
-      error: 'Failed to fetch top categories'
-    });
+    next(error);
   }
 });
 
@@ -916,23 +954,26 @@ router.get('/analytics/top-categories', async (req, res) => {
 // HELPER FUNCTIONS
 // ==========================================
 
-async function updateMonthlySummary(societyId: string, month: number, year: number) {
+/** Transaction-compatible Prisma client subset used by helpers. */
+type TxClient = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
+
+async function updateMonthlySummary(societyId: string, month: number, year: number, db: TxClient | typeof prisma = prisma) {
   if (!month || !year) return;
-  
-  await calculateAndSaveMonthlySummary(societyId, month, year);
+
+  await calculateAndSaveMonthlySummary(societyId, month, year, db);
 }
 
-async function calculateAndSaveMonthlySummary(societyId: string, month: number, year: number) {
+async function calculateAndSaveMonthlySummary(societyId: string, month: number, year: number, db: TxClient | typeof prisma = prisma) {
   const filterWhere = { societyId, month, year, status: 'APPROVED' as const, deletedAt: null as Date | null };
 
   // Server-side aggregation: totals via aggregate(), breakdown via groupBy()
   const [aggregates, categoryGrouped] = await Promise.all([
-    prisma.expense.aggregate({
+    db.expense.aggregate({
       where: filterWhere,
       _sum: { amount: true, gstAmount: true, tdsAmount: true, netAmount: true },
       _count: { id: true },
     }),
-    prisma.expense.groupBy({
+    db.expense.groupBy({
       by: ['categoryId'],
       where: filterWhere,
       _sum: { amount: true },
@@ -949,7 +990,7 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
   let categoryBreakdown: Record<string, number> = {};
   if (categoryGrouped.length > 0) {
     const categoryIds = categoryGrouped.map(g => g.categoryId);
-    const categories = await prisma.expenseCategory.findMany({
+    const categories = await db.expenseCategory.findMany({
       where: { id: { in: categoryIds } },
       select: { id: true, name: true },
     });
@@ -959,7 +1000,7 @@ async function calculateAndSaveMonthlySummary(societyId: string, month: number, 
     );
   }
 
-  return await prisma.monthlyExpenseSummary.upsert({
+  return await db.monthlyExpenseSummary.upsert({
     where: {
       societyId_month_year: { societyId, month, year }
     },

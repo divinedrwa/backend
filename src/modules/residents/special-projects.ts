@@ -101,7 +101,7 @@ router.get("/special-projects/:id", async (req, res, next) => {
       },
     });
 
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     // Fetch my contribution with payment history
     let myContribution = null;
@@ -142,7 +142,7 @@ router.get("/special-projects/:id/expenses", async (req, res, next) => {
       where: { id, societyId },
       select: { id: true },
     });
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     const where: Prisma.ProjectExpenseWhereInput = { projectId: id };
     const [expenses, total] = await Promise.all([

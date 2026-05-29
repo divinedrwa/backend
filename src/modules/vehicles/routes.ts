@@ -5,6 +5,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -212,6 +213,14 @@ router.delete("/:id", async (req, res, next) => {
     if (vehicle.count === 0) {
       return res.status(404).json({ message: "Vehicle not found" });
     }
+
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId: req.auth!.societyId,
+      action: "VEHICLE_DELETED",
+      entityType: "Vehicle",
+      entityId: id,
+    });
 
     return res.json({ message: "Vehicle deleted" });
   } catch (error) {

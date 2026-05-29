@@ -139,4 +139,67 @@ router.patch(
   }
 );
 
+// Update patrol (admin)
+const updatePatrolSchema = z.object({
+  checkpointName: z.string().trim().min(2).optional(),
+  checkpointLocation: z.string().trim().optional(),
+  scheduledTime: z.string().datetime().optional(),
+  notes: z.string().trim().optional(),
+  gateId: z.string().cuid().optional(),
+});
+
+router.put(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  validateBody(updatePatrolSchema),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const body = req.body as z.infer<typeof updatePatrolSchema>;
+
+      const patrol = await prisma.guardPatrol.updateMany({
+        where: { id, societyId: req.auth!.societyId },
+        data: {
+          ...(body.checkpointName !== undefined && { checkpointName: body.checkpointName }),
+          ...(body.checkpointLocation !== undefined && { checkpointLocation: body.checkpointLocation }),
+          ...(body.scheduledTime !== undefined && { scheduledTime: new Date(body.scheduledTime) }),
+          ...(body.notes !== undefined && { notes: body.notes }),
+          ...(body.gateId !== undefined && { gateId: body.gateId }),
+        },
+      });
+
+      if (patrol.count === 0) {
+        return res.status(404).json({ message: "Patrol not found" });
+      }
+
+      return res.json({ message: "Patrol updated" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Delete patrol (admin)
+router.delete(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+
+      const patrol = await prisma.guardPatrol.deleteMany({
+        where: { id, societyId: req.auth!.societyId },
+      });
+
+      if (patrol.count === 0) {
+        return res.status(404).json({ message: "Patrol not found" });
+      }
+
+      return res.json({ message: "Patrol deleted" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
 export default router;

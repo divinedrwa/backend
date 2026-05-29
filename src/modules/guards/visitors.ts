@@ -1,6 +1,7 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -729,21 +730,28 @@ router.get("/pre-approved-entries", requireRole(UserRole.GUARD), async (req, res
   try {
     const { societyId } = req.auth!;
     const now = new Date();
-    const rows = await prisma.preApprovedVisitor.findMany({
-      where: {
-        societyId,
-        isActive: true,
-        isUsed: false,
-        OR: [{ validUntil: null }, { validUntil: { gte: now } }],
-      },
-      include: {
-        villa: { select: { id: true, villaNumber: true, block: true } },
-        approvedBy: { select: { id: true, name: true } },
-      },
-      orderBy: [{ validFrom: "desc" }, { createdAt: "desc" }],
-    });
+    const pagination = getPagination(req);
+    const where = {
+      societyId,
+      isActive: true,
+      isUsed: false,
+      OR: [{ validUntil: null }, { validUntil: { gte: now } }],
+    };
+    const [rows, total] = await Promise.all([
+      prisma.preApprovedVisitor.findMany({
+        where,
+        include: {
+          villa: { select: { id: true, villaNumber: true, block: true } },
+          approvedBy: { select: { id: true, name: true } },
+        },
+        orderBy: [{ validFrom: "desc" }, { createdAt: "desc" }],
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.preApprovedVisitor.count({ where }),
+    ]);
     logger.info({ societyId, count: rows.length }, "[guards] pre-approved-entries");
-    return res.json({ preApproved: rows, count: rows.length });
+    return res.json({ preApproved: rows, count: total, ...paginationMeta(total, rows.length, pagination) });
   } catch (error) {
     next(error);
   }

@@ -1,5 +1,5 @@
-import { DocumentCategory, UserRole } from "@prisma/client";
-import { Router } from "express";
+import { DocumentCategory, Prisma, UserRole } from "@prisma/client";
+import { Router, Request, Response, NextFunction } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
@@ -27,7 +27,16 @@ router.use(requireAuth);
 router.get("/", async (req, res, next) => {
   try {
     const pagination = getPagination(req);
-    const where = { societyId: req.auth!.societyId };
+    const { search, category } = req.query;
+    const where: Prisma.DocumentWhereInput = { societyId: req.auth!.societyId };
+
+    if (typeof search === "string" && search.trim()) {
+      where.title = { contains: search.trim(), mode: "insensitive" };
+    }
+    if (typeof category === "string" && category.trim()) {
+      where.category = category.trim() as DocumentCategory;
+    }
+
     const [documents, total] = await Promise.all([
       prisma.document.findMany({
         where,
@@ -70,34 +79,31 @@ router.post(
   }
 );
 
-// Update document
-router.patch(
-  "/:id",
-  requireRole(UserRole.ADMIN),
-  validateBody(updateDocumentSchema),
-  async (req, res, next) => {
-    try {
-      const body = req.body as z.infer<typeof updateDocumentSchema>;
-      const { id } = req.params;
+// Update document (accepts both PUT and PATCH for client compatibility)
+async function handleUpdateDocument(req: Request, res: Response, next: NextFunction) {
+  try {
+    const body = req.body as z.infer<typeof updateDocumentSchema>;
+    const { id } = req.params;
 
-      const document = await prisma.document.updateMany({
-        where: {
-          id,
-          societyId: req.auth!.societyId
-        },
-        data: body
-      });
+    const document = await prisma.document.updateMany({
+      where: {
+        id,
+        societyId: req.auth!.societyId
+      },
+      data: body
+    });
 
-      if (document.count === 0) {
-        return res.status(404).json({ message: "Document not found" });
-      }
-
-      return res.json({ message: "Document updated" });
-    } catch (error) {
-      next(error);
+    if (document.count === 0) {
+      return res.status(404).json({ message: "Document not found" });
     }
+
+    return res.json({ message: "Document updated" });
+  } catch (error) {
+    next(error);
   }
-);
+}
+router.patch("/:id", requireRole(UserRole.ADMIN), validateBody(updateDocumentSchema), handleUpdateDocument);
+router.put("/:id", requireRole(UserRole.ADMIN), validateBody(updateDocumentSchema), handleUpdateDocument);
 
 // Delete document
 router.delete(

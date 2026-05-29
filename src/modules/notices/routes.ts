@@ -10,6 +10,7 @@ import {
 } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { auditFromRequest } from "../../services/audit.service";
 
 const router = Router();
 
@@ -301,6 +302,14 @@ router.delete(
       if (notice.count === 0) {
         return res.status(404).json({ message: "Notice not found" });
       }
+
+      auditFromRequest(req, {
+        adminId: req.auth!.userId,
+        societyId: req.auth!.societyId,
+        action: "NOTICE_DELETED",
+        entityType: "Notice",
+        entityId: id,
+      });
 
       return res.json({ message: "Notice deleted" });
     } catch (error) {

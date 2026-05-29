@@ -98,7 +98,7 @@ router.post(
       const validIds = new Set(villas.map((v) => v.id));
       const invalid = villaIds.filter((id) => !validIds.has(id));
       if (invalid.length > 0) {
-        return res.status(400).json({ error: "Invalid villa IDs", invalidVillaIds: invalid });
+        return res.status(400).json({ message: "Invalid villa IDs", invalidVillaIds: invalid });
       }
 
       const project = await prisma.$transaction(async (tx) => {
@@ -213,7 +213,7 @@ router.get("/:id", async (req, res, next) => {
     });
 
     if (!project) {
-      return res.status(404).json({ error: "Project not found" });
+      return res.status(404).json({ message: "Project not found" });
     }
 
     // Financial summary
@@ -246,9 +246,9 @@ router.patch(
       const data = req.body as z.infer<typeof updateProjectSchema>;
 
       const existing = await prisma.specialProject.findFirst({ where: { id, societyId } });
-      if (!existing) return res.status(404).json({ error: "Project not found" });
+      if (!existing) return res.status(404).json({ message: "Project not found" });
       if (existing.status !== "ACTIVE") {
-        return res.status(400).json({ error: "Can only update active projects" });
+        return res.status(400).json({ message: "Can only update active projects" });
       }
 
       const project = await prisma.specialProject.update({
@@ -274,9 +274,9 @@ router.patch(
       const { status } = req.body as z.infer<typeof updateStatusSchema>;
 
       const existing = await prisma.specialProject.findFirst({ where: { id, societyId } });
-      if (!existing) return res.status(404).json({ error: "Project not found" });
+      if (!existing) return res.status(404).json({ message: "Project not found" });
       if (existing.status !== "ACTIVE") {
-        return res.status(400).json({ error: "Can only change status of active projects" });
+        return res.status(400).json({ message: "Can only change status of active projects" });
       }
 
       const project = await prisma.specialProject.update({
@@ -300,7 +300,7 @@ router.get("/:id/contributions", async (req, res, next) => {
     const { status } = req.query;
 
     const project = await prisma.specialProject.findFirst({ where: { id, societyId }, select: { id: true } });
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     const where: Prisma.ProjectContributionWhereInput = { projectId: id };
     if (typeof status === "string" && status) {
@@ -368,9 +368,9 @@ router.post(
           villa: { select: { id: true, villaNumber: true, ownerName: true } },
         },
       });
-      if (!contribution) return res.status(404).json({ error: "Contribution not found" });
+      if (!contribution) return res.status(404).json({ message: "Contribution not found" });
       if (contribution.project.status !== "ACTIVE") {
-        return res.status(400).json({ error: "Project is not active" });
+        return res.status(400).json({ message: "Project is not active" });
       }
 
       const result = await prisma.$transaction(
@@ -453,7 +453,7 @@ router.delete(
           },
         },
       });
-      if (!payment) return res.status(404).json({ error: "Payment not found" });
+      if (!payment) return res.status(404).json({ message: "Payment not found" });
 
       await prisma.$transaction(async (tx) => {
         await tx.projectPayment.delete({ where: { id: paymentId } });
@@ -491,9 +491,9 @@ router.post(
   async (req, res, next) => {
     try {
       const file = req.file;
-      if (!file) return res.status(400).json({ error: "No file provided" });
+      if (!file) return res.status(400).json({ message: "No file provided" });
       if (!isCloudinaryConfigured()) {
-        return res.status(503).json({ error: "File storage is not configured" });
+        return res.status(503).json({ message: "File storage is not configured" });
       }
 
       const societyId = req.auth!.societyId;
@@ -525,9 +525,9 @@ router.post(
       const data = req.body as z.infer<typeof addExpenseSchema>;
 
       const project = await prisma.specialProject.findFirst({ where: { id, societyId } });
-      if (!project) return res.status(404).json({ error: "Project not found" });
+      if (!project) return res.status(404).json({ message: "Project not found" });
       if (project.status !== "ACTIVE") {
-        return res.status(400).json({ error: "Project is not active" });
+        return res.status(400).json({ message: "Project is not active" });
       }
 
       const expense = await prisma.$transaction(async (tx) => {
@@ -569,7 +569,7 @@ router.get("/:id/expenses", async (req, res, next) => {
     const pagination = getPagination(req);
 
     const project = await prisma.specialProject.findFirst({ where: { id, societyId }, select: { id: true } });
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     const where: Prisma.ProjectExpenseWhereInput = { projectId: id };
     const [expenses, total] = await Promise.all([
@@ -604,9 +604,9 @@ router.patch(
         where: { id: expId, projectId: id, project: { societyId } },
         include: { project: { select: { totalExpenses: true, status: true } } },
       });
-      if (!existing) return res.status(404).json({ error: "Expense not found" });
+      if (!existing) return res.status(404).json({ message: "Expense not found" });
       if (existing.project.status !== "ACTIVE") {
-        return res.status(400).json({ error: "Project is not active" });
+        return res.status(400).json({ message: "Project is not active" });
       }
 
       const expense = await prisma.$transaction(async (tx) => {
@@ -655,7 +655,7 @@ router.delete("/:id/expenses/:expId", async (req, res, next) => {
       where: { id: expId, projectId: id, project: { societyId } },
       include: { project: { select: { totalExpenses: true } } },
     });
-    if (!existing) return res.status(404).json({ error: "Expense not found" });
+    if (!existing) return res.status(404).json({ message: "Expense not found" });
 
     await prisma.$transaction(async (tx) => {
       await tx.projectExpense.delete({ where: { id: expId } });
@@ -688,7 +688,7 @@ router.get("/:id/summary", async (req, res, next) => {
         contributions: { select: { status: true, amount: true, paidAmount: true } },
       },
     });
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     const collected = project.totalCollected.toNumber();
     const spent = project.totalExpenses.toNumber();
@@ -730,12 +730,12 @@ router.delete("/:id", async (req, res, next) => {
         },
       },
     });
-    if (!project) return res.status(404).json({ error: "Project not found" });
+    if (!project) return res.status(404).json({ message: "Project not found" });
 
     const hasPayments = project.contributions.some((c) => c._count.payments > 0);
     if (hasPayments) {
       return res.status(400).json({
-        error: "Cannot delete a project that has recorded payments. Cancel it instead.",
+        message: "Cannot delete a project that has recorded payments. Cancel it instead.",
       });
     }
 

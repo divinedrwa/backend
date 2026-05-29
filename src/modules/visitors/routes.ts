@@ -1,4 +1,4 @@
-import { UserRole, VisitorType } from "@prisma/client";
+import { Prisma, UserRole, VisitorType } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
@@ -32,7 +32,31 @@ router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, ne
     const todayStart = new Date();
     todayStart.setHours(0, 0, 0, 0);
     const pagination = getPagination(req);
-    const where = { societyId };
+    const { search, status, gateId, startDate, endDate } = req.query;
+    const where: Prisma.VisitorWhereInput = { societyId };
+
+    if (typeof search === "string" && search.trim()) {
+      const term = search.trim();
+      where.OR = [
+        { name: { contains: term, mode: "insensitive" } },
+        { phone: { contains: term, mode: "insensitive" } },
+      ];
+    }
+    if (typeof status === "string" && status.trim()) {
+      const s = status.trim().toLowerCase();
+      if (s === "active") {
+        where.checkOutAt = null;
+      } else if (s === "checked_out") {
+        where.checkOutAt = { not: null };
+      }
+    }
+    if (typeof gateId === "string" && gateId.trim()) {
+      where.gateId = gateId.trim();
+    }
+    if (typeof startDate === "string" && typeof endDate === "string") {
+      where.checkInAt = { gte: new Date(startDate), lte: new Date(endDate) };
+    }
+
     const [visitors, total, todayCount] = await Promise.all([
       prisma.visitor.findMany({
         where,
@@ -410,5 +434,34 @@ router.get("/villa/:villaId", requireRole(UserRole.ADMIN, UserRole.GUARD), async
     next(error);
   }
 });
+
+// Delete visitor record (admin only)
+router.delete(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const societyId = req.auth!.societyId;
+
+      const existing = await prisma.visitor.findFirst({
+        where: { id, societyId },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ message: "Visitor not found" });
+      }
+
+      await prisma.$transaction([
+        prisma.visitorVilla.deleteMany({ where: { visitorId: id } }),
+        prisma.visitor.delete({ where: { id } }),
+      ]);
+
+      return res.json({ message: "Visitor record deleted" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
 
 export default router;

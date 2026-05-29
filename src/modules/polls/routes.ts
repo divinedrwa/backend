@@ -29,7 +29,18 @@ router.use(requireAuth);
 router.get("/", async (req, res, next) => {
   try {
     const pagination = getPagination(req);
-    const where = { societyId: req.auth!.societyId };
+    const { search, status } = req.query;
+    const where: Prisma.PollWhereInput = { societyId: req.auth!.societyId };
+
+    if (typeof search === "string" && search.trim()) {
+      where.title = { contains: search.trim(), mode: "insensitive" };
+    }
+
+    if (status === "active") {
+      where.status = PollStatus.ACTIVE;
+    } else if (status === "inactive") {
+      where.status = PollStatus.CLOSED;
+    }
     const [polls, total] = await Promise.all([
       prisma.poll.findMany({
         where,
@@ -214,6 +225,90 @@ router.post(
       }
 
       return res.json({ message: "Vote recorded successfully" });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Update poll (admin)
+const updatePollSchema = z.object({
+  title: z.string().trim().min(5).max(200).optional(),
+  description: z.string().trim().optional(),
+  startDate: z.string().datetime().optional(),
+  endDate: z.string().datetime().optional(),
+});
+
+router.put(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  validateBody(updatePollSchema),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const body = req.body as z.infer<typeof updatePollSchema>;
+      const societyId = req.auth!.societyId;
+
+      const existing = await prisma.poll.findFirst({
+        where: { id, societyId },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ message: "Poll not found" });
+      }
+
+      const updateData: Record<string, unknown> = {};
+      if (body.title !== undefined) updateData.title = body.title;
+      if (body.description !== undefined) updateData.description = body.description;
+      if (body.startDate !== undefined) updateData.startDate = new Date(body.startDate);
+      if (body.endDate !== undefined) updateData.endDate = new Date(body.endDate);
+
+      const poll = await prisma.poll.update({
+        where: { id },
+        data: updateData,
+        include: {
+          options: {
+            select: {
+              id: true,
+              optionText: true,
+              _count: { select: { votes: true } },
+            },
+          },
+        },
+      });
+
+      return res.json({ poll });
+    } catch (error) {
+      next(error);
+    }
+  }
+);
+
+// Delete poll (admin)
+router.delete(
+  "/:id",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { id } = req.params;
+      const societyId = req.auth!.societyId;
+
+      const existing = await prisma.poll.findFirst({
+        where: { id, societyId },
+      });
+
+      if (!existing) {
+        return res.status(404).json({ message: "Poll not found" });
+      }
+
+      // Delete votes, options, then poll
+      await prisma.$transaction([
+        prisma.pollVote.deleteMany({ where: { pollId: id } }),
+        prisma.pollOption.deleteMany({ where: { pollId: id } }),
+        prisma.poll.delete({ where: { id } }),
+      ]);
+
+      return res.json({ message: "Poll deleted" });
     } catch (error) {
       next(error);
     }

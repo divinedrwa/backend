@@ -26,6 +26,7 @@ router.use(requireAuth);
 router.get("/", async (req, res, next) => {
   try {
     const pagination = getPagination(req);
+    const { status, amenityId, startDate, endDate } = req.query;
     const whereClause: Prisma.AmenityBookingWhereInput = {
       societyId: req.auth!.societyId
     };
@@ -33,6 +34,25 @@ router.get("/", async (req, res, next) => {
     // Residents see only their bookings
     if (req.auth!.role === UserRole.RESIDENT) {
       whereClause.residentId = req.auth!.userId;
+    }
+
+    if (typeof status === "string" && status.trim()) {
+      whereClause.status = status.trim() as BookingStatus;
+    }
+
+    if (typeof amenityId === "string" && amenityId.trim()) {
+      whereClause.amenityId = amenityId.trim();
+    }
+
+    if (typeof startDate === "string" && typeof endDate === "string") {
+      whereClause.startTime = {
+        gte: new Date(startDate),
+        lte: new Date(endDate),
+      };
+    } else if (typeof startDate === "string") {
+      whereClause.startTime = { gte: new Date(startDate) };
+    } else if (typeof endDate === "string") {
+      whereClause.startTime = { lte: new Date(endDate) };
     }
 
     const [bookings, total] = await Promise.all([

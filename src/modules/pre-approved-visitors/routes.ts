@@ -3,6 +3,7 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { logger } from "../../lib/logger";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -53,20 +54,26 @@ router.get("/", async (req, res, next) => {
       whereClause.villaId = req.auth!.villaId;
     }
 
-    const visitors = await prisma.preApprovedVisitor.findMany({
-      where: whereClause,
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true
+    const pagination = getPagination(req);
+    const [visitors, total] = await Promise.all([
+      prisma.preApprovedVisitor.findMany({
+        where: whereClause,
+        include: {
+          villa: {
+            select: {
+              villaNumber: true,
+              block: true
+            }
           }
-        }
-      },
-      orderBy: { validFrom: "asc" }
-    });
+        },
+        orderBy: { validFrom: "asc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.preApprovedVisitor.count({ where: whereClause }),
+    ]);
 
-    return res.json({ visitors });
+    return res.json({ visitors, ...paginationMeta(total, visitors.length, pagination) });
   } catch (error) {
     next(error);
   }

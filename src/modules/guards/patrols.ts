@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -128,14 +129,21 @@ router.get("/my-patrols", requireRole(UserRole.GUARD), async (req, res, next) =>
     const startDate = new Date();
     startDate.setDate(startDate.getDate() - parseInt(days as string));
 
-    const patrols = await prisma.guardPatrol.findMany({
-      where: {
-        guardId: userId,
-        societyId,
-        scheduledTime: { gte: startDate },
-      },
-      orderBy: { scheduledTime: "desc" },
-    });
+    const pagination = getPagination(req);
+    const where = {
+      guardId: userId,
+      societyId,
+      scheduledTime: { gte: startDate },
+    };
+    const [patrols, total] = await Promise.all([
+      prisma.guardPatrol.findMany({
+        where,
+        orderBy: { scheduledTime: "desc" },
+        take: pagination.take,
+        skip: pagination.skip,
+      }),
+      prisma.guardPatrol.count({ where }),
+    ]);
 
     // Group by date
     const byDate = patrols.reduce<Record<string, typeof patrols>>((acc, p) => {
@@ -149,9 +157,10 @@ router.get("/my-patrols", requireRole(UserRole.GUARD), async (req, res, next) =>
       patrols,
       byDate,
       summary: {
-        total: patrols.length,
+        total,
         days: Object.keys(byDate).length,
       },
+      ...paginationMeta(total, patrols.length, pagination),
     });
   } catch (error) {
     next(error);

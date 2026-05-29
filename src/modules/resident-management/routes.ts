@@ -28,7 +28,7 @@ router.use(requireRole(UserRole.ADMIN));
 router.get("/overview", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { status, villaId } = req.query;
+    const { status, villaId, search } = req.query;
     const villaIdParam = typeof villaId === "string" ? villaId : undefined;
 
     // Build filter
@@ -45,6 +45,14 @@ router.get("/overview", async (req, res, next) => {
 
     if (villaIdParam) {
       where.villaId = villaIdParam;
+    }
+
+    if (typeof search === "string" && search.trim()) {
+      where.OR = [
+        { name: { contains: search.trim(), mode: "insensitive" } },
+        { email: { contains: search.trim(), mode: "insensitive" } },
+        { phone: { contains: search.trim(), mode: "insensitive" } },
+      ];
     }
 
     // Get all residents
@@ -313,6 +321,7 @@ router.get("/villa/:villaId", async (req, res, next) => {
     const residents = await prisma.user.findMany({
       where: {
         villaId,
+        societyId,
         role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
       },
       orderBy: [
