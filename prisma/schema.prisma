@@ -216,6 +216,7 @@ model Society {
   assets                Asset[]
   meetings              Meeting[]
   staffAttendance       StaffAttendance[]
+  waterSupplyRequests   WaterSupplyRequest[]
 
   @@index([status])
 }
@@ -379,6 +380,8 @@ model User {
   vendorContractsCreated VendorContract[]      @relation("VendorContractCreator")
   meetingsCreated        Meeting[]             @relation("MeetingCreator")
   staffAttendanceMarked  StaffAttendance[]     @relation("StaffAttendanceMarker")
+  waterSupplyRequests    WaterSupplyRequest[]  @relation("WaterSupplyRequestUser")
+  waterSupplyResolutions WaterSupplyRequest[]  @relation("WaterSupplyRequestResolver")
 
   @@index([societyId])
   @@index([villaId])
@@ -1037,6 +1040,7 @@ model Gate {
   guardShifts             GuardShift[]
   guardPatrols            GuardPatrol[]
   waterSupplyEvents       WaterSupplyEvent[]
+  waterSupplyRequests     WaterSupplyRequest[]
   garbageCollectionEvents GarbageCollectionEvent[]
   visitors                Visitor[]
 
@@ -1682,6 +1686,31 @@ model WaterSupplyEvent {
 
   @@index([societyId])
   @@index([gateId])
+  @@index([createdAt])
+}
+
+model WaterSupplyRequest {
+  id           String    @id @default(cuid())
+  societyId    String
+  userId       String
+  gateId       String
+  requestType  String    // TURN_ON | TURN_OFF
+  reason       String
+  status       String    @default("PENDING") // PENDING | FULFILLED | REJECTED
+  resolvedById String?
+  resolvedAt   DateTime?
+  resolvedNote String?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  society    Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  user       User    @relation("WaterSupplyRequestUser", fields: [userId], references: [id], onDelete: Cascade)
+  gate       Gate    @relation(fields: [gateId], references: [id], onDelete: Cascade)
+  resolvedBy User?   @relation("WaterSupplyRequestResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([societyId])
+  @@index([userId])
+  @@index([status])
   @@index([createdAt])
 }
 

@@ -3,7 +3,7 @@ import { z } from "zod";
 import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
-import { notifySocietyRoles } from "../../services/notification.service";
+import { notifySocietyRoles, notifyUser } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
@@ -182,6 +182,88 @@ router.get("/history", requireAuth, async (req, res, next) => {
     }, {});
 
     return res.json({ history: groupedByDate });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ── Water Supply Requests (guard/admin resolution) ────────────────────────
+
+// GET /api/water-supply/requests/pending - List pending requests for the society
+router.get("/requests/pending", requireAuth, requireRole("GUARD", "ADMIN"), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const requests = await prisma.waterSupplyRequest.findMany({
+      where: { societyId, status: "PENDING" },
+      orderBy: { createdAt: "desc" },
+      include: {
+        gate: { select: { name: true } },
+        user: { select: { name: true } },
+      },
+    });
+    return res.json({ requests });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const resolveRequestSchema = z.object({
+  status: z.enum(["FULFILLED", "REJECTED"]),
+  note: z.string().trim().max(200).optional(),
+});
+
+// PATCH /api/water-supply/requests/:id/resolve - Resolve a water supply request
+router.patch("/requests/:id/resolve", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(resolveRequestSchema), async (req, res, next) => {
+  try {
+    const { userId, societyId } = req.auth!;
+    const { id } = req.params;
+    const { status, note } = req.body as z.infer<typeof resolveRequestSchema>;
+
+    const request = await prisma.waterSupplyRequest.findFirst({
+      where: { id, societyId, status: "PENDING" },
+      include: { gate: { select: { name: true } } },
+    });
+    if (!request) {
+      return res.status(404).json({ message: "Request not found or already resolved" });
+    }
+
+    const updated = await prisma.waterSupplyRequest.update({
+      where: { id },
+      data: {
+        status,
+        resolvedById: userId,
+        resolvedAt: new Date(),
+        resolvedNote: note,
+      },
+      include: {
+        gate: { select: { name: true } },
+        resolvedBy: { select: { name: true } },
+      },
+    });
+
+    // Notify the requesting resident
+    void notifyUser(
+      request.userId,
+      {
+        title: status === "FULFILLED"
+          ? "Water request fulfilled"
+          : "Water request declined",
+        body: status === "FULFILLED"
+          ? `Your water ${request.requestType === "TURN_ON" ? "ON" : "OFF"} request at ${request.gate.name} has been fulfilled.`
+          : `Your water request at ${request.gate.name} was declined.${note ? ` Note: ${note}` : ""}`,
+        data: {
+          type: "WATER_SUPPLY_REQUEST_RESOLVED",
+          requestId: id,
+          status,
+        },
+      },
+      { category: NotificationCategory.WATER_SUPPLY },
+    ).catch((err) => logger.error({ err }, "[notifications] water request resolve push failed"));
+
+    return res.json({
+      message: `Request ${status.toLowerCase()}`,
+      request: updated,
+    });
   } catch (error) {
     next(error);
   }

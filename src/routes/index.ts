@@ -64,6 +64,7 @@ import residentVehicleRoutes from "../modules/residents/vehicles";
 import residentStaffRoutes from "../modules/residents/staff";
 import residentExpenseRoutes from "../modules/residents/expenses";
 import residentSpecialProjectRoutes from "../modules/residents/special-projects";
+import residentWaterRequestRoutes from "../modules/residents/water-requests";
 
 // NEW: Guard Mobile APIs
 import guardRoutes from "../modules/guards/routes";
@@ -190,6 +191,7 @@ router.use("/residents", residentVehicleRoutes); // Vehicles
 router.use("/residents", residentStaffRoutes); // Domestic staff
 router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
 router.use("/residents", residentSpecialProjectRoutes); // Special projects
+router.use("/residents", residentWaterRequestRoutes); // Water supply requests
 router.use("/residents", residentPaymentMethodsRouter); // Payment methods
 
 // Guard Mobile APIs
