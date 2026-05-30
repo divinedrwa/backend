@@ -38,7 +38,7 @@ export async function reconcileSocietyLedger(
 
   try {
     // 1. Get society-level snapshot
-    const _societySnapshot = await computeSocietyMoneySnapshot(db, societyId);
+    const societySnapshot = await computeSocietyMoneySnapshot(db, societyId);
 
     // 2. Get all villa snapshots with cycle info
     const villaSnapshots = await db.villaMaintenanceSnapshot.findMany({
@@ -70,24 +70,67 @@ export async function reconcileSocietyLedger(
       byCycle.set(snap.cycleId, current);
     }
 
-    // 4. Get society-level cash per cycle from payments
-    const societyPaymentsByCycle = await db.maintenancePayment.groupBy({
-      by: ['maintenanceCollectionCycleId'],
-      where: {
-        societyId,
-        maintenanceCollectionCycleId: { not: null },
-      },
-      _sum: { amount: true },
+    // 4. Reconcile society-level cash per cycle using the same
+    //    max(MP, UCP) logic as computeSocietyMoneySnapshot to avoid
+    //    false alerts when credit is applied (snapshot.paidAmount
+    //    includes credit, but raw MaintenancePayment.amount is cash only).
+    const maintenancePayments = await db.maintenancePayment.findMany({
+      where: { societyId, maintenanceCollectionCycleId: { not: null } },
+      select: { villaId: true, maintenanceCollectionCycleId: true, amount: true },
     });
 
-    const societyCashMap = new Map<string, number>();
-    for (const group of societyPaymentsByCycle) {
-      if (group.maintenanceCollectionCycleId) {
-        societyCashMap.set(
-          group.maintenanceCollectionCycleId,
-          Number(group._sum.amount || 0)
-        );
-      }
+    const maintenanceCycles = await db.maintenanceCollectionCycle.findMany({
+      where: { societyId },
+      select: { id: true, financialYearId: true, periodKey: true },
+    });
+    const mcByFyKey = new Map<string, string>();
+    for (const mc of maintenanceCycles) {
+      mcByFyKey.set(`${mc.financialYearId}:${mc.periodKey}`, mc.id);
+    }
+
+    const userCyclePayments = await db.userCyclePayment.findMany({
+      where: {
+        paymentStatus: "SUCCESS",
+        cycle: { societyId },
+        user: { societyId },
+      },
+      select: {
+        cycle: { select: { financialYearId: true, cycleKey: true } },
+        user: { select: { villaId: true } },
+        amountPaid: true,
+      },
+    });
+
+    // Fold MP by (villa, cycle) — sum
+    const mpByKey = new Map<string, number>();
+    for (const mp of maintenancePayments) {
+      if (!mp.maintenanceCollectionCycleId) continue;
+      const key = `${mp.villaId}:${mp.maintenanceCollectionCycleId}`;
+      mpByKey.set(key, (mpByKey.get(key) ?? 0) + Number(mp.amount));
+    }
+
+    // Fold UCP by (villa, MC cycle) — max
+    const ucpByKey = new Map<string, number>();
+    for (const ucp of userCyclePayments) {
+      const villaId = ucp.user?.villaId;
+      if (!villaId) continue;
+      const mcId = mcByFyKey.get(`${ucp.cycle.financialYearId}:${ucp.cycle.cycleKey}`);
+      if (!mcId) continue;
+      const key = `${villaId}:${mcId}`;
+      const amount = Number(ucp.amountPaid);
+      ucpByKey.set(key, Math.max(ucpByKey.get(key) ?? 0, amount));
+    }
+
+    // Reconcile per (villa, cycle): max(mpSum, ucpMax) when MP > 0
+    const reconciledCashMap = new Map<string, number>();
+    const allPaymentKeys = new Set<string>([...mpByKey.keys(), ...ucpByKey.keys()]);
+    for (const key of allPaymentKeys) {
+      const [, cycleId] = key.split(":") as [string, string];
+      const mpSum = mpByKey.get(key) ?? 0;
+      const ucpMax = ucpByKey.get(key) ?? 0;
+      const cashReceived = mpSum > 0.005 ? Math.max(mpSum, ucpMax) : 0;
+      if (cashReceived <= 0.005) continue;
+      reconciledCashMap.set(cycleId, (reconciledCashMap.get(cycleId) ?? 0) + cashReceived);
     }
 
     // 5. Check each cycle
@@ -97,7 +140,7 @@ export async function reconcileSocietyLedger(
 
     for (const [cycleId, data] of byCycle) {
       const villaSum = data.villaSum;
-      const societyCash = societyCashMap.get(cycleId) || 0;
+      const societyCash = reconciledCashMap.get(cycleId) || 0;
       const difference = Math.abs(villaSum - societyCash);
       const matched = difference <= 0.01; // Allow 1 paisa tolerance
 
@@ -152,14 +195,19 @@ export async function reconcileSocietyLedger(
       (sum, data) => sum + data.villaSum,
       0
     );
-    const totalSocietyCash = Array.from(societyCashMap.values()).reduce(
+    const totalSocietyCash = Array.from(reconciledCashMap.values()).reduce(
       (sum, amount) => sum + amount,
       0
     );
     const totalDifference = Math.abs(totalVillaSum - totalSocietyCash);
     const overallMatched = totalDifference <= 0.01;
 
-    logger.info(`[Reconciliation] Overall: villa=${totalVillaSum.toFixed(2)}, society=${totalSocietyCash.toFixed(2)}, diff=${totalDifference.toFixed(2)}`);
+    logger.info({
+      villaSum: totalVillaSum.toFixed(2),
+      reconciledCash: totalSocietyCash.toFixed(2),
+      snapshotCash: societySnapshot.maintenanceCashAllTime.toFixed(2),
+      diff: totalDifference.toFixed(2),
+    }, `[Reconciliation] Overall for society ${societyId}`);
 
     return {
       matched: overallMatched && cycleResults.every(r => r.matched),

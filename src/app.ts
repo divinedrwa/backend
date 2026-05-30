@@ -192,6 +192,8 @@ app.use((req, res, next) => {
   next();
 });
 
-app.use("/api", swaggerRoutes);
+if (process.env.NODE_ENV !== "production") {
+  app.use("/api", swaggerRoutes);
+}
 app.use("/api", routes);
 app.use(errorHandler);

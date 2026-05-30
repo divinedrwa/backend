@@ -261,10 +261,11 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
     if (authHeader?.startsWith("Bearer ")) {
       try {
         const jwt = await import("jsonwebtoken");
-        const payload = jwt.default.decode(authHeader.slice(7)) as { userId?: string } | null;
+        const { env } = await import("../../config/env");
+        const payload = jwt.default.verify(authHeader.slice(7), env.JWT_SECRET) as { userId?: string } | null;
         userId = payload?.userId ?? null;
       } catch {
-        // Token may be expired — that's fine, we still try.
+        // Token may be expired or invalid — that's fine, we still try.
       }
     }
 

@@ -408,7 +408,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         // reconciled value.
         const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
           where: { id: snapshot.id },
-          select: { status: true },
+          select: { status: true, paidAmount: true },
         });
         const snapStatus = reconciledSnapshot?.status ?? "PENDING";
 
@@ -442,16 +442,9 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
               : BillingUserPaymentStatus.PENDING;
           const paidAt = new Date(body.paymentDate);
           for (const u of primaryResidents) {
-            // userCyclePayment.amountPaid is the user-side cash ledger
-            // (drives the resident's billing screen). Increment by the
-            // current call's body.amount so it matches mark-cash's
-            // additive semantics — capping it to snapshot.paidAmount
-            // would silently lose overpayments here too.
-            const existing = await tx.userCyclePayment.findUnique({
-              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-              select: { amountPaid: true },
-            });
-            const updatedAmount = Number(existing?.amountPaid ?? 0) + body.amount;
+            // userCyclePayment.amountPaid is synced from the reconciled
+            // snapshot so it stays consistent with the villa-level ledger.
+            const updatedAmount = Number(reconciledSnapshot?.paidAmount ?? 0);
             await tx.userCyclePayment.upsert({
               where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
               create: {
@@ -1443,6 +1436,107 @@ router.get("/profit-loss/:year", async (req, res, next) => {
       totalAdvanceCredit: Math.round(snap.totalAdvanceCredit * 100) / 100,
       months,
       expenseCategorySummary: yearCategories,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/maintenance-management/shortfall/:fyId
+ *
+ * Per-cycle shortfall report for a financial year, matching the Flutter app's
+ * Shortfall tab logic. Uses VillaMaintenanceSnapshot as the source of truth
+ * for expected/collected per cycle, and MonthlyExpenseSummary for expenses.
+ */
+router.get("/shortfall/:fyId", async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const { fyId } = req.params;
+
+    const fy = await prisma.financialYear.findFirst({
+      where: { id: fyId, societyId },
+    });
+    if (!fy) return res.status(404).json({ message: "Financial year not found" });
+
+    const cycles = await prisma.maintenanceCollectionCycle.findMany({
+      where: { financialYearId: fyId },
+      orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+      select: {
+        id: true,
+        periodKey: true,
+        periodMonth: true,
+        periodYear: true,
+        title: true,
+        dueDate: true,
+        status: true,
+        snapshots: {
+          select: {
+            expectedAmount: true,
+            paidAmount: true,
+            lateFeeAmount: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    // Expense summaries for the calendar years this FY spans
+    const yearSet = new Set(cycles.map((c) => c.periodYear));
+    const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
+      where: { societyId, year: { in: [...yearSet] } },
+      select: { month: true, year: true, totalExpenses: true, categoryBreakdown: true },
+    });
+    const expenseByKey = new Map<string, { total: number; categories: Record<string, number> }>();
+    for (const s of expenseSummaries) {
+      expenseByKey.set(`${s.year}-${String(s.month).padStart(2, "0")}`, {
+        total: Number(s.totalExpenses),
+        categories: (s.categoryBreakdown as Record<string, number>) ?? {},
+      });
+    }
+
+    // Fund snapshot for headline numbers
+    const snap = await computeSocietyMoneySnapshot(prisma, societyId);
+
+    const cycleRows = cycles.map((c) => {
+      const active = c.snapshots.filter((s) => s.status !== "WAIVED");
+      const totalExpected = active.reduce((sum, s) => sum + Number(s.expectedAmount) + Number(s.lateFeeAmount ?? 0), 0);
+      const totalCollected = active.reduce((sum, s) => sum + Number(s.paidAmount), 0);
+      const expense = expenseByKey.get(c.periodKey);
+      const totalExpense = expense?.total ?? 0;
+      const net = totalCollected - totalExpense;
+      const paidCount = active.filter((s) => s.status === "PAID").length;
+      const unpaidCount = Math.max(0, active.length - paidCount);
+
+      return {
+        periodKey: c.periodKey,
+        periodMonth: c.periodMonth,
+        periodYear: c.periodYear,
+        title: c.title,
+        dueDate: c.dueDate,
+        status: c.status,
+        totalExpected: Math.round(totalExpected * 100) / 100,
+        totalCollected: Math.round(totalCollected * 100) / 100,
+        totalExpense: Math.round(totalExpense * 100) / 100,
+        net: Math.round(net * 100) / 100,
+        paidCount,
+        unpaidCount,
+        expenseCategories: expense?.categories ?? {},
+      };
+    });
+
+    const deficitCycles = cycleRows.filter((c) => c.net < 0);
+    const totalShortfall = deficitCycles.reduce((s, c) => s + Math.abs(c.net), 0);
+
+    return res.json({
+      financialYear: { id: fy.id, label: fy.label, startDate: fy.startDate, endDate: fy.endDate },
+      currentFundBalance: Math.round(snap.currentFundBalance * 100) / 100,
+      outstandingDues: Math.round(snap.outstandingDues * 100) / 100,
+      totalAdvanceCredit: Math.round(snap.totalAdvanceCredit * 100) / 100,
+      totalShortfall: Math.round(totalShortfall * 100) / 100,
+      deficitCycleCount: deficitCycles.length,
+      totalCycleCount: cycleRows.length,
+      cycles: cycleRows,
     });
   } catch (error) {
     next(error);

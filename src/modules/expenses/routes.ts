@@ -344,6 +344,55 @@ router.delete('/:id/attachments/:attachmentId', async (req, res, next) => {
 // EXPENSES
 // ==========================================
 
+// Aggregate stats for the current filter set (server-side)
+router.get('/stats', async (req, res, next) => {
+  try {
+    const societyId = req.auth!.societyId;
+    const { categoryId, month, year, financialYearId, status, paymentMode, search } = req.query;
+
+    const where: Prisma.ExpenseWhereInput = { societyId, deletedAt: null };
+    if (typeof categoryId === "string" && categoryId) where.categoryId = categoryId;
+    if (typeof financialYearId === "string" && financialYearId) where.financialYearId = financialYearId;
+    if (month) where.month = parseInt(month as string);
+    if (year) where.year = parseInt(year as string);
+    if (typeof status === "string" && status) where.status = status as ExpenseStatus;
+    if (typeof paymentMode === "string" && paymentMode) where.paymentMode = paymentMode as PaymentMode;
+    if (search) {
+      where.OR = [
+        { title: { contains: search as string, mode: 'insensitive' } },
+        { description: { contains: search as string, mode: 'insensitive' } },
+        { paidTo: { contains: search as string, mode: 'insensitive' } },
+      ];
+    }
+
+    const now = new Date();
+    const currentMonth = now.getMonth() + 1;
+    const currentYear = now.getFullYear();
+
+    const [agg, count, thisMonthAgg, thisYearAgg] = await Promise.all([
+      prisma.expense.aggregate({ where, _sum: { amount: true } }),
+      prisma.expense.count({ where }),
+      prisma.expense.aggregate({
+        where: { ...where, month: currentMonth, year: currentYear },
+        _sum: { amount: true },
+      }),
+      prisma.expense.aggregate({
+        where: { ...where, year: currentYear },
+        _sum: { amount: true },
+      }),
+    ]);
+
+    res.json({
+      total: Number(agg._sum.amount ?? 0),
+      count,
+      thisMonth: Number(thisMonthAgg._sum.amount ?? 0),
+      thisYear: Number(thisYearAgg._sum.amount ?? 0),
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // Get all expenses (with filters)
 router.get('/', async (req, res, next) => {
   try {

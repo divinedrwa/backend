@@ -42,6 +42,15 @@ router.get("/", async (req, res, next) => {
       whereClause.villaId = req.auth!.villaId;
     }
 
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    if (search) {
+      whereClause.OR = [
+        { registrationNumber: { contains: search, mode: "insensitive" } },
+        { model: { contains: search, mode: "insensitive" } },
+        { villa: { villaNumber: { contains: search, mode: "insensitive" } } },
+      ];
+    }
+
     const pagination = getPagination(req);
     const [raw, total] = await Promise.all([
       prisma.vehicle.findMany({
