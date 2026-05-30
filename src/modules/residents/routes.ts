@@ -1146,9 +1146,7 @@ router.get("/community-directory", requireRole(UserRole.RESIDENT, UserRole.ADMIN
       name: r.name,
       villaNumber: r.villa?.villaNumber ?? null,
       block: r.villa?.block ?? null,
-      phoneMasked: r.phone && r.phone.length >= 4
-        ? "****" + r.phone.slice(-4)
-        : null,
+      phoneMasked: r.phone || null,
     }));
 
     return res.json({ residents: rows, count: rows.length, ...paginationMeta(total, rows.length, pagination) });
