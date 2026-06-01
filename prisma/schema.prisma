@@ -2264,3 +2264,19 @@ model ProjectExpense {
   @@index([projectId])
   @@map("project_expenses")
 }
+
+/// Platform-level app version config for in-app update checks.
+/// One row per platform (ANDROID, IOS, WEB). Managed by SUPER_ADMIN.
+model AppVersionConfig {
+  id             String       @id @default(cuid())
+  platform       PushPlatform @unique
+  latestVersion  String       /// Soft-prompt threshold (e.g. "1.2.0")
+  minVersion     String       /// Force-update threshold (e.g. "1.0.0")
+  storeUrl       String?      /// Custom store URL override
+  releaseNotes   String?      /// Shown in update dialog
+  updatedBy      String?      /// Super-admin userId who last updated
+  createdAt      DateTime     @default(now())
+  updatedAt      DateTime     @updatedAt
+
+  @@map("app_version_configs")
+}
