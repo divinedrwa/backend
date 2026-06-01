@@ -33,48 +33,35 @@ export type BillingLedgerCycleRow = {
   paidAt: string | null;
 };
 
-/** Pick canonical “current” cycle from calendar windows alone (never trust stale DB enum). */
-function pickDisplayCycle(cycles: BillingCycle[], nowUtc: Date): BillingCycle | null {
-  let openCycle: BillingCycle | null = null;
-  let upcomingCycle: BillingCycle | null = null;
-  let closedCycle: BillingCycle | null = null;
+/**
+ * Pick the display cycle for the resident maintenance screen.
+ *
+ * Rule: show the **latest cycleKey** within the active financial year,
+ * regardless of whether the cycle is OPEN, UPCOMING, or CLOSED.
+ * Falls back to the latest cycleKey across all cycles when there is no
+ * active FY or no cycles belong to one.
+ */
+async function resolveDisplayCycleRows(societyId: string, _nowUtc: Date): Promise<BillingCycle | null> {
+  // 1. Try: latest cycle in the active financial year
+  const activeFY = await prisma.financialYear.findFirst({
+    where: { societyId, status: "ACTIVE" },
+    select: { id: true },
+  });
 
-  let upcomingClosest: number | null = null;
-
-  for (const c of cycles) {
-    const s = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
-    if (s === BillingCycleStatus.OPEN) {
-      if (
-        !openCycle ||
-        c.paymentEndDate.getTime() > openCycle.paymentEndDate.getTime()
-      ) {
-        openCycle = c;
-      }
-    } else if (s === BillingCycleStatus.UPCOMING) {
-      const start = c.paymentStartDate.getTime();
-      if (upcomingClosest === null || start < upcomingClosest) {
-        upcomingClosest = start;
-        upcomingCycle = c;
-      }
-    } else {
-      const end = c.paymentEndDate.getTime();
-      if (!closedCycle || end > closedCycle.paymentEndDate.getTime()) {
-        closedCycle = c;
-      }
-    }
+  if (activeFY) {
+    const latest = await prisma.billingCycle.findFirst({
+      where: { societyId, financialYearId: activeFY.id },
+      orderBy: { cycleKey: "desc" },
+    });
+    if (latest) return latest;
   }
 
-  return openCycle ?? upcomingCycle ?? closedCycle;
-}
-
-async function resolveDisplayCycleRows(societyId: string, nowUtc: Date): Promise<BillingCycle | null> {
-  const cycles = await prisma.billingCycle.findMany({
+  // 2. Fallback: latest cycle in the society (no FY filter)
+  const fallback = await prisma.billingCycle.findFirst({
     where: { societyId },
-    orderBy: { paymentStartDate: "desc" },
-    take: 60,
+    orderBy: { cycleKey: "desc" },
   });
-  const chosen = pickDisplayCycle(cycles, nowUtc);
-  return chosen ?? null;
+  return fallback ?? null;
 }
 
 const DISPLAY_CYCLE_KEY_PREFIX = "billing:dcid:";
@@ -83,7 +70,7 @@ export async function invalidateDisplayCycleHint(societyId: string): Promise<voi
   await billingCacheDel(`${DISPLAY_CYCLE_KEY_PREFIX}${encodeURIComponent(societyId)}`);
 }
 
-/** OPEN → UPCOMING → last CLOSED, derived from timestamps (matches cron-persisted status when synced). */
+/** Latest cycleKey in the active FY → fallback to latest cycleKey overall. */
 export async function findDisplayCycle(societyId: string, nowUtc = new Date()): Promise<BillingCycle | null> {
   const k = `${DISPLAY_CYCLE_KEY_PREFIX}${encodeURIComponent(societyId)}`;
   const cachedId = await billingCacheGet(k);
