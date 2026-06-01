@@ -1,6 +1,7 @@
 import { Router } from "express";
 import PDFDocument from "pdfkit";
 import { prisma } from "../../lib/prisma";
+import { logger } from "../../lib/logger";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { MaintenanceBillingRole, UserRole } from "@prisma/client";
 import { computeUserBillingLedger } from "../billing-cycle/services/cycle-service";
@@ -353,7 +354,14 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
       });
     }
 
-    await reconcileVillaLedgersForRecentCycles(societyId, user.villaId);
+    try {
+      await reconcileVillaLedgersForRecentCycles(societyId, user.villaId);
+    } catch (reconcileErr) {
+      logger.warn(
+        { err: reconcileErr, userId, villaId: user.villaId },
+        "Villa ledger reconciliation failed — serving potentially stale dues",
+      );
+    }
 
     const pending = (await buildResidentLedgerRows(societyId, userId))
       .filter((row) => row.remainingDue > 0.005)

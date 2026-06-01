@@ -56,16 +56,19 @@ export async function reconcileVillaLedgersForRecentCycles(
   });
   if (cycles.length === 0) return;
 
-  await prisma.$transaction(async (tx) => {
-    for (const c of cycles) {
-      await ensureVillaLedgersAligned(tx, {
-        societyId,
-        villaId,
-        billingCycleId: c.id,
-        note: "Auto-align before resident pending read",
-      });
-    }
-  });
+  await prisma.$transaction(
+    async (tx) => {
+      for (const c of cycles) {
+        await ensureVillaLedgersAligned(tx, {
+          societyId,
+          villaId,
+          billingCycleId: c.id,
+          note: "Auto-align before resident pending read",
+        });
+      }
+    },
+    { timeout: 30_000 },
+  );
 
   _reconcileTimestamps.set(villaId, Date.now());
 }

@@ -93,6 +93,41 @@ const updateUserSchema = z.object({
 
 router.use(requireAuth);
 
+// GET /api/users/stats — role-wise active/inactive counts for dashboard
+router.get(
+  "/stats",
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN),
+  async (req, res, next) => {
+    try {
+      const societyId = req.auth!.societyId!;
+      const groups = await prisma.user.groupBy({
+        by: ["role", "isActive"],
+        where: { societyId },
+        _count: true,
+      });
+
+      const byRole: Record<string, { active: number; inactive: number }> = {};
+      let totalActive = 0;
+      let totalInactive = 0;
+
+      for (const g of groups) {
+        if (!byRole[g.role]) byRole[g.role] = { active: 0, inactive: 0 };
+        if (g.isActive) {
+          byRole[g.role].active = g._count;
+          totalActive += g._count;
+        } else {
+          byRole[g.role].inactive = g._count;
+          totalInactive += g._count;
+        }
+      }
+
+      return res.json({ byRole, totalActive, totalInactive });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // GET /api/users - List all users
 router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
   try {
