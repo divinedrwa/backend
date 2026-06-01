@@ -73,11 +73,14 @@ function corsOriginCheck(
     return callback(null, true);
   }
 
-  // Firebase Hosting: https://<project-id>.web.app and .firebaseapp.com
+  // Firebase Hosting: production + preview channels
+  //   Production:  https://<project-id>.web.app / .firebaseapp.com
+  //   Preview:     https://<project-id>--<channel>-<hash>.web.app
   if (firebaseProjectId) {
     if (
       origin === `https://${firebaseProjectId}.web.app` ||
-      origin === `https://${firebaseProjectId}.firebaseapp.com`
+      origin === `https://${firebaseProjectId}.firebaseapp.com` ||
+      (origin.startsWith(`https://${firebaseProjectId}--`) && origin.endsWith(".web.app"))
     ) {
       return callback(null, true);
     }
