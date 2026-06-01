@@ -1,13 +1,14 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
-import { SocietyStatus, UserRole } from "@prisma/client";
+import { PushPlatform, SocietyStatus, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { signAuthToken } from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
 import { auditFromRequest } from "../../services/audit.service";
+import { compareSemver } from "../../lib/semver";
 
 const router = Router();
 
@@ -470,6 +471,78 @@ router.post("/societies/:societyId/restore", async (req, res, next) => {
       metadata: { name: existing.name },
     });
     res.json({ ok: true, society });
+  } catch (e) {
+    next(e);
+  }
+});
+
+// ── App Version Config ─────────────────────────────────────────────
+
+const semverRegex = /^\d+\.\d+\.\d+$/;
+
+const appVersionSchema = z
+  .object({
+    platform: z.nativeEnum(PushPlatform),
+    latestVersion: z.string().trim().regex(semverRegex, "Must be semver (e.g. 1.2.3)"),
+    minVersion: z.string().trim().regex(semverRegex, "Must be semver (e.g. 1.0.0)"),
+    storeUrl: z.string().trim().url().nullish(),
+    releaseNotes: z.string().trim().max(2000).nullish(),
+  })
+  .refine((d) => compareSemver(d.minVersion, d.latestVersion) <= 0, {
+    message: "minVersion must be <= latestVersion",
+    path: ["minVersion"],
+  });
+
+/**
+ * PUT /api/super/app-version — upsert version config for a platform.
+ */
+router.put("/app-version", validateBody(appVersionSchema), async (req, res, next) => {
+  try {
+    const body = req.body as z.infer<typeof appVersionSchema>;
+    const config = await prisma.appVersionConfig.upsert({
+      where: { platform: body.platform },
+      create: {
+        platform: body.platform,
+        latestVersion: body.latestVersion,
+        minVersion: body.minVersion,
+        storeUrl: body.storeUrl ?? null,
+        releaseNotes: body.releaseNotes ?? null,
+        updatedBy: req.auth!.userId,
+      },
+      update: {
+        latestVersion: body.latestVersion,
+        minVersion: body.minVersion,
+        storeUrl: body.storeUrl ?? null,
+        releaseNotes: body.releaseNotes ?? null,
+        updatedBy: req.auth!.userId,
+      },
+    });
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      action: "UPSERT_APP_VERSION_CONFIG",
+      entityType: "AppVersionConfig",
+      entityId: config.id,
+      metadata: {
+        platform: body.platform,
+        latestVersion: body.latestVersion,
+        minVersion: body.minVersion,
+      },
+    });
+    res.json({ config });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/super/app-version — list all platform version configs.
+ */
+router.get("/app-version", async (_req, res, next) => {
+  try {
+    const configs = await prisma.appVersionConfig.findMany({
+      orderBy: { platform: "asc" },
+    });
+    res.json({ configs });
   } catch (e) {
     next(e);
   }
