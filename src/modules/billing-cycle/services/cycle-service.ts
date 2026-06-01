@@ -36,21 +36,33 @@ export type BillingLedgerCycleRow = {
 /**
  * Pick the display cycle for the resident maintenance screen.
  *
- * Rule: show the **latest cycleKey** within the active financial year,
- * regardless of whether the cycle is OPEN, UPCOMING, or CLOSED.
- * Falls back to the latest cycleKey across all cycles when there is no
- * active FY or no cycles belong to one.
+ * Rule: show the **latest cycleKey** within the active financial year
+ * that covers today's date, regardless of whether the cycle is OPEN,
+ * UPCOMING, or CLOSED. When multiple FYs are ACTIVE, the one whose
+ * startDate–endDate range contains today wins. Falls back to the most
+ * recent active FY, then to the latest cycleKey across all cycles.
  */
-async function resolveDisplayCycleRows(societyId: string, _nowUtc: Date): Promise<BillingCycle | null> {
-  // 1. Try: latest cycle in the active financial year
-  const activeFY = await prisma.financialYear.findFirst({
+async function resolveDisplayCycleRows(societyId: string, nowUtc: Date): Promise<BillingCycle | null> {
+  // 1. Try: latest cycle in the active FY whose date range contains today.
+  //    When multiple FYs are ACTIVE (e.g. old FY not yet closed and new FY
+  //    just created) prefer the one that covers the current date so the
+  //    resident sees the latest relevant cycle (Apr 2026 in FY 2026-27)
+  //    instead of the last cycle of the previous FY (Mar 2026 in FY 2025-26).
+  const activeFYs = await prisma.financialYear.findMany({
     where: { societyId, status: "ACTIVE" },
-    select: { id: true },
+    orderBy: { startDate: "desc" },
+    select: { id: true, startDate: true, endDate: true },
   });
 
-  if (activeFY) {
+  // Pick the FY that contains today; fall back to the most recent one.
+  const currentFY =
+    activeFYs.find((fy) => nowUtc >= fy.startDate && nowUtc <= fy.endDate) ??
+    activeFYs[0] ??
+    null;
+
+  if (currentFY) {
     const latest = await prisma.billingCycle.findFirst({
-      where: { societyId, financialYearId: activeFY.id },
+      where: { societyId, financialYearId: currentFY.id },
       orderBy: { cycleKey: "desc" },
     });
     if (latest) return latest;
