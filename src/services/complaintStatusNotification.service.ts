@@ -1,4 +1,5 @@
 import { ComplaintStatus, NotificationCategory, UserRole } from "@prisma/client";
+import { residentLikeRoleFilter } from "../lib/residentLike";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 import { NotificationService } from "./notification.service";
@@ -59,7 +60,7 @@ export async function notifyResidentsComplaintStatusChanged(params: {
         where: {
           societyId: params.societyId,
           villaId: params.villaId,
-          role: UserRole.RESIDENT,
+          ...residentLikeRoleFilter,
           isActive: true,
         },
         select: { id: true },

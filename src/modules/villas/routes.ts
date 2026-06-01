@@ -9,6 +9,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { UserRole } from "@prisma/client";
+import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { validateBody } from "../../middlewares/validate";
 import { auditFromRequest } from "../../services/audit.service";
 
@@ -463,7 +464,7 @@ router.get("/:id/residents", requireAuth, async (req, res, next) => {
       where: {
         villaId: id,
         societyId,
-        role: "RESIDENT",
+        role: { in: RESIDENT_LIKE_ROLES },
       },
       select: {
         id: true,
@@ -494,7 +495,7 @@ router.get("/:id/occupancy-history", requireAuth, async (req, res, next) => {
       where: {
         villaId: id,
         societyId,
-        role: "RESIDENT",
+        role: { in: RESIDENT_LIKE_ROLES },
       },
       select: {
         id: true,

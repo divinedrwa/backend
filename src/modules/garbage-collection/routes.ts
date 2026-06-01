@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
+import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { notifySocietyRoles } from "../../services/notification.service";
@@ -51,7 +52,7 @@ router.post("/entry", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(l
 
     void notifySocietyRoles({
       societyId,
-      roles: [UserRole.RESIDENT],
+      roles: RESIDENT_LIKE_ROLES,
       category: NotificationCategory.GARBAGE,
       title: "Garbage collection",
       body: `Collector arrived at ${event.gate?.name ?? "the gate"}. Please prepare your garbage.`,

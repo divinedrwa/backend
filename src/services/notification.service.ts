@@ -2,6 +2,7 @@ import { prisma } from "../lib/prisma";
 import { logger } from "../lib/logger";
 import admin from "firebase-admin";
 import { NotificationCategory, UserRole } from "@prisma/client";
+import { RESIDENT_LIKE_ROLES } from "../lib/residentLike";
 
 // Initialize Firebase Admin SDK (if not already initialized).
 // Prefer FIREBASE_SERVICE_ACCOUNT_JSON from .env (dotenv must load before this module — see app.ts).
@@ -669,7 +670,7 @@ export async function broadcastNoticeToAllResidents(params: {
   const residents = await prisma.user.findMany({
     where: {
       societyId: params.societyId,
-      role: UserRole.RESIDENT,
+      role: { in: RESIDENT_LIKE_ROLES },
       isActive: true,
     },
     select: { id: true },

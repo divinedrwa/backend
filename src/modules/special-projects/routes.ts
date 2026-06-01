@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { Prisma, UserRole } from "@prisma/client";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -410,7 +411,7 @@ router.post(
 
       // Notify residents of this villa
       const residents = await prisma.user.findMany({
-        where: { villaId: contribution.villa.id, role: "RESIDENT", isActive: true },
+        where: { villaId: contribution.villa.id, ...residentLikeRoleFilter, isActive: true },
         select: { id: true },
       });
       if (residents.length > 0) {

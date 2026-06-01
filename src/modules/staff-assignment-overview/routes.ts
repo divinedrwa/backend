@@ -110,9 +110,9 @@ router.get("/villa-coverage", async (req, res, next) => {
           },
         },
         users: {
-          where: { 
+          where: {
             isActive: true,
-            role: "RESIDENT"
+            role: { in: [UserRole.RESIDENT, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
           },
           select: {
             id: true,
@@ -406,9 +406,9 @@ router.get("/unassigned-resources", async (req, res, next) => {
           select: { id: true },
         },
         users: {
-          where: { 
+          where: {
             isActive: true,
-            role: "RESIDENT"
+            role: { in: [UserRole.RESIDENT, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
           },
           select: {
             id: true,

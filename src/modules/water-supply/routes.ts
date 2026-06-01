@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
+import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { notifySocietyRoles, notifyUser } from "../../services/notification.service";
@@ -53,7 +54,7 @@ router.post("/toggle", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(
 
     void notifySocietyRoles({
       societyId,
-      roles: [UserRole.RESIDENT],
+      roles: RESIDENT_LIKE_ROLES,
       category: NotificationCategory.WATER_SUPPLY,
       title: turnedOn ? "Water supply ON" : "Water supply OFF",
       body:
