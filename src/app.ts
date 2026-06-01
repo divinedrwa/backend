@@ -44,7 +44,14 @@ const corsAllowList = (process.env.CORS_ORIGINS ?? "")
  */
 const vercelSlug = (process.env.VERCEL_PROJECT_SLUG ?? "").trim();
 
-if (corsAllowList.length === 0 && !vercelSlug && process.env.NODE_ENV === "production") {
+/**
+ * Optional: Firebase project ID for auto-allowing Firebase Hosting origins.
+ * Set FIREBASE_PROJECT_ID (e.g. "society-e1a2e") and both
+ * `https://<id>.web.app` and `https://<id>.firebaseapp.com` are accepted.
+ */
+const firebaseProjectId = (process.env.FIREBASE_PROJECT_ID ?? "").trim();
+
+if (corsAllowList.length === 0 && !vercelSlug && !firebaseProjectId && process.env.NODE_ENV === "production") {
   logger.error(
     "CORS_ORIGINS is not set in production — defaulting to restrictive CORS (no cross-origin allowed). " +
     "Set CORS_ORIGINS to a comma-separated allow-list of origins (e.g. https://admin.example.com)."
@@ -66,13 +73,23 @@ function corsOriginCheck(
     return callback(null, true);
   }
 
+  // Firebase Hosting: https://<project-id>.web.app and .firebaseapp.com
+  if (firebaseProjectId) {
+    if (
+      origin === `https://${firebaseProjectId}.web.app` ||
+      origin === `https://${firebaseProjectId}.firebaseapp.com`
+    ) {
+      return callback(null, true);
+    }
+  }
+
   callback(null, false);
 }
 
 app.use(
   cors({
     origin:
-      corsAllowList.length > 0 || vercelSlug
+      corsAllowList.length > 0 || vercelSlug || firebaseProjectId
         ? corsOriginCheck
         : process.env.NODE_ENV === "production"
           ? false
