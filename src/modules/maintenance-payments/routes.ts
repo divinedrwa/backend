@@ -5,7 +5,7 @@ import { Prisma, UserRole } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
+import { getCachedMoneySnapshot } from "../../lib/societyFinance";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { recordPaymentAndSyncLedgers } from "./record-payment";
@@ -267,7 +267,7 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
     // numbers. Reads both ledgers (MaintenancePayment + UserCyclePayment),
     // so the dashboard agrees with the residents page even when the two
     // ledgers diverged historically.
-    const money = await computeSocietyMoneySnapshot(prisma, societyId);
+    const money = await getCachedMoneySnapshot(prisma, societyId);
 
     /**
      * Cycle-progress view per month: caps each villa's contribution at its

@@ -20,7 +20,7 @@ import {
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
+import { getCachedMoneySnapshot } from "../../lib/societyFinance";
 import collectionRoutes from "./collection-routes";
 import { applyVillaCreditAcrossSnapshots, getVillaCreditBalance } from "./credit-walker";
 import {
@@ -1258,7 +1258,7 @@ router.get("/year-report/:year", async (req, res, next) => {
     const collectedFromSnapshots = new Map<number, number>();
     const paidCountFromSnapshots = new Map<number, number>();
     for (const c of snapshotCycleTotals) {
-      // Exclude WAIVED — matches computeSocietyMoneySnapshot() behavior.
+      // Exclude WAIVED — matches getCachedMoneySnapshot() behavior.
       const active = c.snapshots.filter((s) => s.status !== "WAIVED");
       const snapExpected = active.reduce(
         (sum, s) => sum + Number(s.expectedAmount),
@@ -1366,7 +1366,7 @@ router.get("/year-report/:year", async (req, res, next) => {
  *  - Expenses: society expenses by category
  *  - Net surplus/deficit per month
  *
- * Uses computeSocietyMoneySnapshot for authoritative cash numbers.
+ * Uses getCachedMoneySnapshot for authoritative cash numbers.
  */
 router.get("/profit-loss/:year", async (req, res, next) => {
   try {
@@ -1377,7 +1377,7 @@ router.get("/profit-loss/:year", async (req, res, next) => {
       return res.status(400).json({ message: "Invalid year" });
     }
 
-    const snap = await computeSocietyMoneySnapshot(prisma, societyId);
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
 
     // Expense category breakdown per month
     const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
@@ -1496,7 +1496,7 @@ router.get("/shortfall/:fyId", async (req, res, next) => {
     }
 
     // Fund snapshot for headline numbers
-    const snap = await computeSocietyMoneySnapshot(prisma, societyId);
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
 
     const cycleRows = cycles.map((c) => {
       const active = c.snapshots.filter((s) => s.status !== "WAIVED");
@@ -1962,7 +1962,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
         // Canonical fund snapshot — reads both ledgers (MaintenancePayment +
         // UserCyclePayment) and reconciles per (villa, cycle) so historical
         // data captured under the capping bug still lands in the balance.
-        computeSocietyMoneySnapshot(prisma, societyId),
+        getCachedMoneySnapshot(prisma, societyId),
       ]);
 
       const allTimeCollected = money.maintenanceCashAllTime + money.additionalFundsAllTime;
@@ -2132,7 +2132,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
         orderBy: { receivedDate: "desc" },
         take: 25,
       }),
-      computeSocietyMoneySnapshot(prisma, societyId),
+      getCachedMoneySnapshot(prisma, societyId),
     ]);
 
     const maintenanceMap = new Map(monthMaintenance.map((m) => [m.villaId, m]));

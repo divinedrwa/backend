@@ -3,6 +3,45 @@ import { prisma as defaultPrisma } from "./prisma";
 
 type Db = Prisma.TransactionClient | typeof defaultPrisma;
 
+// ── In-memory snapshot cache ────────────────────────────────────────
+// The snapshot result contains closures, so Redis won't work. A short
+// in-memory TTL (90s) is enough to collapse the 3+ dashboard endpoints
+// that all call this function within the same page load into one DB hit.
+const SNAPSHOT_CACHE_TTL_MS = 90_000;
+type SnapshotCacheEntry = { expiresAt: number; snapshot: SocietyMoneySnapshot };
+const snapshotCache = new Map<string, SnapshotCacheEntry>();
+
+// Evict expired entries every 60s so the map doesn't grow unbounded.
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of snapshotCache) {
+    if (now > entry.expiresAt) snapshotCache.delete(key);
+  }
+}, 60_000).unref();
+
+/**
+ * Cached wrapper around computeSocietyMoneySnapshot.
+ * Use this from route handlers; use the raw function only in tests or
+ * when you explicitly need a fresh read (e.g. inside a transaction).
+ */
+export async function getCachedMoneySnapshot(
+  db: Db,
+  societyId: string,
+): Promise<SocietyMoneySnapshot> {
+  const now = Date.now();
+  const cached = snapshotCache.get(societyId);
+  if (cached && now < cached.expiresAt) return cached.snapshot;
+
+  const snapshot = await computeSocietyMoneySnapshot(db, societyId);
+  snapshotCache.set(societyId, { expiresAt: now + SNAPSHOT_CACHE_TTL_MS, snapshot });
+  return snapshot;
+}
+
+/** Evict the cached snapshot for a society (call after payments, expenses, etc.). */
+export function invalidateMoneySnapshotCache(societyId: string): void {
+  snapshotCache.delete(societyId);
+}
+
 /**
  * Canonical financial snapshot for a society.
  *

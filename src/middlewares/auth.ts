@@ -3,6 +3,62 @@ import { SocietyStatus, UserRole } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { verifyAuthToken } from "../utils/jwt";
 
+// ── Auth user cache ─────────────────────────────────────────────────
+// Short-lived in-memory cache for the per-request user+society lookup.
+// Saves a DB round-trip + JOIN on every authenticated request (~50-200ms
+// on serverless Postgres). TTL is 30s — role/status changes propagate
+// within half a minute, which is acceptable since deactivation and
+// role changes are rare admin actions.
+const AUTH_CACHE_TTL_MS = 30_000;
+type AuthCacheEntry = {
+  expiresAt: number;
+  user: {
+    id: string;
+    isActive: boolean;
+    role: UserRole;
+    societyId: string | null;
+    villaId: string | null;
+    unitId: string | null;
+    society: { status: SocietyStatus; archivedAt: Date | null } | null;
+  } | null;
+};
+const authUserCache = new Map<string, AuthCacheEntry>();
+
+// Periodic eviction so the map doesn't grow unbounded (runs every 60s).
+setInterval(() => {
+  const now = Date.now();
+  for (const [key, entry] of authUserCache) {
+    if (now > entry.expiresAt) authUserCache.delete(key);
+  }
+}, 60_000).unref();
+
+async function getAuthUser(userId: string) {
+  const now = Date.now();
+  const cached = authUserCache.get(userId);
+  if (cached && now < cached.expiresAt) return cached.user;
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: {
+      id: true,
+      isActive: true,
+      role: true,
+      societyId: true,
+      villaId: true,
+      unitId: true,
+      society: { select: { status: true, archivedAt: true } },
+    },
+  });
+
+  authUserCache.set(userId, { expiresAt: now + AUTH_CACHE_TTL_MS, user });
+  return user;
+}
+
+/** Evict a user from the auth cache (call on deactivation, role change, etc.). */
+export function invalidateAuthCache(userId: string): void {
+  authUserCache.delete(userId);
+}
+
 const SUPER_ALLOWED_PATH_PREFIXES = ["/api/auth", "/api/public", "/api/super"];
 
 function isSuperAdminAllowedPath(req: Request): boolean {
@@ -31,18 +87,7 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
   }
 
   try {
-    const user = await prisma.user.findUnique({
-      where: { id: payload.userId },
-      select: {
-        id: true,
-        isActive: true,
-        role: true,
-        societyId: true,
-        villaId: true,
-        unitId: true,
-        society: { select: { status: true, archivedAt: true } },
-      },
-    });
+    const user = await getAuthUser(payload.userId);
 
     if (!user) {
       res.status(401).json({ message: "Unauthorized" });

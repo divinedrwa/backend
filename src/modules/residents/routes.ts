@@ -8,7 +8,7 @@ import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { profileImageMemory } from "../../lib/profileImageUpload";
-import { computeSocietyMoneySnapshot } from "../../lib/societyFinance";
+import { getCachedMoneySnapshot } from "../../lib/societyFinance";
 import {
   buildPendingDuesFromLedger,
   reconcileVillaLedgersForRecentCycles,
@@ -217,7 +217,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
           },
         }),
         // Canonical society money snapshot.
-        computeSocietyMoneySnapshot(prisma, societyId),
+        getCachedMoneySnapshot(prisma, societyId),
       ]);
 
     const mergedAllTimeInflow = money.additionalFundsAllTime;

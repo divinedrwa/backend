@@ -1,5 +1,6 @@
 import "./config/env";
 import crypto from "crypto";
+import compression from "compression";
 import cors from "cors";
 import express from "express";
 import rateLimit from "express-rate-limit";
@@ -23,6 +24,10 @@ app.set("trust proxy", 1);
 // Security headers. CSP is left at helmet's default (off) because this
 // process serves an API + uploads; HTML responses come from the Next app.
 app.use(helmet({ crossOriginResourcePolicy: { policy: "cross-origin" } }));
+
+// Gzip/deflate compression — typically shrinks JSON responses ~10x,
+// critical for clients on slow or mobile connections.
+app.use(compression());
 
 /**
  * CORS allow-list. Set CORS_ORIGINS to a comma-separated list of origins
@@ -169,7 +174,11 @@ app.post("/api/v1/payments/phonepe/callback", webhookLimiter, async (req, res, n
 app.use("/uploads", (_req, res, next) => {
   res.setHeader("X-Content-Type-Options", "nosniff");
   next();
-}, express.static(path.join(process.cwd(), "uploads")));
+}, express.static(path.join(process.cwd(), "uploads"), {
+  maxAge: "7d",
+  etag: true,
+  lastModified: true,
+}));
 
 app.get("/health", async (_req, res) => {
   try {
