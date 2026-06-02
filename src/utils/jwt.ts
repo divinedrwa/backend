@@ -28,7 +28,7 @@ export function signAuthToken(payload: JwtPayload): string {
   } else {
     body.societyId = payload.societyId;
   }
-  return jwt.sign(body, env.JWT_SECRET, { expiresIn: "15m" });
+  return jwt.sign(body, env.JWT_SECRET, { expiresIn: "7d" });
 }
 
 export function verifyAuthToken(token: string): JwtPayload {
