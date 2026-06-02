@@ -62,15 +62,15 @@ async function resolveDisplayCycleRows(societyId: string, nowUtc: Date): Promise
 
   if (currentFY) {
     const latest = await prisma.billingCycle.findFirst({
-      where: { societyId, financialYearId: currentFY.id },
+      where: { societyId, financialYearId: currentFY.id, publishedAt: { not: null } },
       orderBy: { cycleKey: "desc" },
     });
     if (latest) return latest;
   }
 
-  // 2. Fallback: latest cycle in the society (no FY filter)
+  // 2. Fallback: latest published cycle in the society (no FY filter)
   const fallback = await prisma.billingCycle.findFirst({
-    where: { societyId },
+    where: { societyId, publishedAt: { not: null } },
     orderBy: { cycleKey: "desc" },
   });
   return fallback ?? null;

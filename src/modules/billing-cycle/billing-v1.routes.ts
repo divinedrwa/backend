@@ -423,8 +423,10 @@ router.get(
         res.status(404).json({ message: "Financial year not found" });
         return;
       }
+      // Residents only see published cycles; admins see everything.
+      const publishedFilter = isAdminLikeRole(auth.role) ? {} : { publishedAt: { not: null } };
       const cycles = await prisma.billingCycle.findMany({
-        where: { societyId: auth.societyId, financialYearId },
+        where: { societyId: auth.societyId, financialYearId, ...publishedFilter },
         orderBy: { cycleKey: "asc" },
         select: {
           id: true,
