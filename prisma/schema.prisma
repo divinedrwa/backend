@@ -1970,6 +1970,7 @@ model BillingCycle {
   lateFee            Decimal            @db.Decimal(12, 2) @default(0)
   gracePeriodDays    Int                @default(0)
   status             BillingCycleStatus
+  publishedAt           DateTime?
   windowOpenNotifiedAt  DateTime?
   dueReminderSentAt     DateTime?
   createdAt          DateTime           @default(now())

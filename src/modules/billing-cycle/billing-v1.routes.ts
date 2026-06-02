@@ -28,7 +28,8 @@ import {
 import { reconcileVillaLedgersForRecentCycles, invalidateReconcileCache } from "./services/resident-pending-dues";
 import { writeAdminAuditLog } from "./services/audit-log";
 import { notifyVillaMaintenanceLedgerUpdate } from "../../lib/maintenanceLedgerNotify";
-import { notifySociety } from "../../services/notification.service";
+import { notifySocietyRoles } from "../../services/notification.service";
+import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import phonePeRoutes from "./billing-v1-phonepe.routes";
 import razorpayRoutes from "./billing-v1-razorpay.routes";
 
@@ -193,25 +194,6 @@ router.post(
 
       await syncAllBillingCycleStatuses();
 
-      try {
-        await notifySociety(
-          societyId,
-          {
-            title: "New maintenance billing cycle",
-            body: `${title} (${cycleMonth}) has been generated. Please review and pay within the cycle window.`,
-            data: {
-              type: "BILLING_CYCLE_CREATED",
-              cycleId: cycle.id,
-              cycleKey: cycleMonth,
-            },
-          },
-          UserRole.RESIDENT,
-          { category: NotificationCategory.MAINTENANCE },
-        );
-      } catch (notifyErr) {
-        logger.error({ err: notifyErr }, "[billing-cycle.create] resident notify failed");
-      }
-
       res.status(201).json({ cycle });
     } catch (e) {
       next(e);
@@ -329,6 +311,64 @@ router.delete(
   }
 );
 
+router.post(
+  "/admin/cycles/:id/publish",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { id } = req.params;
+      const found = await prisma.billingCycle.findFirst({
+        where: { id, societyId: auth.societyId },
+      });
+      if (!found) {
+        res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+      if (found.publishedAt) {
+        res.status(409).json({ message: "Cycle is already published" });
+        return;
+      }
+
+      const cycle = await prisma.billingCycle.update({
+        where: { id },
+        data: { publishedAt: new Date() },
+      });
+
+      await writeAdminAuditLog({
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "billing_cycle.publish",
+        entityType: "BillingCycle",
+        entityId: id,
+        metadata: { cycleKey: found.cycleKey, title: found.title },
+      });
+
+      try {
+        await notifySocietyRoles({
+          societyId: auth.societyId,
+          roles: [...RESIDENT_LIKE_ROLES],
+          category: NotificationCategory.MAINTENANCE,
+          title: "New maintenance billing cycle",
+          body: `${found.title} (${found.cycleKey}) has been published. Please review and pay within the cycle window.`,
+          data: {
+            type: "BILLING_CYCLE_CREATED",
+            cycleId: cycle.id,
+            cycleKey: found.cycleKey,
+          },
+        });
+      } catch (notifyErr) {
+        logger.error({ err: notifyErr }, "[billing-cycle.publish] resident notify failed");
+      }
+
+      res.json({ cycle });
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
 /**
  * Financial years for the authenticated society (read-only).
  * Used by admin billing UI and resident mobile to pick a year before choosing a billing cycle month.
@@ -395,6 +435,7 @@ router.get(
           paymentEndDate: true,
           lateFee: true,
           gracePeriodDays: true,
+          publishedAt: true,
         },
       });
       const nowUtc = new Date();
@@ -408,6 +449,7 @@ router.get(
         paymentEndDate: c.paymentEndDate.toISOString(),
         lateFee: Number(c.lateFee),
         gracePeriodDays: c.gracePeriodDays,
+        publishedAt: c.publishedAt?.toISOString() ?? null,
       }));
       res.json({
         financialYear: { id: fy.id, label: fy.label },
@@ -502,6 +544,7 @@ router.get("/admin/cycles", requireAuth, requireRole(UserRole.ADMIN), async (req
           pendingUsersCount: Math.max(0, residentCount - paidCount),
           lateFee: Number(c.lateFee),
           gracePeriodDays: c.gracePeriodDays,
+          publishedAt: c.publishedAt?.toISOString() ?? null,
         };
       })
     );

@@ -4,14 +4,14 @@ import {
   BillingUserPaymentStatus,
   MaintenanceBillingRole,
   NotificationCategory,
-  UserRole,
 } from "@prisma/client";
 import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc } from "../domain/cycleStatus";
 import { computeAmountDueForCycle } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
-import { notifySociety, notifyUser } from "../../../services/notification.service";
+import { notifySocietyRoles, notifyUser } from "../../../services/notification.service";
+import { RESIDENT_LIKE_ROLES } from "../../../lib/residentLike";
 import { residentLikeRoleFilter } from "../../../lib/residentLike";
 import { getVillaCreditBalance } from "../../maintenance-management/credit-walker";
 import {
@@ -445,6 +445,9 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
   for (const c of cycles) {
     const status = deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate);
 
+    // Skip cron notifications for unpublished (draft) cycles
+    if (!c.publishedAt) continue;
+
     if (status === BillingCycleStatus.OPEN && !c.windowOpenNotifiedAt) {
       // Persist timestamp BEFORE sending push — if cron crashes mid-send, a
       // missed push is less harmful than duplicate pushes to all residents.
@@ -453,15 +456,14 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
         data: { windowOpenNotifiedAt: nowUtc },
       });
       try {
-        await notifySociety(
-          c.societyId,
-          {
-            title: "Maintenance payment window open",
-            body: `You can pay "${c.title}" until ${c.paymentEndDate.toISOString()}.`,
-            data: { type: "billing_window_open", cycleId: c.id },
-          },
-          UserRole.RESIDENT
-        );
+        await notifySocietyRoles({
+          societyId: c.societyId,
+          roles: [...RESIDENT_LIKE_ROLES],
+          category: NotificationCategory.MAINTENANCE,
+          title: "Maintenance payment window open",
+          body: `You can pay "${c.title}" until ${c.paymentEndDate.toISOString()}.`,
+          data: { type: "billing_window_open", cycleId: c.id },
+        });
       } catch {
         /* optional */
       }
@@ -475,15 +477,14 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
         data: { dueReminderSentAt: nowUtc },
       });
       try {
-        await notifySociety(
-          c.societyId,
-          {
-            title: "Maintenance due soon",
-            body: `Pay "${c.title}" before ${c.paymentEndDate.toISOString()} to avoid late fees.`,
-            data: { type: "billing_due_reminder", cycleId: c.id },
-          },
-          UserRole.RESIDENT
-        );
+        await notifySocietyRoles({
+          societyId: c.societyId,
+          roles: [...RESIDENT_LIKE_ROLES],
+          category: NotificationCategory.MAINTENANCE,
+          title: "Maintenance due soon",
+          body: `Pay "${c.title}" before ${c.paymentEndDate.toISOString()} to avoid late fees.`,
+          data: { type: "billing_due_reminder", cycleId: c.id },
+        });
       } catch {
         /* optional */
       }
