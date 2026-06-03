@@ -156,6 +156,8 @@ export async function computeSocietyMoneySnapshot(
         maintenanceCollectionCycleId: true,
         amount: true,
         paymentDate: true,
+        month: true,
+        year: true,
       },
     }),
     /**
@@ -191,7 +193,8 @@ export async function computeSocietyMoneySnapshot(
 
   const maintenanceCycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId },
-    select: { id: true, financialYearId: true, periodKey: true },
+    select: { id: true, financialYearId: true, periodKey: true, periodMonth: true, periodYear: true },
+    orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
   });
   const mcByFyKey = new Map<string, string>();
   for (const mc of maintenanceCycles) {
@@ -314,33 +317,60 @@ export async function computeSocietyMoneySnapshot(
     );
   }
 
-  // Advance credit pool: cash beyond expected, summed per villa.
-  // cashByVilla includes BOTH cycle-linked cash (from cashRows) and unlinked
-  // manual adjustments so totalAdvanceCredit reflects admin-managed credit.
-  const cashByVilla = new Map<string, number>();
-  const expectedByVilla = new Map<string, number>();
-  for (const row of cashRows) {
-    cashByVilla.set(row.villaId, (cashByVilla.get(row.villaId) ?? 0) + row.cashReceived);
+  // Advance credit pool: walk cycles per FY (matching the credit-walker
+  // logic) so unlinked adjustments are correctly scoped to their FY.
+  // Group cycles by FY, build period sets for unlinked payment matching.
+  const cyclesByFy = new Map<string, typeof maintenanceCycles>();
+  for (const mc of maintenanceCycles) {
+    let list = cyclesByFy.get(mc.financialYearId);
+    if (!list) { list = []; cyclesByFy.set(mc.financialYearId, list); }
+    list.push(mc);
   }
+  // Index unlinked payments by (month, year, villaId) for FY-scoped lookup
+  const unlinkedByVillaPeriod = new Map<string, number>();
   for (const mp of maintenancePayments) {
-    if (!mp.maintenanceCollectionCycleId) {
-      const v = Number(mp.amount);
-      if (Math.abs(v) > 0.005) {
-        cashByVilla.set(mp.villaId, (cashByVilla.get(mp.villaId) ?? 0) + v);
-      }
-    }
+    if (mp.maintenanceCollectionCycleId) continue;
+    const v = Number(mp.amount);
+    if (Math.abs(v) < 0.005) continue;
+    const k = `${mp.villaId}:${mp.month}:${mp.year}`;
+    unlinkedByVillaPeriod.set(k, (unlinkedByVillaPeriod.get(k) ?? 0) + v);
   }
+  // Per-villa linked cash indexed by (villaId, cycleId) — use the reconciled
+  // cashRows (max(MP, UCP)) so the advance-credit walk reflects actual cash
+  // received, not just the MP ledger which may be historically capped.
+  const linkedCashByVillaCycle = new Map<string, number>();
+  for (const row of cashRows) {
+    const k = `${row.villaId}:${row.cycleId}`;
+    linkedCashByVillaCycle.set(k, (linkedCashByVillaCycle.get(k) ?? 0) + row.cashReceived);
+  }
+  // Snapshot expected by (villaId, cycleId)
+  const snapExpected = new Map<string, { expected: number; status: string }>();
+  const villaIds = new Set<string>();
   for (const s of snapshots) {
-    if (s.status === "WAIVED") continue;
-    expectedByVilla.set(
-      s.villaId,
-      (expectedByVilla.get(s.villaId) ?? 0) + Number(s.expectedAmount),
-    );
+    snapExpected.set(`${s.villaId}:${s.cycleId}`, { expected: Number(s.expectedAmount), status: s.status });
+    villaIds.add(s.villaId);
   }
+  // Walk each FY's cycles per villa, matching the credit-walker semantics.
+  // Unlinked adjustments are injected at the cycle whose period matches their
+  // (month, year) — NOT seeded upfront — so a May payment can't retroactively
+  // pay April's cycle.
   let totalAdvanceCredit = 0;
-  for (const [villaId, cash] of cashByVilla) {
-    const expected = expectedByVilla.get(villaId) ?? 0;
-    if (cash > expected) totalAdvanceCredit += cash - expected;
+  for (const [, fyCycles] of cyclesByFy) {
+    for (const villaId of villaIds) {
+      let creditPool = 0;
+      // Walk cycles chronologically (already ordered by periodYear, periodMonth)
+      for (const cycle of fyCycles) {
+        // Inject unlinked adjustments that match this cycle's period
+        creditPool += unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+        const snap = snapExpected.get(`${villaId}:${cycle.id}`);
+        if (!snap) continue;
+        if (snap.status === "WAIVED") continue;
+        const cash = linkedCashByVillaCycle.get(`${villaId}:${cycle.id}`) ?? 0;
+        const available = cash + creditPool;
+        creditPool = Math.max(0, available - snap.expected);
+      }
+      totalAdvanceCredit += creditPool;
+    }
   }
 
   // Additional funds + expenses.

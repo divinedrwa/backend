@@ -27,6 +27,8 @@ type MaintenancePayment = {
   maintenanceCollectionCycleId: string | null;
   amount: number;
   paymentDate: Date;
+  month: number;
+  year: number;
 };
 type UserCyclePayment = {
   cycle: { id: string; financialYearId: string; cycleKey: string };
@@ -34,7 +36,7 @@ type UserCyclePayment = {
   amountPaid: number;
   paidAt: Date | null;
 };
-type MaintenanceCycle = { id: string; financialYearId: string; periodKey: string };
+type MaintenanceCycle = { id: string; financialYearId: string; periodKey: string; periodMonth: number; periodYear: number };
 type AdditionalFund = { amount: number; receivedDate: Date | null; month: number | null; year: number | null };
 type Expense = { amount: number; paymentDate: Date | null; month: number | null; year: number | null };
 
@@ -71,9 +73,9 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     // Cash truth = the bigger ledger (1300); user ledger absent here.
@@ -90,7 +92,7 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 370, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 370, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
       ],
       userCyclePayments: [
         {
@@ -100,7 +102,7 @@ describe("computeSocietyMoneySnapshot", () => {
           paidAt: new Date("2026-03-15"),
         },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     assert.equal(m.maintenanceCashAllTime, 1300);
@@ -116,7 +118,7 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
       ],
       userCyclePayments: [
         // Two primary residents, same villa, same amount mirrored.
@@ -133,7 +135,7 @@ describe("computeSocietyMoneySnapshot", () => {
           paidAt: new Date("2026-03-15"),
         },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     assert.equal(m.maintenanceCashAllTime, 1300);
@@ -146,13 +148,13 @@ describe("computeSocietyMoneySnapshot", () => {
     // the bank — they belong in the fund balance.
     const db = fakePrisma({
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: null, amount: 500, paymentDate: new Date("2026-03-10") },
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 370, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: null, amount: 500, paymentDate: new Date("2026-03-10"), month: 3, year: 2026 },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 370, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
       ],
       snapshots: [
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     assert.equal(m.maintenanceCashAllTime, 870);
@@ -165,9 +167,9 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
       additionalFunds: [
         { amount: 200, receivedDate: new Date("2026-03-20"), month: 3, year: 2026 },
       ],
@@ -188,7 +190,7 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 0, status: "WAIVED" },
       ],
       maintenancePayments: [],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     // Cycle counts as paid for progress, but no cash was received.
@@ -208,9 +210,9 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc2", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date("2026-03-15"), month: 3, year: 2026 },
         // ₹0 audit marker from apply-credit
-        { villaId: "v1", maintenanceCollectionCycleId: "mc2", amount: 0, paymentDate: new Date("2026-04-01") },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc2", amount: 0, paymentDate: new Date("2026-04-01"), month: 4, year: 2026 },
       ],
       userCyclePayments: [
         {
@@ -228,8 +230,8 @@ describe("computeSocietyMoneySnapshot", () => {
         },
       ],
       maintenanceCycles: [
-        { id: "mc1", financialYearId: "fy1", periodKey: "2026-03" },
-        { id: "mc2", financialYearId: "fy1", periodKey: "2026-04" },
+        { id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 },
+        { id: "mc2", financialYearId: "fy1", periodKey: "2026-04", periodMonth: 4, periodYear: 2026 },
       ],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
@@ -250,7 +252,7 @@ describe("computeSocietyMoneySnapshot", () => {
       ],
       maintenancePayments: [
         // Unlinked manual credit adjustment
-        { villaId: "v1", maintenanceCollectionCycleId: null, amount: 500, paymentDate: new Date("2026-03-10") },
+        { villaId: "v1", maintenanceCollectionCycleId: null, amount: 500, paymentDate: new Date("2026-03-10"), month: 3, year: 2026 },
       ],
       userCyclePayments: [
         // UCP synced from credit applied to cycle — NOT new cash
@@ -261,7 +263,7 @@ describe("computeSocietyMoneySnapshot", () => {
           paidAt: new Date("2026-03-10"),
         },
       ],
-      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03" }],
+      maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     // Only ₹500 of real cash, not ₹870 (500 unlinked + 370 UCP).
@@ -278,12 +280,12 @@ describe("computeSocietyMoneySnapshot", () => {
         { villaId: "v1", cycleId: "mc2", expectedAmount: 370, paidAmount: 370, status: "PAID" },
       ],
       maintenancePayments: [
-        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date(Date.UTC(2026, 2, 15)) },
-        { villaId: "v1", maintenanceCollectionCycleId: "mc2", amount: 370, paymentDate: new Date(Date.UTC(2026, 3, 5)) },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc1", amount: 1300, paymentDate: new Date(Date.UTC(2026, 2, 15)), month: 3, year: 2026 },
+        { villaId: "v1", maintenanceCollectionCycleId: "mc2", amount: 370, paymentDate: new Date(Date.UTC(2026, 3, 5)), month: 4, year: 2026 },
       ],
       maintenanceCycles: [
-        { id: "mc1", financialYearId: "fy1", periodKey: "2026-03" },
-        { id: "mc2", financialYearId: "fy1", periodKey: "2026-04" },
+        { id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 },
+        { id: "mc2", financialYearId: "fy1", periodKey: "2026-04", periodMonth: 4, periodYear: 2026 },
       ],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");

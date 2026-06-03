@@ -33,18 +33,20 @@ function buildUnlinkedFyFilter(
 }
 
 /**
- * Sum of manual credit adjustment payments that are NOT linked to any cycle,
- * scoped to a single financial year for a single villa.
+ * Unlinked adjustment payments for a single villa, grouped by (month, year).
+ * Returns a Map keyed by "month:year" → amount, so the walker can inject
+ * each period's adjustments at the matching cycle instead of seeding all upfront.
  */
-async function getUnlinkedAdjustmentTotal(
+async function getUnlinkedAdjustmentsByPeriod(
   db: ReadDb,
   params: {
     societyId: string;
     villaId: string;
     cyclePeriods: Array<{ month: number; year: number }>;
   },
-): Promise<number> {
-  const agg = await db.maintenancePayment.aggregate({
+): Promise<Map<string, number>> {
+  const rows = await db.maintenancePayment.groupBy({
+    by: ["month", "year"],
     where: buildUnlinkedFyFilter(
       params.societyId,
       params.cyclePeriods,
@@ -52,21 +54,27 @@ async function getUnlinkedAdjustmentTotal(
     ),
     _sum: { amount: true },
   });
-  return Number(agg._sum.amount || 0);
+  const result = new Map<string, number>();
+  for (const row of rows) {
+    const val = Number(row._sum.amount || 0);
+    if (Math.abs(val) > 0.005) result.set(`${row.month}:${row.year}`, val);
+  }
+  return result;
 }
 
 /**
- * Bulk variant: sum of unlinked adjustment payments per villa for a FY.
+ * Bulk variant: unlinked adjustment payments per (villa, month, year).
+ * Returns a Map keyed by "villaId:month:year" → amount.
  */
-async function getUnlinkedAdjustmentTotalsBulk(
+async function getUnlinkedAdjustmentsByPeriodBulk(
   db: ReadDb,
   params: {
     societyId: string;
     cyclePeriods: Array<{ month: number; year: number }>;
   },
 ): Promise<Map<string, number>> {
-  const agg = await db.maintenancePayment.groupBy({
-    by: ["villaId"],
+  const rows = await db.maintenancePayment.groupBy({
+    by: ["villaId", "month", "year"],
     where: buildUnlinkedFyFilter(
       params.societyId,
       params.cyclePeriods,
@@ -74,9 +82,9 @@ async function getUnlinkedAdjustmentTotalsBulk(
     _sum: { amount: true },
   });
   const result = new Map<string, number>();
-  for (const row of agg) {
+  for (const row of rows) {
     const val = Number(row._sum.amount || 0);
-    if (Math.abs(val) > 0.005) result.set(row.villaId, val);
+    if (Math.abs(val) > 0.005) result.set(`${row.villaId}:${row.month}:${row.year}`, val);
   }
   return result;
 }
@@ -147,7 +155,7 @@ export async function applyVillaCreditAcrossSnapshots(
   const cycleIds = cycles.map((c) => c.id);
   const cyclePeriods = allCycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
-  const [snapshots, cashAgg, unlinkedTotal] = await Promise.all([
+  const [snapshots, cashAgg, unlinkedByPeriod] = await Promise.all([
     tx.villaMaintenanceSnapshot.findMany({
       where: { villaId, cycleId: { in: cycleIds } },
     }),
@@ -160,7 +168,7 @@ export async function applyVillaCreditAcrossSnapshots(
       },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(tx, { societyId, villaId, cyclePeriods }),
+    getUnlinkedAdjustmentsByPeriod(tx, { societyId, villaId, cyclePeriods }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -174,9 +182,13 @@ export async function applyVillaCreditAcrossSnapshots(
     }
   }
 
-  // Seed with unlinked manual adjustments (not tied to any cycle).
-  let creditPool = unlinkedTotal;
+  // Inject unlinked adjustments at the matching cycle period (not all upfront)
+  // so a May adjustment can't retroactively pay April's cycle.
+  let creditPool = 0;
   for (const cycle of cycles) {
+    // Inject unlinked adjustments that match this cycle's period
+    creditPool += unlinkedByPeriod.get(`${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+
     const snap = snapByCycle.get(cycle.id);
     if (!snap) continue;
 
@@ -245,7 +257,7 @@ export async function getVillaCreditBalance(
   const cycleIds = cycles.map((c) => c.id);
   const cyclePeriods = cycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
-  const [snapshots, cashAgg, unlinkedTotal] = await Promise.all([
+  const [snapshots, cashAgg, unlinkedByPeriod] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
       where: { villaId, cycleId: { in: cycleIds } },
       select: { cycleId: true, expectedAmount: true, status: true },
@@ -255,7 +267,7 @@ export async function getVillaCreditBalance(
       where: { societyId, villaId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(db, { societyId, villaId, cyclePeriods }),
+    getUnlinkedAdjustmentsByPeriod(db, { societyId, villaId, cyclePeriods }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -266,9 +278,10 @@ export async function getVillaCreditBalance(
     }
   }
 
-  // Seed with unlinked manual adjustments.
-  let creditPool = unlinkedTotal;
+  // Inject unlinked adjustments at the matching cycle period (not all upfront).
+  let creditPool = 0;
   for (const cycle of cycles) {
+    creditPool += unlinkedByPeriod.get(`${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
     const snap = snapByCycle.get(cycle.id);
     if (!snap) continue;
     if (snap.status === "WAIVED") continue;
@@ -301,7 +314,7 @@ export async function getVillaCreditBalancesBulk(
   const cycleIds = cycles.map((c) => c.id);
   const cyclePeriods = cycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
-  const [snapshots, cashAgg, unlinkedTotals] = await Promise.all([
+  const [snapshots, cashAgg, unlinkedByPeriod] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
       where: { cycleId: { in: cycleIds } },
       select: { villaId: true, cycleId: true, expectedAmount: true, status: true },
@@ -311,7 +324,7 @@ export async function getVillaCreditBalancesBulk(
       where: { societyId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotalsBulk(db, { societyId, cyclePeriods }),
+    getUnlinkedAdjustmentsByPeriodBulk(db, { societyId, cyclePeriods }),
   ]);
 
   // Group snapshots per villa, keyed by cycleId
@@ -333,8 +346,10 @@ export async function getVillaCreditBalancesBulk(
 
   const result = new Map<string, number>();
   for (const [villaId, snapsPerCycle] of villaSnaps) {
-    let creditPool = unlinkedTotals.get(villaId) ?? 0;
+    // Inject unlinked adjustments at the matching cycle period (not all upfront).
+    let creditPool = 0;
     for (const cycle of cycles) {
+      creditPool += unlinkedByPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
       const snap = snapsPerCycle.get(cycle.id);
       if (!snap) continue;
       if (snap.status === "WAIVED") continue;
