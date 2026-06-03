@@ -1173,102 +1173,181 @@ async function ensureInvoiceNumber(paymentId: string, cycleKey: string): Promise
   return invoiceNumber;
 }
 
-function buildPaymentReceiptPdf(payment: NonNullable<PaymentForReceipt>): typeof PDFDocument.prototype {
-  const doc = new PDFDocument({ size: "A4", margin: 40 });
-  const pageWidth = doc.page.width - 80; // minus margins
+interface ReceiptData {
+  societyName: string;
+  societyAddress: string;
+  receiptNo: string;
+  receiptDate: string;
+  residentName: string;
+  unit: string;
+  contact: string;
+  billingPeriod: string;
+  cycleTitle: string;
+  amountDue: number;
+  amountPaid: number;
+  creditApplied: number;
+  paymentMode: string;
+  transactionId: string;
+  paidAt: string;
+  status: string;
+}
 
-  const societyName = payment.cycle.society?.name ?? "Society";
-  const societyAddress = payment.cycle.society?.address ?? "";
+function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.prototype {
+  const doc = new PDFDocument({ size: "A4", margin: 50 });
+  const pw = doc.page.width - 100;
+  const leftM = 50;
+  const rightEdge = leftM + pw;
 
-  // ── Header: Society name + address ──
-  doc.fontSize(16).font("Helvetica-Bold").text(societyName, { align: "center" });
-  if (societyAddress) {
-    doc.fontSize(9).font("Helvetica").text(societyAddress, { align: "center" });
+  const brandColor = "#1a56db";
+  const lightBg = "#f0f4ff";
+  const borderColor = "#d1d5db";
+  const textDark = "#111827";
+  const textMuted = "#6b7280";
+
+  // ── Accent bar at top ──
+  doc.rect(0, 0, doc.page.width, 6).fill(brandColor);
+  doc.y = 30;
+
+  // ── Header ──
+  doc.fontSize(20).font("Helvetica-Bold").fillColor(textDark)
+    .text(data.societyName.toUpperCase(), leftM, doc.y, { align: "center", width: pw });
+  if (data.societyAddress) {
+    doc.fontSize(9).font("Helvetica").fillColor(textMuted)
+      .text(data.societyAddress, leftM, doc.y, { align: "center", width: pw });
   }
+  doc.moveDown(0.6);
+
+  // ── Title bar ──
+  const titleY = doc.y;
+  doc.rect(leftM, titleY, pw, 30).fill(brandColor);
+  doc.fontSize(13).font("Helvetica-Bold").fillColor("#ffffff")
+    .text("PAYMENT RECEIPT", leftM, titleY + 8, { align: "center", width: pw });
+  doc.y = titleY + 40;
   doc.moveDown(0.3);
-  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.5).stroke();
+
+  // ── Receipt metadata (two-column header) ──
+  const metaY = doc.y;
+  doc.fontSize(9).font("Helvetica-Bold").fillColor(textDark)
+    .text("Receipt No:", leftM, metaY);
+  doc.font("Helvetica").fillColor(textMuted)
+    .text(data.receiptNo, leftM + 72, metaY);
+  doc.font("Helvetica-Bold").fillColor(textDark)
+    .text("Date:", rightEdge - 200, metaY);
+  doc.font("Helvetica").fillColor(textMuted)
+    .text(data.receiptDate, rightEdge - 165, metaY);
+  doc.y = metaY + 18;
+  doc.moveDown(0.3);
+
+  // ── Divider ──
+  doc.moveTo(leftM, doc.y).lineTo(rightEdge, doc.y).lineWidth(0.5).strokeColor(borderColor).stroke();
   doc.moveDown(0.6);
 
-  // ── Title + receipt metadata ──
-  doc.fontSize(13).font("Helvetica-Bold").text("PAYMENT RECEIPT", { align: "center" });
-  doc.moveDown(0.6);
+  // ── Billed To section ──
+  doc.fontSize(10).font("Helvetica-Bold").fillColor(brandColor).text("BILLED TO");
+  doc.moveDown(0.2);
 
-  const receiptNo = payment.invoiceNumber ?? payment.id;
-  const receiptDate = formatIst(payment.paidAt ?? payment.updatedAt);
+  const billedY = doc.y;
+  doc.rect(leftM, billedY, pw, 48).lineWidth(0.5).strokeColor(borderColor).fillAndStroke(lightBg, borderColor);
 
-  const labelX = 40;
-  const valueX = 190;
+  doc.fontSize(10).font("Helvetica-Bold").fillColor(textDark)
+    .text(data.residentName, leftM + 12, billedY + 8);
+  doc.fontSize(9).font("Helvetica").fillColor(textMuted)
+    .text(`Unit: ${data.unit}`, leftM + 12, billedY + 22);
+  if (data.contact) {
+    doc.text(`Contact: ${data.contact}`, leftM + 12, billedY + 34);
+  }
+  doc.y = billedY + 58;
+  doc.moveDown(0.4);
 
-  function row(label: string, value: string) {
-    doc.fontSize(10).font("Helvetica-Bold").text(label, labelX, doc.y, { continued: false });
-    doc.moveUp();
-    doc.font("Helvetica").text(value, valueX, doc.y);
+  // ── Payment Details table ──
+  doc.fontSize(10).font("Helvetica-Bold").fillColor(brandColor).text("PAYMENT DETAILS");
+  doc.moveDown(0.3);
+
+  const tableTop = doc.y;
+  const col1 = leftM;
+  const col2 = leftM + pw * 0.55;
+  const rowH = 26;
+
+  // Table header
+  doc.rect(col1, tableTop, pw, rowH).fill(brandColor);
+  doc.fontSize(9).font("Helvetica-Bold").fillColor("#ffffff")
+    .text("DESCRIPTION", col1 + 12, tableTop + 8)
+    .text("AMOUNT", col2, tableTop + 8, { width: pw * 0.45 - 12, align: "right" });
+
+  // Table rows
+  const rows: [string, string][] = [
+    ["Billing Period", data.billingPeriod],
+    ["Cycle", data.cycleTitle],
+    ["Amount Due", fmtInr(data.amountDue)],
+    ["Amount Paid", fmtInr(data.amountPaid)],
+  ];
+  if (data.creditApplied > 0) {
+    rows.push(["Advance Credit Applied", fmtInr(data.creditApplied)]);
+  }
+  rows.push(["Payment Mode", data.paymentMode]);
+  if (data.transactionId && data.transactionId !== "-") {
+    rows.push(["Transaction ID", data.transactionId]);
+  }
+  rows.push(["Paid At", data.paidAt]);
+
+  let y = tableTop + rowH;
+  for (let i = 0; i < rows.length; i++) {
+    const bg = i % 2 === 0 ? "#f9fafb" : "#ffffff";
+    doc.rect(col1, y, pw, rowH).lineWidth(0.3).fillAndStroke(bg, borderColor);
+    doc.fontSize(9).font("Helvetica").fillColor(textDark)
+      .text(rows[i][0], col1 + 12, y + 8)
+      .text(rows[i][1], col2, y + 8, { width: pw * 0.45 - 12, align: "right" });
+    y += rowH;
   }
 
-  row("Receipt No:", receiptNo);
-  doc.moveDown(0.1);
-  row("Date:", receiptDate);
-  doc.moveDown(0.4);
-  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
-  doc.moveDown(0.5);
+  // Total row
+  doc.rect(col1, y, pw, rowH + 4).fill(brandColor);
+  doc.fontSize(11).font("Helvetica-Bold").fillColor("#ffffff")
+    .text("STATUS", col1 + 12, y + 9)
+    .text(data.status, col2, y + 9, { width: pw * 0.45 - 12, align: "right" });
+  y += rowH + 4;
 
-  // ── Resident details ──
-  const residentName = payment.user?.name ?? "Unknown";
+  doc.y = y;
+  doc.moveDown(1.5);
+
+  // ── Footer ──
+  doc.moveTo(leftM, doc.y).lineTo(rightEdge, doc.y).lineWidth(0.3).strokeColor(borderColor).stroke();
+  doc.moveDown(0.5);
+  doc.fontSize(8).font("Helvetica").fillColor(textMuted)
+    .text("This is a computer-generated receipt. No signature required.", leftM, doc.y, { align: "center", width: pw });
+  doc.moveDown(0.3);
+  doc.text(`Generated on ${formatIst(new Date())}`, leftM, doc.y, { align: "center", width: pw });
+
+  // ── Bottom accent bar ──
+  doc.rect(0, doc.page.height - 6, doc.page.width, 6).fill(brandColor);
+
+  return doc;
+}
+
+/** Build ReceiptData from a UserCyclePayment record. */
+function receiptDataFromPayment(payment: NonNullable<PaymentForReceipt>): ReceiptData {
   const villa = payment.user?.villa;
   const unit = villa
     ? [villa.block, villa.villaNumber].filter(Boolean).join("-") || villa.villaNumber
     : "-";
-  const contact = (payment.user as { phone?: string | null } | null)?.phone ?? "";
-
-  row("Resident:", residentName);
-  doc.moveDown(0.1);
-  row("Unit:", unit);
-  if (contact) {
-    doc.moveDown(0.1);
-    row("Contact:", contact);
-  }
-  doc.moveDown(0.4);
-  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
-  doc.moveDown(0.5);
-
-  // ── Payment details ──
-  const billingPeriod = formatCycleKeyLabel(payment.cycle.cycleKey);
-  const cycleTitle = payment.cycle.title;
-  const amountDue = fmtInr(Number(payment.cycle.amount));
-  const amountPaid = fmtInr(Number(payment.amountPaid));
-  const source = payment.source === "CASH_MANUAL" ? "Cash" : "Online";
-  const txnId = payment.paymentGatewayPaymentId ?? "-";
-  const paidAt = formatIst(payment.paidAt);
-
-  row("Billing Period:", billingPeriod);
-  doc.moveDown(0.1);
-  row("Cycle:", cycleTitle);
-  doc.moveDown(0.1);
-  row("Amount Due:", amountDue);
-  doc.moveDown(0.1);
-  row("Amount Paid:", amountPaid);
-  doc.moveDown(0.1);
-  row("Payment Mode:", source);
-  if (payment.paymentGatewayPaymentId) {
-    doc.moveDown(0.1);
-    row("Transaction ID:", txnId);
-  }
-  doc.moveDown(0.1);
-  row("Paid At:", paidAt);
-  doc.moveDown(0.4);
-  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
-  doc.moveDown(0.6);
-
-  // ── Status badge ──
-  const status = payment.paymentStatus === BillingUserPaymentStatus.SUCCESS ? "PAID" : String(payment.paymentStatus);
-  doc.fontSize(12).font("Helvetica-Bold").text(`Status: ${status}`, { align: "center" });
-  doc.moveDown(1.2);
-
-  // ── Footer ──
-  doc.fontSize(8).font("Helvetica").fillColor("#666666")
-    .text("This is a computer-generated receipt. No signature required.", { align: "center" });
-
-  return doc;
+  return {
+    societyName: payment.cycle.society?.name ?? "Society",
+    societyAddress: payment.cycle.society?.address ?? "",
+    receiptNo: payment.invoiceNumber ?? payment.id,
+    receiptDate: formatIst(payment.paidAt ?? payment.updatedAt),
+    residentName: payment.user?.name ?? "Resident",
+    unit,
+    contact: (payment.user as { phone?: string | null } | null)?.phone ?? "",
+    billingPeriod: formatCycleKeyLabel(payment.cycle.cycleKey),
+    cycleTitle: payment.cycle.title,
+    amountDue: Number(payment.cycle.amount),
+    amountPaid: Number(payment.amountPaid),
+    creditApplied: 0,
+    paymentMode: payment.source === "CASH_MANUAL" ? "Cash" : "Online",
+    transactionId: payment.paymentGatewayPaymentId ?? "-",
+    paidAt: formatIst(payment.paidAt),
+    status: payment.paymentStatus === BillingUserPaymentStatus.SUCCESS ? "PAID" : String(payment.paymentStatus),
+  };
 }
 
 // ── Receipt by cycle (resident looks up by cycleId) ──────────────────
@@ -1285,34 +1364,83 @@ router.get(
         return;
       }
 
-      let userId: string;
-      if (isAdminLikeRole(auth.role)) {
-        const qUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
-        if (!qUserId) {
-          res.status(400).json({ message: "userId is required for admin" });
-          return;
-        }
-        userId = qUserId;
-      } else {
-        userId = auth.userId;
-      }
+      // For admins: use userId query param if provided (lookup another resident),
+      // otherwise fall back to auth.userId (admin downloading own receipt).
+      const qUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+      const userId = isAdminLikeRole(auth.role) && qUserId ? qUserId : auth.userId;
 
+      // ── Strategy 1: Direct UserCyclePayment lookup ──
       const payment = await fetchPaymentForReceipt({
         userId,
         cycleId,
         cycle: { societyId: auth.societyId },
         paymentStatus: BillingUserPaymentStatus.SUCCESS,
       });
-      if (!payment) {
-        res.status(404).json({ message: "No successful payment found for this cycle" });
-        return;
+
+      let data: ReceiptData;
+      let filename: string;
+
+      if (payment) {
+        const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
+        payment.invoiceNumber = invoiceNumber;
+        data = receiptDataFromPayment(payment);
+        filename = `receipt-${payment.cycle.cycleKey}-${payment.user?.villa?.villaNumber ?? "unit"}.pdf`;
+      } else {
+        // ── Strategy 2: Build receipt from ledger + user profile ──
+        // This handles cases where payment was recorded via the old
+        // maintenance management system (VillaMaintenanceSnapshot) but no
+        // UserCyclePayment row exists for this user.
+        const ledger = await computeUserBillingLedger(auth.societyId, userId);
+        const ledgerRow = ledger.cycles.find((r) => r.cycleId === cycleId);
+        if (!ledgerRow || (ledgerRow.cashPaidAmount <= 0.005 && ledgerRow.paidAmount <= 0.005)) {
+          res.status(404).json({ message: "No successful payment found for this cycle" });
+          return;
+        }
+
+        const [cycle, user] = await Promise.all([
+          prisma.billingCycle.findFirst({
+            where: { id: cycleId, societyId: auth.societyId },
+            include: { society: { select: { name: true, address: true } } },
+          }),
+          prisma.user.findFirst({
+            where: { id: userId, societyId: auth.societyId },
+            include: { villa: { select: { villaNumber: true, ownerName: true, block: true } } },
+          }),
+        ]);
+        if (!cycle) {
+          res.status(404).json({ message: "Billing cycle not found" });
+          return;
+        }
+
+        const villa = user?.villa;
+        const unit = villa
+          ? [villa.block, villa.villaNumber].filter(Boolean).join("-") || villa.villaNumber
+          : "-";
+
+        const creditApplied = Math.max(0, Math.min(ledgerRow.expectedAmount, ledgerRow.balanceBefore));
+
+        data = {
+          societyName: cycle.society?.name ?? "Society",
+          societyAddress: cycle.society?.address ?? "",
+          receiptNo: `RCP-${cycle.cycleKey}-${Date.now().toString(36).slice(-6).toUpperCase()}`,
+          receiptDate: formatIst(ledgerRow.paidAt ? new Date(ledgerRow.paidAt) : new Date()),
+          residentName: user?.name ?? "Resident",
+          unit,
+          contact: (user as { phone?: string | null } | null)?.phone ?? "",
+          billingPeriod: formatCycleKeyLabel(cycle.cycleKey),
+          cycleTitle: cycle.title,
+          amountDue: ledgerRow.expectedAmount,
+          amountPaid: ledgerRow.cashPaidAmount,
+          creditApplied,
+          paymentMode: "Recorded by Admin",
+          transactionId: "-",
+          paidAt: formatIst(ledgerRow.paidAt ? new Date(ledgerRow.paidAt) : null),
+          status: ledgerRow.paidAmount >= ledgerRow.expectedAmount - 0.005 ? "PAID" : "PARTIAL",
+        };
+        filename = `receipt-${cycle.cycleKey}-${villa?.villaNumber ?? "unit"}.pdf`;
       }
 
-      const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
-      payment.invoiceNumber = invoiceNumber;
-
-      const doc = buildPaymentReceiptPdf(payment);
-      const filename = `receipt-${payment.cycle.cycleKey}-${payment.user?.villa?.villaNumber ?? "unit"}.pdf`;
+      const doc = buildPaymentReceiptPdfFromData(data);
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
       doc.pipe(res as unknown as NodeJS.WritableStream);
@@ -1346,7 +1474,8 @@ router.get(
       const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
       payment.invoiceNumber = invoiceNumber;
 
-      const doc = buildPaymentReceiptPdf(payment);
+      const data = receiptDataFromPayment(payment);
+      const doc = buildPaymentReceiptPdfFromData(data);
       const filename = `invoice-${paymentId}.pdf`;
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
