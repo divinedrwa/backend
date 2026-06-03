@@ -86,7 +86,9 @@ describe("computeSocietyMoneySnapshot", () => {
 
   it("recovers historical capping by reading UserCyclePayment when MP was capped", async () => {
     // The exact bug pattern: pre-fix mark-cash wrote MP capped at expected,
-    // but UCP got the full amount. The snapshot must surface the full cash.
+    // but UCP got the full amount. The snapshot must surface the full cash
+    // for maintenanceCashAllTime, but totalAdvanceCredit uses MP only
+    // (matching the credit-walker) to avoid UCP inflation from credit sync.
     const db = fakePrisma({
       snapshots: [
         { villaId: "v1", cycleId: "mc1", expectedAmount: 370, paidAmount: 370, status: "PAID" },
@@ -105,8 +107,10 @@ describe("computeSocietyMoneySnapshot", () => {
       maintenanceCycles: [{ id: "mc1", financialYearId: "fy1", periodKey: "2026-03", periodMonth: 3, periodYear: 2026 }],
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
+    // Cash uses reconciled max(MP, UCP) = 1300
     assert.equal(m.maintenanceCashAllTime, 1300);
-    assert.equal(m.totalAdvanceCredit, 930);
+    // Advance credit uses MP-only: 370 cash − 370 expected = 0
+    assert.equal(m.totalAdvanceCredit, 0);
   });
 
   it("does not double-count when the same cash hits two PRIMARY residents' UCP rows", async () => {

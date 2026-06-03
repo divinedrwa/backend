@@ -335,13 +335,15 @@ export async function computeSocietyMoneySnapshot(
     const k = `${mp.villaId}:${mp.month}:${mp.year}`;
     unlinkedByVillaPeriod.set(k, (unlinkedByVillaPeriod.get(k) ?? 0) + v);
   }
-  // Per-villa linked cash indexed by (villaId, cycleId) — use the reconciled
-  // cashRows (max(MP, UCP)) so the advance-credit walk reflects actual cash
-  // received, not just the MP ledger which may be historically capped.
+  // Per-villa linked cash indexed by (villaId, cycleId) — use raw MP sums
+  // (NOT reconciled cashRows). The credit-walker uses MP only, and we must
+  // match it. Using reconciled max(MP, UCP) inflates the credit when a cycle
+  // has both credit-applied UCP and real cash MP (UCP = credit + cash > MP).
   const linkedCashByVillaCycle = new Map<string, number>();
-  for (const row of cashRows) {
-    const k = `${row.villaId}:${row.cycleId}`;
-    linkedCashByVillaCycle.set(k, (linkedCashByVillaCycle.get(k) ?? 0) + row.cashReceived);
+  for (const mp of maintenancePayments) {
+    if (!mp.maintenanceCollectionCycleId) continue;
+    const k = `${mp.villaId}:${mp.maintenanceCollectionCycleId}`;
+    linkedCashByVillaCycle.set(k, (linkedCashByVillaCycle.get(k) ?? 0) + Number(mp.amount));
   }
   // Snapshot expected by (villaId, cycleId)
   const snapExpected = new Map<string, { expected: number; status: string }>();
