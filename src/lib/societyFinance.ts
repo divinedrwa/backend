@@ -317,16 +317,12 @@ export async function computeSocietyMoneySnapshot(
     );
   }
 
-  // Advance credit pool: walk cycles per FY (matching the credit-walker
-  // logic) so unlinked adjustments are correctly scoped to their FY.
-  // Group cycles by FY, build period sets for unlinked payment matching.
-  const cyclesByFy = new Map<string, typeof maintenanceCycles>();
-  for (const mc of maintenanceCycles) {
-    let list = cyclesByFy.get(mc.financialYearId);
-    if (!list) { list = []; cyclesByFy.set(mc.financialYearId, list); }
-    list.push(mc);
-  }
-  // Index unlinked payments by (month, year, villaId) for FY-scoped lookup
+  // Advance credit pool: single global walk across ALL cycles chronologically.
+  // Unlike the credit-walker (which operates per-FY for admin actions), the
+  // dashboard snapshot must let credit carry across FY boundaries — a villa's
+  // overpayment in FY1 can cover dues in FY2.
+  //
+  // Index unlinked payments by (villaId, month, year) for per-period injection.
   const unlinkedByVillaPeriod = new Map<string, number>();
   for (const mp of maintenancePayments) {
     if (mp.maintenanceCollectionCycleId) continue;
@@ -352,39 +348,21 @@ export async function computeSocietyMoneySnapshot(
     snapExpected.set(`${s.villaId}:${s.cycleId}`, { expected: Number(s.expectedAmount), status: s.status });
     villaIds.add(s.villaId);
   }
-  // Walk each FY's cycles per villa, matching the credit-walker semantics.
-  // Unlinked adjustments are injected at the cycle whose period matches their
-  // (month, year) — NOT seeded upfront — so a May payment can't retroactively
-  // pay April's cycle.
+  // Walk ALL cycles in chronological order per villa. Unlinked adjustments
+  // are injected at the cycle whose period matches their (month, year).
   let totalAdvanceCredit = 0;
-  const _debugCredits: Array<{ villaId: string; fy: string; credit: number; detail: string }> = [];
-  for (const [fyId, fyCycles] of cyclesByFy) {
-    for (const villaId of villaIds) {
-      let creditPool = 0;
-      const steps: string[] = [];
-      // Walk cycles chronologically (already ordered by periodYear, periodMonth)
-      for (const cycle of fyCycles) {
-        // Inject unlinked adjustments that match this cycle's period
-        const unlinked = unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
-        if (unlinked) steps.push(`unlinked(${cycle.periodMonth}/${cycle.periodYear})=+${unlinked}`);
-        creditPool += unlinked;
-        const snap = snapExpected.get(`${villaId}:${cycle.id}`);
-        if (!snap) continue;
-        if (snap.status === "WAIVED") { steps.push(`${cycle.periodMonth}/${cycle.periodYear}:WAIVED`); continue; }
-        const cash = linkedCashByVillaCycle.get(`${villaId}:${cycle.id}`) ?? 0;
-        const available = cash + creditPool;
-        const consumed = Math.min(snap.expected, Math.max(0, available));
-        creditPool = Math.max(0, available - snap.expected);
-        if (cash > 0 || creditPool > 0) steps.push(`${cycle.periodMonth}/${cycle.periodYear}:cash=${cash},exp=${snap.expected},pool=${creditPool}`);
-      }
-      if (creditPool > 0) {
-        _debugCredits.push({ villaId, fy: fyId, credit: creditPool, detail: steps.join(' | ') });
-      }
-      totalAdvanceCredit += creditPool;
+  for (const villaId of villaIds) {
+    let creditPool = 0;
+    for (const cycle of maintenanceCycles) {
+      // Inject unlinked adjustments that match this cycle's period
+      creditPool += unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+      const snap = snapExpected.get(`${villaId}:${cycle.id}`);
+      if (!snap) continue;
+      if (snap.status === "WAIVED") continue;
+      const cash = linkedCashByVillaCycle.get(`${villaId}:${cycle.id}`) ?? 0;
+      creditPool = Math.max(0, cash + creditPool - snap.expected);
     }
-  }
-  if (_debugCredits.length > 0) {
-    console.log('[ADVANCE_CREDIT_DEBUG] totalAdvanceCredit=', totalAdvanceCredit, JSON.stringify(_debugCredits, null, 2));
+    totalAdvanceCredit += creditPool;
   }
 
   // Additional funds + expenses.
