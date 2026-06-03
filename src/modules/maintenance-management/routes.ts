@@ -1085,7 +1085,6 @@ router.post(
             // the walker won't silently apply it to any cycle's expected amount.
             maintenanceCollectionCycleId: null,
             villaMaintenanceSnapshotId: null,
-            financialYearId: cycle.financialYearId,
           },
         });
 

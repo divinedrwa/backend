@@ -5,40 +5,72 @@ type Tx = Prisma.TransactionClient;
 type ReadDb = PrismaClient | Tx;
 
 /**
- * Sum of manual credit adjustment payments that are NOT linked to any cycle.
- * These represent admin-added or admin-deducted credit that should seed the
- * credit pool before the cycle walk begins.
+ * Build a Prisma filter that matches unlinked payments belonging to the
+ * given financial year by matching their (month, year) against cycle periods.
+ * This works whether or not the `financialYearId` migration has been applied.
+ */
+function buildUnlinkedFyFilter(
+  societyId: string,
+  cyclePeriods: Array<{ month: number; year: number }>,
+  villaId?: string,
+): Prisma.MaintenancePaymentWhereInput {
+  const base: Prisma.MaintenancePaymentWhereInput = {
+    societyId,
+    maintenanceCollectionCycleId: null,
+    ...(villaId ? { villaId } : {}),
+  };
+  // De-duplicate (month, year) pairs
+  const seen = new Set<string>();
+  const periodFilters: Prisma.MaintenancePaymentWhereInput[] = [];
+  for (const p of cyclePeriods) {
+    const key = `${p.month}-${p.year}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    periodFilters.push({ month: p.month, year: p.year });
+  }
+  if (periodFilters.length === 0) return { ...base, id: "__impossible__" };
+  return { ...base, OR: periodFilters };
+}
+
+/**
+ * Sum of manual credit adjustment payments that are NOT linked to any cycle,
+ * scoped to a single financial year for a single villa.
  */
 async function getUnlinkedAdjustmentTotal(
   db: ReadDb,
-  params: { societyId: string; villaId: string; financialYearId: string },
+  params: {
+    societyId: string;
+    villaId: string;
+    cyclePeriods: Array<{ month: number; year: number }>;
+  },
 ): Promise<number> {
   const agg = await db.maintenancePayment.aggregate({
-    where: {
-      societyId: params.societyId,
-      villaId: params.villaId,
-      maintenanceCollectionCycleId: null,
-      financialYearId: params.financialYearId,
-    },
+    where: buildUnlinkedFyFilter(
+      params.societyId,
+      params.cyclePeriods,
+      params.villaId,
+    ),
     _sum: { amount: true },
   });
   return Number(agg._sum.amount || 0);
 }
 
 /**
- * Bulk variant: sum of unlinked adjustment payments per villa.
+ * Bulk variant: sum of unlinked adjustment payments per villa for a FY.
  */
 async function getUnlinkedAdjustmentTotalsBulk(
   db: ReadDb,
-  params: { societyId: string; financialYearId: string },
+  params: {
+    societyId: string;
+    cyclePeriods: Array<{ month: number; year: number }>;
+  },
 ): Promise<Map<string, number>> {
   const agg = await db.maintenancePayment.groupBy({
     by: ["villaId"],
-    where: {
-      societyId: params.societyId,
-      maintenanceCollectionCycleId: null,
-      financialYearId: params.financialYearId,
-    },
+    where: buildUnlinkedFyFilter(
+      params.societyId,
+      params.cyclePeriods,
+    ),
     _sum: { amount: true },
   });
   const result = new Map<string, number>();
@@ -113,6 +145,7 @@ export async function applyVillaCreditAcrossSnapshots(
   }
 
   const cycleIds = cycles.map((c) => c.id);
+  const cyclePeriods = allCycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
   const [snapshots, cashAgg, unlinkedTotal] = await Promise.all([
     tx.villaMaintenanceSnapshot.findMany({
@@ -127,7 +160,7 @@ export async function applyVillaCreditAcrossSnapshots(
       },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(tx, { societyId, villaId, financialYearId }),
+    getUnlinkedAdjustmentTotal(tx, { societyId, villaId, cyclePeriods }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -205,11 +238,12 @@ export async function getVillaCreditBalance(
   const cycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId, financialYearId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-    select: { id: true },
+    select: { id: true, periodMonth: true, periodYear: true },
   });
   if (cycles.length === 0) return { creditPool: 0 };
 
   const cycleIds = cycles.map((c) => c.id);
+  const cyclePeriods = cycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
   const [snapshots, cashAgg, unlinkedTotal] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
@@ -221,7 +255,7 @@ export async function getVillaCreditBalance(
       where: { societyId, villaId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(db, { societyId, villaId, financialYearId }),
+    getUnlinkedAdjustmentTotal(db, { societyId, villaId, cyclePeriods }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -260,11 +294,12 @@ export async function getVillaCreditBalancesBulk(
   const cycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId, financialYearId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-    select: { id: true },
+    select: { id: true, periodMonth: true, periodYear: true },
   });
   if (cycles.length === 0) return new Map();
 
   const cycleIds = cycles.map((c) => c.id);
+  const cyclePeriods = cycles.map((c) => ({ month: c.periodMonth, year: c.periodYear }));
 
   const [snapshots, cashAgg, unlinkedTotals] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
@@ -276,7 +311,7 @@ export async function getVillaCreditBalancesBulk(
       where: { societyId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotalsBulk(db, { societyId, financialYearId }),
+    getUnlinkedAdjustmentTotalsBulk(db, { societyId, cyclePeriods }),
   ]);
 
   // Group snapshots per villa, keyed by cycleId
