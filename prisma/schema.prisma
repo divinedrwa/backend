@@ -520,6 +520,8 @@ model MaintenancePayment {
   maintenanceCollectionCycle   MaintenanceCollectionCycle? @relation(fields: [maintenanceCollectionCycleId], references: [id], onDelete: SetNull)
   villaMaintenanceSnapshotId   String?
   villaMaintenanceSnapshot     VillaMaintenanceSnapshot?   @relation(fields: [villaMaintenanceSnapshotId], references: [id], onDelete: SetNull)
+  financialYearId              String?
+  financialYear                FinancialYear?              @relation(fields: [financialYearId], references: [id], onDelete: SetNull)
 
   @@index([societyId])
   @@index([villaId])
@@ -530,6 +532,7 @@ model MaintenancePayment {
   @@index([villaMaintenanceSnapshotId])
   @@index([idempotencyKey])
   @@index([villaId, month, year])
+  @@index([financialYearId])
 }
 
 // ==========================================
@@ -550,6 +553,7 @@ model FinancialYear {
   cycles MaintenanceCollectionCycle[]
   billingCycles BillingCycle[]
   expenses Expense[]
+  maintenancePayments MaintenancePayment[]
 
   @@index([societyId])
   @@index([societyId, status])

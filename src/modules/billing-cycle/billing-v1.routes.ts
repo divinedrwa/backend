@@ -746,10 +746,6 @@ router.post(
         res.status(404).json({ message: "Cycle not found" });
         return;
       }
-      if (cycle.status === "CLOSED") {
-        res.status(400).json({ message: "Cannot record cash on a closed billing cycle" });
-        return;
-      }
       const user = await prisma.user.findFirst({
         where: { id: userId, societyId: auth.societyId, ...residentLikeRoleFilter },
       });
@@ -886,10 +882,6 @@ router.post(
       });
       if (!cycle) {
         res.status(404).json({ message: "Cycle not found" });
-        return;
-      }
-      if (cycle.status === "CLOSED") {
-        res.status(400).json({ message: "Cannot waive late fees on a closed billing cycle" });
         return;
       }
 

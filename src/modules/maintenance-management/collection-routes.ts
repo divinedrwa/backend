@@ -292,9 +292,6 @@ router.put("/cycles/:cycleId/rule", validateBody(upsertRuleSchema), async (req, 
       where: { id: cycleId, societyId },
     });
     if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-    if (cycle.status !== "OPEN") {
-      return res.status(400).json({ message: "Only OPEN cycles can be modified" });
-    }
 
     if (body.ruleType === "FIXED_PER_FLAT" && body.baseAmount == null) {
       return res.status(400).json({ message: "baseAmount required for FIXED_PER_FLAT" });
@@ -337,9 +334,6 @@ router.put(
         where: { id: cycleId, societyId },
       });
       if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-      if (cycle.status !== "OPEN") {
-        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
-      }
       const villa = await prisma.villa.findFirst({
         where: { id: body.villaId, societyId },
         select: { id: true, area: true, monthlyMaintenance: true },
@@ -534,9 +528,6 @@ router.put(
         where: { id: cycleId, societyId },
       });
       if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-      if (cycle.status !== "OPEN") {
-        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
-      }
 
       const [snapshot, villa, villaExclusion] = await Promise.all([
         prisma.villaMaintenanceSnapshot.findUnique({
@@ -1006,9 +997,6 @@ router.post("/cycles/:cycleId/generate-snapshots", async (req, res, next) => {
     if (!cycle.rule) {
       return res.status(400).json({ message: "Configure a rule before generating snapshots" });
     }
-    if (cycle.status !== "OPEN") {
-      return res.status(400).json({ message: "Only OPEN cycles can (re)generate snapshots" });
-    }
 
     const payCount = await prisma.maintenancePayment.count({
       where: { maintenanceCollectionCycleId: cycleId },
@@ -1397,9 +1385,6 @@ router.post(
         where: { id: cycleId, societyId },
       });
       if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-      if (cycle.status !== "OPEN") {
-        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
-      }
 
       const villa = await prisma.villa.findFirst({
         where: { id: body.villaId, societyId },
@@ -1478,9 +1463,6 @@ router.delete(
         where: { id: cycleId, societyId },
       });
       if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-      if (cycle.status !== "OPEN") {
-        return res.status(400).json({ message: "Only OPEN cycles can be edited" });
-      }
 
       const exclusion = await prisma.cycleVillaExclusion.findUnique({
         where: { cycleId_villaId: { cycleId, villaId } },

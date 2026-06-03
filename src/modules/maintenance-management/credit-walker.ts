@@ -11,13 +11,14 @@ type ReadDb = PrismaClient | Tx;
  */
 async function getUnlinkedAdjustmentTotal(
   db: ReadDb,
-  params: { societyId: string; villaId: string },
+  params: { societyId: string; villaId: string; financialYearId: string },
 ): Promise<number> {
   const agg = await db.maintenancePayment.aggregate({
     where: {
       societyId: params.societyId,
       villaId: params.villaId,
       maintenanceCollectionCycleId: null,
+      financialYearId: params.financialYearId,
     },
     _sum: { amount: true },
   });
@@ -29,13 +30,14 @@ async function getUnlinkedAdjustmentTotal(
  */
 async function getUnlinkedAdjustmentTotalsBulk(
   db: ReadDb,
-  params: { societyId: string },
+  params: { societyId: string; financialYearId: string },
 ): Promise<Map<string, number>> {
   const agg = await db.maintenancePayment.groupBy({
     by: ["villaId"],
     where: {
       societyId: params.societyId,
       maintenanceCollectionCycleId: null,
+      financialYearId: params.financialYearId,
     },
     _sum: { amount: true },
   });
@@ -125,7 +127,7 @@ export async function applyVillaCreditAcrossSnapshots(
       },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(tx, { societyId, villaId }),
+    getUnlinkedAdjustmentTotal(tx, { societyId, villaId, financialYearId }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -219,7 +221,7 @@ export async function getVillaCreditBalance(
       where: { societyId, villaId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotal(db, { societyId, villaId }),
+    getUnlinkedAdjustmentTotal(db, { societyId, villaId, financialYearId }),
   ]);
 
   const snapByCycle = new Map(snapshots.map((s) => [s.cycleId, s]));
@@ -274,7 +276,7 @@ export async function getVillaCreditBalancesBulk(
       where: { societyId, maintenanceCollectionCycleId: { in: cycleIds } },
       _sum: { amount: true },
     }),
-    getUnlinkedAdjustmentTotalsBulk(db, { societyId }),
+    getUnlinkedAdjustmentTotalsBulk(db, { societyId, financialYearId }),
   ]);
 
   // Group snapshots per villa, keyed by cycleId
