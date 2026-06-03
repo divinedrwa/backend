@@ -973,7 +973,7 @@ router.get('/analytics/top-categories', async (req, res, next) => {
       _sum: { amount: true },
       _count: { id: true },
       orderBy: { _sum: { amount: 'desc' } },
-      take: parseInt(limit as string)
+      take: Math.min(Math.max(parseInt(limit as string) || 20, 1), 200)
     });
 
     // Get category details

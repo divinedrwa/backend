@@ -276,7 +276,7 @@ router.get("/pending-list", async (req, res, next) => {
         },
       },
       orderBy: { createdAt: "asc" }, // Oldest first
-      take: parseInt(limit as string),
+      take: Math.min(Math.max(parseInt(limit as string) || 50, 1), 200),
     });
 
     const now = Date.now();

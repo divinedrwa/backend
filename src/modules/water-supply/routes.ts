@@ -95,7 +95,7 @@ router.get("/events", requireAuth, async (req, res, next) => {
         },
       },
       orderBy: { createdAt: "desc" },
-      take: limit ? parseInt(limit as string) : 50,
+      take: Math.min(Math.max(parseInt(limit as string) || 50, 1), 200),
     });
 
     return res.json({ events });

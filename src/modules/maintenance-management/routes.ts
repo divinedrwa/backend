@@ -2774,4 +2774,645 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
   }
 });
 
+// =====================================================
+// FINANCIAL STATEMENTS — Balance Sheet, Trial Balance,
+// Budget vs Actual, and PDF downloads for all reports
+// =====================================================
+
+/**
+ * GET /api/maintenance-management/balance-sheet/:year
+ *
+ * Generates a balance sheet as of end-of-year (or current date for running year).
+ * Assets = Fund Balance + Outstanding Dues
+ * Liabilities = Advance Credit Pool (resident overpayments)
+ * Fund = accumulated surplus carried forward
+ */
+router.get("/balance-sheet/:year", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
+
+    // Income & expenses for THIS year only (for current-year surplus)
+    const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
+      where: { societyId, year },
+      select: { month: true, totalExpenses: true },
+    });
+    let yearExpenses = 0;
+    for (const s of expenseSummaries) {
+      yearExpenses += Number(s.totalExpenses);
+    }
+
+    let yearIncome = 0;
+    for (let m = 1; m <= 12; m++) {
+      yearIncome += snap.maintenanceCashForMonth(m, year);
+      yearIncome += snap.additionalFundsForMonth(m, year);
+    }
+    const yearSurplus = yearIncome - yearExpenses;
+
+    // Assets
+    const fundBalance = Math.round(snap.currentFundBalance * 100) / 100;
+    const outstandingDues = Math.round(snap.outstandingDues * 100) / 100;
+    const totalAssets = Math.round((fundBalance + outstandingDues) * 100) / 100;
+
+    // Liabilities
+    const advanceCredit = Math.round(snap.totalAdvanceCredit * 100) / 100;
+
+    // Equity = Assets - Liabilities (fund surplus carried forward)
+    const accumulatedSurplus = Math.round((totalAssets - advanceCredit) * 100) / 100;
+
+    return res.json({
+      year,
+      asOf: year === new Date().getFullYear()
+        ? new Date().toISOString()
+        : `${year}-12-31T23:59:59.000Z`,
+      assets: {
+        fundBalance,
+        outstandingDues,
+        totalAssets,
+      },
+      liabilities: {
+        advanceCredit,
+        totalLiabilities: advanceCredit,
+      },
+      equity: {
+        accumulatedSurplus,
+        currentYearSurplus: Math.round(yearSurplus * 100) / 100,
+      },
+      totalLiabilitiesAndEquity: Math.round((advanceCredit + accumulatedSurplus) * 100) / 100,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/maintenance-management/trial-balance/:year
+ *
+ * Lists all income and expense accounts with total debits/credits
+ * for the year, enabling auditors to verify the books balance.
+ */
+router.get("/trial-balance/:year", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
+
+    // Income accounts (credit side)
+    let maintenanceIncome = 0;
+    let additionalFunds = 0;
+    for (let m = 1; m <= 12; m++) {
+      maintenanceIncome += snap.maintenanceCashForMonth(m, year);
+      additionalFunds += snap.additionalFundsForMonth(m, year);
+    }
+
+    // Late fee income from billing cycles
+    const lateFees = await prisma.villaMaintenanceSnapshot.aggregate({
+      where: {
+        cycle: {
+          societyId,
+          periodYear: year,
+        },
+        lateFeeAmount: { gt: 0 },
+      },
+      _sum: { lateFeeAmount: true },
+    });
+    const lateFeeIncome = Number(lateFees._sum.lateFeeAmount ?? 0);
+
+    // Expense accounts (debit side) — group by category
+    const expensesByCategory = await prisma.expense.groupBy({
+      by: ["categoryId"],
+      where: {
+        societyId,
+        year,
+        status: "APPROVED",
+        deletedAt: null,
+      },
+      _sum: { amount: true },
+    });
+
+    // Fetch category names
+    const categoryIds = expensesByCategory.map((e) => e.categoryId);
+    const categories = categoryIds.length > 0
+      ? await prisma.expenseCategory.findMany({
+          where: { id: { in: categoryIds } },
+          select: { id: true, name: true, type: true },
+        })
+      : [];
+    const catMap = new Map(categories.map((c) => [c.id, c]));
+
+    const incomeAccounts = [
+      { account: "Maintenance Collections", type: "INCOME" as const, debit: 0, credit: Math.round(maintenanceIncome * 100) / 100 },
+      { account: "Additional Funds", type: "INCOME" as const, debit: 0, credit: Math.round(additionalFunds * 100) / 100 },
+    ];
+    if (lateFeeIncome > 0) {
+      incomeAccounts.push({
+        account: "Late Fee Income",
+        type: "INCOME" as const,
+        debit: 0,
+        credit: Math.round(lateFeeIncome * 100) / 100,
+      });
+    }
+
+    const expenseAccounts = expensesByCategory
+      .map((e) => ({
+        account: catMap.get(e.categoryId)?.name ?? "Uncategorized",
+        type: "EXPENSE" as const,
+        debit: Math.round(Number(e._sum.amount ?? 0) * 100) / 100,
+        credit: 0,
+      }))
+      .sort((a, b) => b.debit - a.debit);
+
+    const accounts = [...incomeAccounts, ...expenseAccounts];
+    const totalDebit = Math.round(accounts.reduce((s, a) => s + a.debit, 0) * 100) / 100;
+    const totalCredit = Math.round(accounts.reduce((s, a) => s + a.credit, 0) * 100) / 100;
+    const difference = Math.round((totalCredit - totalDebit) * 100) / 100;
+
+    return res.json({
+      year,
+      accounts,
+      totalDebit,
+      totalCredit,
+      difference,
+      isBalanced: Math.abs(difference) < 0.01,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/maintenance-management/budget-vs-actual/:year
+ *
+ * Compares budgeted amounts (from ExpenseBudget) against actual
+ * expense spend for each category in the given year.
+ */
+router.get("/budget-vs-actual/:year", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    // Fetch budgets for this year
+    const budgets = await prisma.expenseBudget.findMany({
+      where: { societyId, year },
+      include: { category: { select: { id: true, name: true, type: true } } },
+    });
+
+    // Actual expenses grouped by category for this year
+    const actuals = await prisma.expense.groupBy({
+      by: ["categoryId"],
+      where: {
+        societyId,
+        year,
+        status: "APPROVED",
+        deletedAt: null,
+      },
+      _sum: { amount: true },
+    });
+    const actualMap = new Map(actuals.map((a) => [a.categoryId, Number(a._sum.amount ?? 0)]));
+
+    // All categories that have either budget or actual
+    const allCatIds = new Set([
+      ...budgets.map((b) => b.categoryId).filter(Boolean) as string[],
+      ...actuals.map((a) => a.categoryId),
+    ]);
+    const catDetails = allCatIds.size > 0
+      ? await prisma.expenseCategory.findMany({
+          where: { id: { in: [...allCatIds] }, societyId },
+          select: { id: true, name: true, type: true },
+        })
+      : [];
+    const catMap = new Map(catDetails.map((c) => [c.id, c]));
+
+    const rows: Array<{
+      categoryId: string | null;
+      categoryName: string;
+      budgeted: number;
+      actual: number;
+      variance: number;
+      variancePercent: number;
+    }> = [];
+
+    let totalBudgeted = 0;
+    let totalActual = 0;
+
+    for (const catId of allCatIds) {
+      const budgetRows = budgets.filter((b) => b.categoryId === catId);
+      const budgeted = budgetRows.reduce((s, b) => s + Number(b.budgetAmount), 0);
+      const actual = actualMap.get(catId) ?? 0;
+      const variance = budgeted - actual;
+      const variancePercent = budgeted > 0 ? Math.round((variance / budgeted) * 10000) / 100 : 0;
+
+      totalBudgeted += budgeted;
+      totalActual += actual;
+
+      rows.push({
+        categoryId: catId,
+        categoryName: catMap.get(catId)?.name ?? "Uncategorized",
+        budgeted: Math.round(budgeted * 100) / 100,
+        actual: Math.round(actual * 100) / 100,
+        variance: Math.round(variance * 100) / 100,
+        variancePercent,
+      });
+    }
+
+    // Also include categories with actuals but no budget
+    for (const [catId, amount] of actualMap) {
+      if (!allCatIds.has(catId)) {
+        totalActual += amount;
+        rows.push({
+          categoryId: catId,
+          categoryName: catMap.get(catId)?.name ?? "Uncategorized",
+          budgeted: 0,
+          actual: Math.round(amount * 100) / 100,
+          variance: Math.round(-amount * 100) / 100,
+          variancePercent: -100,
+        });
+      }
+    }
+
+    rows.sort((a, b) => b.actual - a.actual);
+
+    return res.json({
+      year,
+      rows,
+      totals: {
+        budgeted: Math.round(totalBudgeted * 100) / 100,
+        actual: Math.round(totalActual * 100) / 100,
+        variance: Math.round((totalBudgeted - totalActual) * 100) / 100,
+        variancePercent: totalBudgeted > 0
+          ? Math.round(((totalBudgeted - totalActual) / totalBudgeted) * 10000) / 100
+          : 0,
+      },
+      hasBudgets: budgets.length > 0,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// ---- PDF downloads for financial statements ----
+
+const MONTH_SHORT = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+
+function fmtInr(n: number): string {
+  return new Intl.NumberFormat("en-IN", { style: "currency", currency: "INR", maximumFractionDigits: 0 }).format(n);
+}
+
+interface FinancialPdfOpts {
+  title: string;
+  subtitle: string;
+  year: number;
+  societyName: string;
+  sections: Array<{
+    heading: string;
+    rows: Array<{ label: string; value: string; bold?: boolean; indent?: boolean }>;
+  }>;
+}
+
+function buildFinancialStatementPdf(opts: FinancialPdfOpts): Promise<Buffer> {
+  return new Promise((resolve) => {
+    const doc = new PDFDocument({ margin: 50, size: "A4" });
+    const chunks: Buffer[] = [];
+    doc.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    doc.on("end", () => resolve(Buffer.concat(chunks)));
+
+    const w = doc.page.width - 100; // usable width
+
+    // Header bar
+    doc.rect(50, 50, w, 50).fill("#1e293b");
+    doc.fontSize(16).fillColor("#ffffff").text(opts.societyName || "Society", 65, 64, { width: w - 30, align: "center" });
+
+    // Accent stripe
+    doc.rect(50, 100, w, 4).fill("#3b82f6");
+
+    // Title
+    doc.fillColor("#1e293b").fontSize(14).text(opts.title, 50, 120, { width: w, align: "center" });
+    doc.fontSize(10).fillColor("#64748b").text(opts.subtitle, 50, 140, { width: w, align: "center" });
+    doc.fontSize(9).text(`Generated: ${new Date().toLocaleString("en-IN", { timeZone: "Asia/Kolkata" })}`, 50, 155, { width: w, align: "center" });
+
+    let y = 180;
+
+    for (const section of opts.sections) {
+      // Section heading
+      doc.rect(50, y, w, 28).fill("#f1f5f9");
+      doc.fontSize(11).fillColor("#1e293b").text(section.heading, 65, y + 8, { width: w - 30 });
+      y += 36;
+
+      for (const row of section.rows) {
+        if (y > 750) {
+          doc.addPage();
+          y = 60;
+        }
+
+        const labelX = row.indent ? 80 : 65;
+        const fontSize = row.bold ? 11 : 10;
+        const color = row.bold ? "#1e293b" : "#475569";
+
+        if (row.bold) {
+          doc.rect(50, y - 2, w, 22).fill("#f8fafc");
+        }
+
+        doc.fontSize(fontSize).fillColor(color);
+        if (row.bold) doc.font("Helvetica-Bold"); else doc.font("Helvetica");
+        doc.text(row.label, labelX, y + 2, { width: 300 });
+        doc.text(row.value, 350, y + 2, { width: w - 310, align: "right" });
+
+        y += row.bold ? 24 : 20;
+      }
+
+      y += 12;
+    }
+
+    // Footer
+    doc.font("Helvetica");
+    const footerY = Math.max(y + 20, 760);
+    if (footerY > 750) doc.addPage();
+    doc.rect(50, footerY, w, 1).fill("#e2e8f0");
+    doc.fontSize(8).fillColor("#94a3b8").text(
+      "This is a computer-generated financial statement. No signature required.",
+      50, footerY + 8,
+      { width: w, align: "center" },
+    );
+
+    doc.end();
+  });
+}
+
+/**
+ * GET /api/maintenance-management/profit-loss/:year/pdf
+ */
+router.get("/profit-loss/:year/pdf", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
+    const society = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { name: true },
+    });
+
+    const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
+      where: { societyId, year },
+      select: { month: true, totalExpenses: true, categoryBreakdown: true },
+    });
+    const expenseByMonth = new Map<number, { total: number; categories: Record<string, number> }>();
+    for (const s of expenseSummaries) {
+      expenseByMonth.set(s.month, {
+        total: Number(s.totalExpenses),
+        categories: (s.categoryBreakdown as Record<string, number>) ?? {},
+      });
+    }
+
+    let totalIncome = 0;
+    let totalExpenses = 0;
+    const monthRows: Array<{ label: string; value: string }> = [];
+
+    for (let m = 1; m <= 12; m++) {
+      const maintenance = snap.maintenanceCashForMonth(m, year);
+      const additional = snap.additionalFundsForMonth(m, year);
+      const income = maintenance + additional;
+      const expenses = expenseByMonth.get(m)?.total ?? snap.expensesForMonth(m, year);
+      const net = income - expenses;
+      totalIncome += income;
+      totalExpenses += expenses;
+
+      if (income > 0 || expenses > 0) {
+        monthRows.push({
+          label: `${MONTH_SHORT[m - 1]} ${year}`,
+          value: `Income ${fmtInr(income)}  |  Expenses ${fmtInr(expenses)}  |  Net ${fmtInr(net)}`,
+        });
+      }
+    }
+
+    // Expense category summary
+    const yearCategories: Record<string, number> = {};
+    for (const [, v] of expenseByMonth) {
+      for (const [cat, amt] of Object.entries(v.categories)) {
+        yearCategories[cat] = (yearCategories[cat] ?? 0) + amt;
+      }
+    }
+    const sortedCats = Object.entries(yearCategories).sort(([, a], [, b]) => b - a);
+
+    const sections: FinancialPdfOpts["sections"] = [
+      {
+        heading: "INCOME",
+        rows: [
+          { label: "Maintenance Collections", value: fmtInr(totalIncome - Object.values(yearCategories).reduce((a, b) => a, 0) * 0), indent: true },
+          ...monthRows.map((r) => ({ label: r.label, value: r.value, indent: true })),
+          { label: "Total Income", value: fmtInr(totalIncome), bold: true },
+        ],
+      },
+      {
+        heading: "EXPENDITURE",
+        rows: [
+          ...sortedCats.map(([cat, amt]) => ({ label: cat, value: fmtInr(amt), indent: true })),
+          { label: "Total Expenditure", value: fmtInr(totalExpenses), bold: true },
+        ],
+      },
+      {
+        heading: "SUMMARY",
+        rows: [
+          { label: totalIncome >= totalExpenses ? "Net Surplus" : "Net Deficit", value: fmtInr(Math.abs(totalIncome - totalExpenses)), bold: true },
+          { label: "Fund Balance (all-time)", value: fmtInr(snap.currentFundBalance), bold: true },
+          { label: "Outstanding Dues", value: fmtInr(snap.outstandingDues) },
+          { label: "Advance Credit Pool", value: fmtInr(snap.totalAdvanceCredit) },
+        ],
+      },
+    ];
+
+    const pdfBuffer = await buildFinancialStatementPdf({
+      title: "Income & Expenditure Statement",
+      subtitle: `Financial Year ${year}`,
+      year,
+      societyName: society?.name ?? "",
+      sections,
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="income_expenditure_${year}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/maintenance-management/balance-sheet/:year/pdf
+ */
+router.get("/balance-sheet/:year/pdf", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
+    const society = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { name: true },
+    });
+
+    const fundBalance = Math.round(snap.currentFundBalance * 100) / 100;
+    const outstandingDues = Math.round(snap.outstandingDues * 100) / 100;
+    const totalAssets = Math.round((fundBalance + outstandingDues) * 100) / 100;
+    const advanceCredit = Math.round(snap.totalAdvanceCredit * 100) / 100;
+    const accumulatedSurplus = Math.round((totalAssets - advanceCredit) * 100) / 100;
+
+    const pdfBuffer = await buildFinancialStatementPdf({
+      title: "Balance Sheet",
+      subtitle: `As of ${year === new Date().getFullYear() ? new Date().toLocaleDateString("en-IN") : `31 Dec ${year}`}`,
+      year,
+      societyName: society?.name ?? "",
+      sections: [
+        {
+          heading: "ASSETS",
+          rows: [
+            { label: "Fund Balance (Bank)", value: fmtInr(fundBalance), indent: true },
+            { label: "Outstanding Dues (Receivable)", value: fmtInr(outstandingDues), indent: true },
+            { label: "Total Assets", value: fmtInr(totalAssets), bold: true },
+          ],
+        },
+        {
+          heading: "LIABILITIES",
+          rows: [
+            { label: "Advance Credit (Resident Overpayments)", value: fmtInr(advanceCredit), indent: true },
+            { label: "Total Liabilities", value: fmtInr(advanceCredit), bold: true },
+          ],
+        },
+        {
+          heading: "EQUITY / FUND",
+          rows: [
+            { label: "Accumulated Surplus", value: fmtInr(accumulatedSurplus), bold: true },
+          ],
+        },
+        {
+          heading: "VERIFICATION",
+          rows: [
+            { label: "Total Liabilities + Equity", value: fmtInr(advanceCredit + accumulatedSurplus), bold: true },
+            { label: "Difference (should be zero)", value: fmtInr(totalAssets - advanceCredit - accumulatedSurplus) },
+          ],
+        },
+      ],
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="balance_sheet_${year}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/maintenance-management/trial-balance/:year/pdf
+ */
+router.get("/trial-balance/:year/pdf", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    // Re-use the same logic as the JSON endpoint
+    const snap = await getCachedMoneySnapshot(prisma, societyId);
+    const society = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { name: true },
+    });
+
+    let maintenanceIncome = 0;
+    let additionalFunds = 0;
+    for (let m = 1; m <= 12; m++) {
+      maintenanceIncome += snap.maintenanceCashForMonth(m, year);
+      additionalFunds += snap.additionalFundsForMonth(m, year);
+    }
+
+    const expensesByCategory = await prisma.expense.groupBy({
+      by: ["categoryId"],
+      where: { societyId, year, status: "APPROVED", deletedAt: null },
+      _sum: { amount: true },
+    });
+    const categoryIds = expensesByCategory.map((e) => e.categoryId);
+    const categories = categoryIds.length > 0
+      ? await prisma.expenseCategory.findMany({
+          where: { id: { in: categoryIds } },
+          select: { id: true, name: true },
+        })
+      : [];
+    const catMap = new Map(categories.map((c) => [c.id, c.name]));
+
+    const incomeRows = [
+      { label: "Maintenance Collections", value: fmtInr(maintenanceIncome), indent: true },
+      { label: "Additional Funds", value: fmtInr(additionalFunds), indent: true },
+    ];
+    const totalCredit = maintenanceIncome + additionalFunds;
+
+    const expenseRows = expensesByCategory
+      .map((e) => ({
+        label: catMap.get(e.categoryId) ?? "Uncategorized",
+        value: fmtInr(Number(e._sum.amount ?? 0)),
+        indent: true,
+        amount: Number(e._sum.amount ?? 0),
+      }))
+      .sort((a, b) => b.amount - a.amount);
+    const totalDebit = expenseRows.reduce((s, r) => s + r.amount, 0);
+
+    const pdfBuffer = await buildFinancialStatementPdf({
+      title: "Trial Balance",
+      subtitle: `For the year ended ${year === new Date().getFullYear() ? new Date().toLocaleDateString("en-IN") : `31 Dec ${year}`}`,
+      year,
+      societyName: society?.name ?? "",
+      sections: [
+        {
+          heading: "CREDIT (Income Accounts)",
+          rows: [
+            ...incomeRows,
+            { label: "Total Credits", value: fmtInr(totalCredit), bold: true },
+          ],
+        },
+        {
+          heading: "DEBIT (Expense Accounts)",
+          rows: [
+            ...expenseRows.map((r) => ({ label: r.label, value: r.value, indent: r.indent })),
+            { label: "Total Debits", value: fmtInr(totalDebit), bold: true },
+          ],
+        },
+        {
+          heading: "BALANCE",
+          rows: [
+            { label: "Net Surplus (Credit − Debit)", value: fmtInr(totalCredit - totalDebit), bold: true },
+          ],
+        },
+      ],
+    });
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="trial_balance_${year}.pdf"`);
+    return res.send(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;

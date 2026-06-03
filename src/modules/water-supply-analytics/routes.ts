@@ -290,7 +290,7 @@ router.get("/recent-events", async (req, res, next) => {
         },
       },
       orderBy: { createdAt: "desc" },
-      take: parseInt(limit as string),
+      take: Math.min(Math.max(parseInt(limit as string) || 50, 1), 200),
     });
 
     const recentEvents = events.map((e) => ({
