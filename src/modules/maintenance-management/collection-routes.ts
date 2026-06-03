@@ -292,8 +292,8 @@ router.put("/cycles/:cycleId/rule", validateBody(upsertRuleSchema), async (req, 
       where: { id: cycleId, societyId },
     });
     if (!cycle) return res.status(404).json({ message: "Cycle not found" });
-    if (cycle.status === "LOCKED") {
-      return res.status(400).json({ message: "Cannot change rule on a locked cycle" });
+    if (cycle.status !== "OPEN") {
+      return res.status(400).json({ message: "Only OPEN cycles can be modified" });
     }
 
     if (body.ruleType === "FIXED_PER_FLAT" && body.baseAmount == null) {

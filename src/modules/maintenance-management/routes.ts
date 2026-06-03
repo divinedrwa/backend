@@ -296,8 +296,8 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       if (!cycle) {
         return res.status(404).json({ message: "Billing cycle not found" });
       }
-      if (cycle.status === "LOCKED") {
-        return res.status(400).json({ message: "This billing cycle is locked" });
+      if (cycle.status !== "OPEN") {
+        return res.status(400).json({ message: "Only OPEN cycles can be modified" });
       }
       if (cycle.periodMonth !== body.month || cycle.periodYear !== body.year) {
         return res.status(400).json({ message: "month and year must match the selected billing cycle" });
@@ -672,8 +672,8 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
       where: { id: body.maintenanceCollectionCycleId, societyId },
     });
     if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
-    if (cycle.status === "LOCKED") {
-      return res.status(400).json({ message: "This billing cycle is locked" });
+    if (cycle.status !== "OPEN") {
+      return res.status(400).json({ message: "Only OPEN cycles can be modified" });
     }
 
     const snapshotCheck = await prisma.villaMaintenanceSnapshot.findUnique({
@@ -864,8 +864,8 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       where: { id: body.maintenanceCollectionCycleId, societyId },
     });
     if (!cycle) return res.status(404).json({ message: "Billing cycle not found" });
-    if (cycle.status === "LOCKED") {
-      return res.status(400).json({ message: "This billing cycle is locked" });
+    if (cycle.status !== "OPEN") {
+      return res.status(400).json({ message: "Only OPEN cycles can be modified" });
     }
 
     const [snapshot, applyCreditExclusion] = await Promise.all([
@@ -1057,8 +1057,8 @@ router.post(
       if (adjExclusion) {
         return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
       }
-      if (cycle.status === "LOCKED") {
-        return res.status(400).json({ message: "This billing cycle is locked" });
+      if (cycle.status !== "OPEN") {
+        return res.status(400).json({ message: "Only OPEN cycles can be modified" });
       }
 
       // For deductions, verify there is enough credit to deduct
