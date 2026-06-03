@@ -5,6 +5,7 @@ import {
   BillingUserPaymentStatus,
   MaintenanceBillingRole,
   NotificationCategory,
+  Prisma,
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
@@ -1043,6 +1044,7 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
           cycleId: c.id,
           cycleKey: c.cycleKey,
           cycleTitle: c.title,
+          paymentId: p?.id ?? null,
           paymentStatus: p?.paymentStatus ?? "NONE",
           amountPaid: p ? Number(p.amountPaid) : null,
           paidAt: p?.paidAt?.toISOString() ?? null,
@@ -1110,6 +1112,218 @@ router.get("/admin/audit-logs", requireAuth, requireRole(UserRole.ADMIN), async 
   }
 });
 
+// ── PDF receipt helper ────────────────────────────────────────────────
+
+type PaymentForReceipt = Awaited<ReturnType<typeof fetchPaymentForReceipt>>;
+
+async function fetchPaymentForReceipt(where: Prisma.UserCyclePaymentWhereInput) {
+  return prisma.userCyclePayment.findFirst({
+    where,
+    include: {
+      cycle: {
+        include: { society: { select: { name: true, address: true } } },
+      },
+      user: {
+        include: {
+          villa: { select: { villaNumber: true, ownerName: true, block: true } },
+        },
+      },
+    },
+  });
+}
+
+function formatIst(date: Date | null | undefined): string {
+  if (!date) return "-";
+  // IST = UTC + 5:30
+  const ist = new Date(date.getTime() + 5.5 * 60 * 60 * 1000);
+  const day = String(ist.getUTCDate()).padStart(2, "0");
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const mon = months[ist.getUTCMonth()];
+  const year = ist.getUTCFullYear();
+  const h = ist.getUTCHours();
+  const m = String(ist.getUTCMinutes()).padStart(2, "0");
+  const ampm = h >= 12 ? "PM" : "AM";
+  const h12 = h % 12 || 12;
+  return `${day} ${mon} ${year}, ${h12}:${m} ${ampm} IST`;
+}
+
+function formatCycleKeyLabel(cycleKey: string): string {
+  const [y, m] = cycleKey.split("-");
+  const months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+  const idx = Number(m) - 1;
+  return idx >= 0 && idx < 12 ? `${months[idx]} ${y}` : cycleKey;
+}
+
+function fmtInr(n: number): string {
+  return `\u20B9${n.toLocaleString("en-IN", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+async function ensureInvoiceNumber(paymentId: string, cycleKey: string): Promise<string> {
+  const existing = await prisma.userCyclePayment.findUnique({
+    where: { id: paymentId },
+    select: { invoiceNumber: true },
+  });
+  if (existing?.invoiceNumber) return existing.invoiceNumber;
+
+  const invoiceNumber = `RCP-${cycleKey}-${Date.now().toString(36).slice(-6).toUpperCase()}`;
+  await prisma.userCyclePayment.update({
+    where: { id: paymentId },
+    data: { invoiceNumber },
+  });
+  return invoiceNumber;
+}
+
+function buildPaymentReceiptPdf(payment: NonNullable<PaymentForReceipt>): typeof PDFDocument.prototype {
+  const doc = new PDFDocument({ size: "A4", margin: 40 });
+  const pageWidth = doc.page.width - 80; // minus margins
+
+  const societyName = payment.cycle.society?.name ?? "Society";
+  const societyAddress = payment.cycle.society?.address ?? "";
+
+  // ── Header: Society name + address ──
+  doc.fontSize(16).font("Helvetica-Bold").text(societyName, { align: "center" });
+  if (societyAddress) {
+    doc.fontSize(9).font("Helvetica").text(societyAddress, { align: "center" });
+  }
+  doc.moveDown(0.3);
+  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.5).stroke();
+  doc.moveDown(0.6);
+
+  // ── Title + receipt metadata ──
+  doc.fontSize(13).font("Helvetica-Bold").text("PAYMENT RECEIPT", { align: "center" });
+  doc.moveDown(0.6);
+
+  const receiptNo = payment.invoiceNumber ?? payment.id;
+  const receiptDate = formatIst(payment.paidAt ?? payment.updatedAt);
+
+  const labelX = 40;
+  const valueX = 190;
+
+  function row(label: string, value: string) {
+    doc.fontSize(10).font("Helvetica-Bold").text(label, labelX, doc.y, { continued: false });
+    doc.moveUp();
+    doc.font("Helvetica").text(value, valueX, doc.y);
+  }
+
+  row("Receipt No:", receiptNo);
+  doc.moveDown(0.1);
+  row("Date:", receiptDate);
+  doc.moveDown(0.4);
+  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
+  doc.moveDown(0.5);
+
+  // ── Resident details ──
+  const residentName = payment.user?.name ?? "Unknown";
+  const villa = payment.user?.villa;
+  const unit = villa
+    ? [villa.block, villa.villaNumber].filter(Boolean).join("-") || villa.villaNumber
+    : "-";
+  const contact = (payment.user as { phone?: string | null } | null)?.phone ?? "";
+
+  row("Resident:", residentName);
+  doc.moveDown(0.1);
+  row("Unit:", unit);
+  if (contact) {
+    doc.moveDown(0.1);
+    row("Contact:", contact);
+  }
+  doc.moveDown(0.4);
+  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
+  doc.moveDown(0.5);
+
+  // ── Payment details ──
+  const billingPeriod = formatCycleKeyLabel(payment.cycle.cycleKey);
+  const cycleTitle = payment.cycle.title;
+  const amountDue = fmtInr(Number(payment.cycle.amount));
+  const amountPaid = fmtInr(Number(payment.amountPaid));
+  const source = payment.source === "CASH_MANUAL" ? "Cash" : "Online";
+  const txnId = payment.paymentGatewayPaymentId ?? "-";
+  const paidAt = formatIst(payment.paidAt);
+
+  row("Billing Period:", billingPeriod);
+  doc.moveDown(0.1);
+  row("Cycle:", cycleTitle);
+  doc.moveDown(0.1);
+  row("Amount Due:", amountDue);
+  doc.moveDown(0.1);
+  row("Amount Paid:", amountPaid);
+  doc.moveDown(0.1);
+  row("Payment Mode:", source);
+  if (payment.paymentGatewayPaymentId) {
+    doc.moveDown(0.1);
+    row("Transaction ID:", txnId);
+  }
+  doc.moveDown(0.1);
+  row("Paid At:", paidAt);
+  doc.moveDown(0.4);
+  doc.moveTo(40, doc.y).lineTo(40 + pageWidth, doc.y).lineWidth(0.3).stroke();
+  doc.moveDown(0.6);
+
+  // ── Status badge ──
+  const status = payment.paymentStatus === BillingUserPaymentStatus.SUCCESS ? "PAID" : String(payment.paymentStatus);
+  doc.fontSize(12).font("Helvetica-Bold").text(`Status: ${status}`, { align: "center" });
+  doc.moveDown(1.2);
+
+  // ── Footer ──
+  doc.fontSize(8).font("Helvetica").fillColor("#666666")
+    .text("This is a computer-generated receipt. No signature required.", { align: "center" });
+
+  return doc;
+}
+
+// ── Receipt by cycle (resident looks up by cycleId) ──────────────────
+router.get(
+  "/payments/receipt.pdf",
+  requireAuth,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const cycleId = typeof req.query.cycleId === "string" ? req.query.cycleId.trim() : "";
+      if (!cycleId) {
+        res.status(400).json({ message: "cycleId is required" });
+        return;
+      }
+
+      let userId: string;
+      if (isAdminLikeRole(auth.role)) {
+        const qUserId = typeof req.query.userId === "string" ? req.query.userId.trim() : "";
+        if (!qUserId) {
+          res.status(400).json({ message: "userId is required for admin" });
+          return;
+        }
+        userId = qUserId;
+      } else {
+        userId = auth.userId;
+      }
+
+      const payment = await fetchPaymentForReceipt({
+        userId,
+        cycleId,
+        cycle: { societyId: auth.societyId },
+        paymentStatus: BillingUserPaymentStatus.SUCCESS,
+      });
+      if (!payment) {
+        res.status(404).json({ message: "No successful payment found for this cycle" });
+        return;
+      }
+
+      const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
+      payment.invoiceNumber = invoiceNumber;
+
+      const doc = buildPaymentReceiptPdf(payment);
+      const filename = `receipt-${payment.cycle.cycleKey}-${payment.user?.villa?.villaNumber ?? "unit"}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      doc.pipe(res as unknown as NodeJS.WritableStream);
+      doc.end();
+    } catch (e) {
+      next(e);
+    }
+  }
+);
+
+// ── Invoice by paymentId (original endpoint, enhanced layout) ────────
 router.get(
   "/payments/:paymentId/invoice.pdf",
   requireAuth,
@@ -1119,35 +1333,24 @@ router.get(
       const auth = req.auth!;
       const { paymentId } = req.params;
 
-      const payment = await prisma.userCyclePayment.findFirst({
-        where: {
-          id: paymentId,
-          cycle: { societyId: auth.societyId },
-          ...(!isAdminLikeRole(auth.role) ? { userId: auth.userId } : {}),
-        },
-        include: {
-          cycle: true,
-          user: { include: { villa: { select: { villaNumber: true, ownerName: true } } } },
-        },
+      const payment = await fetchPaymentForReceipt({
+        id: paymentId,
+        cycle: { societyId: auth.societyId },
+        ...(!isAdminLikeRole(auth.role) ? { userId: auth.userId } : {}),
       });
       if (!payment || payment.paymentStatus !== BillingUserPaymentStatus.SUCCESS) {
         res.status(404).json({ message: "Invoice not found" });
         return;
       }
 
-      const doc = new PDFDocument({ margin: 40 });
-      res.setHeader("Content-Type", "application/pdf");
-      res.setHeader("Content-Disposition", `attachment; filename="invoice-${paymentId}.pdf"`);
-      doc.pipe(res as unknown as NodeJS.WritableStream);
+      const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
+      payment.invoiceNumber = invoiceNumber;
 
-      doc.fontSize(18).text("Maintenance payment invoice", { underline: true });
-      doc.moveDown();
-      doc.fontSize(11).text(`Invoice ref: ${payment.id}`);
-      doc.text(`Paid at (UTC): ${payment.paidAt?.toISOString() ?? "-"}`);
-      doc.text(`Cycle: ${payment.cycle.title} (${payment.cycle.cycleKey})`);
-      doc.text(`Amount: ${Number(payment.amountPaid).toFixed(2)}`);
-      doc.text(`Resident: ${payment.user?.name ?? "Unknown"}`);
-      doc.text(`Unit: ${payment.user?.villa?.villaNumber ?? "-"}`);
+      const doc = buildPaymentReceiptPdf(payment);
+      const filename = `invoice-${paymentId}.pdf`;
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      doc.pipe(res as unknown as NodeJS.WritableStream);
       doc.end();
     } catch (e) {
       next(e);
