@@ -357,22 +357,34 @@ export async function computeSocietyMoneySnapshot(
   // (month, year) — NOT seeded upfront — so a May payment can't retroactively
   // pay April's cycle.
   let totalAdvanceCredit = 0;
-  for (const [, fyCycles] of cyclesByFy) {
+  const _debugCredits: Array<{ villaId: string; fy: string; credit: number; detail: string }> = [];
+  for (const [fyId, fyCycles] of cyclesByFy) {
     for (const villaId of villaIds) {
       let creditPool = 0;
+      const steps: string[] = [];
       // Walk cycles chronologically (already ordered by periodYear, periodMonth)
       for (const cycle of fyCycles) {
         // Inject unlinked adjustments that match this cycle's period
-        creditPool += unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+        const unlinked = unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+        if (unlinked) steps.push(`unlinked(${cycle.periodMonth}/${cycle.periodYear})=+${unlinked}`);
+        creditPool += unlinked;
         const snap = snapExpected.get(`${villaId}:${cycle.id}`);
         if (!snap) continue;
-        if (snap.status === "WAIVED") continue;
+        if (snap.status === "WAIVED") { steps.push(`${cycle.periodMonth}/${cycle.periodYear}:WAIVED`); continue; }
         const cash = linkedCashByVillaCycle.get(`${villaId}:${cycle.id}`) ?? 0;
         const available = cash + creditPool;
+        const consumed = Math.min(snap.expected, Math.max(0, available));
         creditPool = Math.max(0, available - snap.expected);
+        if (cash > 0 || creditPool > 0) steps.push(`${cycle.periodMonth}/${cycle.periodYear}:cash=${cash},exp=${snap.expected},pool=${creditPool}`);
+      }
+      if (creditPool > 0) {
+        _debugCredits.push({ villaId, fy: fyId, credit: creditPool, detail: steps.join(' | ') });
       }
       totalAdvanceCredit += creditPool;
     }
+  }
+  if (_debugCredits.length > 0) {
+    console.log('[ADVANCE_CREDIT_DEBUG] totalAdvanceCredit=', totalAdvanceCredit, JSON.stringify(_debugCredits, null, 2));
   }
 
   // Additional funds + expenses.
