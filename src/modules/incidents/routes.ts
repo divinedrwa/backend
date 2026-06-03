@@ -13,7 +13,6 @@ const incidentCreateRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 5,
   message: "Too many incident reports, please try again later",
-  keyGenerator: (req) => req.ip ?? "unknown",
 });
 
 const createIncidentSchema = z.object({

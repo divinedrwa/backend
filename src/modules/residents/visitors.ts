@@ -23,7 +23,6 @@ const preApproveRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10,
   message: "Too many pre-approval requests, please try again later",
-  keyGenerator: (req) => req.ip ?? "unknown",
 });
 
 // Validation schemas
