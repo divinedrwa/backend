@@ -77,6 +77,16 @@ export function errorHandler(
     return;
   }
 
+  // DB-level CHECK / exclusion / raw SQL errors surface as
+  // PrismaClientUnknownRequestError — log detail and return 400.
+  if (err instanceof Prisma.PrismaClientUnknownRequestError) {
+    logger.error({ detail: err.message }, "Prisma unknown request error (CHECK constraint or raw DB error)");
+    res.status(400).json({
+      message: "The operation was rejected by the database. Please check your input and try again.",
+    });
+    return;
+  }
+
   // Pino redacts known-sensitive fields from `err` (token, password, etc.)
   // via the central logger config — see [src/lib/logger.ts].
   logger.error({ err }, "unhandled error");
