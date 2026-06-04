@@ -169,7 +169,6 @@ model Society {
   expenseCategories     ExpenseCategory[]
   expenses              Expense[]
   monthlyExpenseSummary MonthlyExpenseSummary[]
-  expenseBudgets        ExpenseBudget[]
   additionalFunds       AdditionalFund[]
 
   userNotifications    UserNotification[]
@@ -1814,8 +1813,7 @@ model ExpenseCategory {
   defaultAmount   Float?
   
   expenses        Expense[]
-  budgets         ExpenseBudget[]
-  
+
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   createdBy       String?
@@ -1908,28 +1906,6 @@ model MonthlyExpenseSummary {
   @@unique([societyId, month, year])
   @@index([societyId])
   @@index([year, month])
-}
-
-// Expense Budgets (optional)
-model ExpenseBudget {
-  id              String    @id @default(uuid())
-  societyId       String
-  society         Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  categoryId      String?
-  category        ExpenseCategory? @relation(fields: [categoryId], references: [id])
-  month           Int?
-  year            Int
-  budgetAmount    Decimal   @db.Decimal(12, 2)
-  spentAmount     Decimal   @db.Decimal(12, 2) @default(0)
-  remainingAmount Decimal   @db.Decimal(12, 2) @default(0)
-  alertThreshold  Float?    @default(80)
-  alertSent       Boolean   @default(false)
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
-  createdBy       String?
-  
-  @@unique([societyId, categoryId, month, year])
-  @@index([societyId])
 }
 
 model AdditionalFund {
