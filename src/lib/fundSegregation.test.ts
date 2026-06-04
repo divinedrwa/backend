@@ -101,6 +101,8 @@ function fakePrisma(opts: {
     specialProject: {
       findMany: async () => projects.filter((p) => p.status === "ACTIVE"),
     },
+    financialYear: { findMany: async () => [] },
+    monthlyExpenseSummary: { findMany: async () => [] },
   } as unknown as PrismaClient;
 }
 
