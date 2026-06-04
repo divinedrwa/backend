@@ -1624,6 +1624,129 @@ router.get("/shortfall/:fyId", async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/maintenance-management/cycle-report/:year
+ *
+ * Per-billing-cycle report for a calendar year. Shows expected collection,
+ * actual collection, pending dues, expenses, and net position per cycle.
+ * Designed for the admin "Billing Cycles" tab.
+ */
+router.get("/cycle-report/:year", async (req, res, next) => {
+  try {
+    const year = parseInt(req.params.year);
+    const societyId = req.auth!.societyId!;
+
+    if (isNaN(year) || year < 2000 || year > 2100) {
+      return res.status(400).json({ message: "Invalid year" });
+    }
+
+    const cycles = await prisma.maintenanceCollectionCycle.findMany({
+      where: { societyId, periodYear: year },
+      orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+      select: {
+        id: true,
+        periodKey: true,
+        periodMonth: true,
+        periodYear: true,
+        title: true,
+        dueDate: true,
+        status: true,
+        snapshots: {
+          select: {
+            expectedAmount: true,
+            paidAmount: true,
+            lateFeeAmount: true,
+            status: true,
+          },
+        },
+      },
+    });
+
+    const expenseSummaries = await prisma.monthlyExpenseSummary.findMany({
+      where: { societyId, year },
+      select: { month: true, year: true, totalExpenses: true },
+    });
+    const expenseByKey = new Map<string, number>();
+    for (const s of expenseSummaries) {
+      expenseByKey.set(
+        `${s.year}-${String(s.month).padStart(2, "0")}`,
+        Number(s.totalExpenses),
+      );
+    }
+
+    let sumExpected = 0;
+    let sumCollected = 0;
+    let sumExpense = 0;
+    let sumPaid = 0;
+    let sumUnpaid = 0;
+
+    const cycleRows = cycles.map((c) => {
+      const active = c.snapshots.filter((s) => s.status !== "WAIVED");
+      const expected = active.reduce(
+        (sum, s) => sum + Number(s.expectedAmount) + Number(s.lateFeeAmount ?? 0),
+        0,
+      );
+      const collected = active.reduce(
+        (sum, s) => sum + Number(s.paidAmount),
+        0,
+      );
+      const pending = Math.max(0, expected - collected);
+      const expense = expenseByKey.get(c.periodKey) ?? 0;
+      const net = collected - expense;
+      const paidCount = active.filter((s) => s.status === "PAID").length;
+      const unpaidCount = Math.max(0, active.length - paidCount);
+      const rate =
+        expected > 0
+          ? Math.round((collected / expected) * 10000) / 100
+          : 0;
+
+      sumExpected += expected;
+      sumCollected += collected;
+      sumExpense += expense;
+      sumPaid += paidCount;
+      sumUnpaid += unpaidCount;
+
+      return {
+        cycleId: c.id,
+        title: c.title,
+        periodMonth: c.periodMonth,
+        periodYear: c.periodYear,
+        status: c.status,
+        dueDate: c.dueDate,
+        totalExpected: Math.round(expected * 100) / 100,
+        totalCollected: Math.round(collected * 100) / 100,
+        pendingDues: Math.round(pending * 100) / 100,
+        collectionRate: rate,
+        totalExpense: Math.round(expense * 100) / 100,
+        net: Math.round(net * 100) / 100,
+        paidCount,
+        unpaidCount,
+      };
+    });
+
+    const totalPending = Math.max(0, sumExpected - sumCollected);
+    const overallRate =
+      sumExpected > 0
+        ? Math.round((sumCollected / sumExpected) * 10000) / 100
+        : 0;
+
+    return res.json({
+      year,
+      totalExpected: Math.round(sumExpected * 100) / 100,
+      totalCollected: Math.round(sumCollected * 100) / 100,
+      totalPending: Math.round(totalPending * 100) / 100,
+      collectionRate: overallRate,
+      totalExpenses: Math.round(sumExpense * 100) / 100,
+      netPosition: Math.round((sumCollected - sumExpense) * 100) / 100,
+      totalPaid: sumPaid,
+      totalUnpaid: sumUnpaid,
+      cycles: cycleRows,
+    });
+  } catch (error) {
+    next(error);
+  }
+});
+
 // GET /api/maintenance-management/villa-history/:villaId
 // Get complete payment history for a villa
 router.get("/villa-history/:villaId", async (req, res, next) => {
