@@ -27,7 +27,7 @@ import {
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
 import { reconcileVillaLedgersForRecentCycles, invalidateReconcileCache } from "./services/resident-pending-dues";
-import { writeAdminAuditLog } from "./services/audit-log";
+import { auditFromRequest } from "../../services/audit.service";
 import { notifyVillaMaintenanceLedgerUpdate } from "../../lib/maintenanceLedgerNotify";
 import { notifySocietyRoles } from "../../services/notification.service";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
@@ -184,7 +184,7 @@ router.post(
       });
 
       await invalidateDisplayCycleHint(societyId);
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId,
         adminId: auth.userId,
         action: "billing_cycle.create",
@@ -248,7 +248,7 @@ router.put(
       });
 
       await invalidateDisplayCycleHint(auth.societyId);
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing_cycle.update",
@@ -297,7 +297,7 @@ router.delete(
       });
 
       await invalidateDisplayCycleHint(auth.societyId);
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing_cycle.delete",
@@ -337,7 +337,7 @@ router.post(
         data: { publishedAt: new Date() },
       });
 
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing_cycle.publish",
@@ -588,7 +588,7 @@ router.post(
         },
       });
 
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "financial_year.create",
@@ -663,7 +663,7 @@ router.put(
         },
       });
 
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "financial_year.update",
@@ -707,7 +707,7 @@ router.delete(
       }
 
       await prisma.financialYear.delete({ where: { id } });
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "financial_year.delete",
@@ -835,7 +835,7 @@ router.post(
 
       if (user.villaId) invalidateReconcileCache(user.villaId);
 
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing.mark_cash",
@@ -908,7 +908,7 @@ router.post(
         update: { remark },
       });
 
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing.waive_late_fee",
@@ -954,7 +954,7 @@ router.post(
       });
 
       await invalidateDisplayCycleHint(auth.societyId);
-      await writeAdminAuditLog({
+      auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
         action: "billing_cycle.reopen",

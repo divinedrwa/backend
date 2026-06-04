@@ -6,6 +6,7 @@ import { prisma } from '../../lib/prisma';
 import { requireAuth, requireRole } from '../../middlewares/auth';
 import { validateBody } from '../../middlewares/validate';
 import { auditFromRequest } from '../../services/audit.service';
+import { invalidateMoneySnapshotCache } from '../../lib/societyFinance';
 import { expenseAttachmentMemory } from '../../lib/expenseAttachmentUpload';
 import {
   isCloudinaryConfigured,
@@ -581,6 +582,7 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
       return created;
     });
 
+    invalidateMoneySnapshotCache(societyId);
     auditFromRequest(req, {
       adminId: req.auth!.userId,
       societyId,
@@ -699,6 +701,7 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       return updated;
     });
 
+    invalidateMoneySnapshotCache(societyId);
     auditFromRequest(req, {
       adminId: req.auth!.userId,
       societyId,
@@ -734,6 +737,7 @@ router.delete('/:id', async (req, res, next) => {
       await updateMonthlySummary(societyId, existing.month, existing.year);
     }
 
+    invalidateMoneySnapshotCache(societyId);
     auditFromRequest(req, {
       adminId: req.auth!.userId,
       societyId,

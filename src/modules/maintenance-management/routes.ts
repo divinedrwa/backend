@@ -20,7 +20,7 @@ import {
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { getCachedMoneySnapshot } from "../../lib/societyFinance";
+import { getCachedMoneySnapshot, invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import collectionRoutes from "./collection-routes";
 import { applyVillaCreditAcrossSnapshots, getVillaCreditBalance } from "./credit-walker";
 import {
@@ -29,6 +29,7 @@ import {
 } from "./financial-dashboard-cycle";
 import { notifyUsers } from "../../services/notification.service";
 import { auditFromRequest } from "../../services/audit.service";
+import { computeFundSegregation } from "../../lib/fundSegregation";
 
 const router = Router();
 
@@ -266,6 +267,8 @@ const markPaidSchema = z.object({
   maintenanceCollectionCycleId: z.string().min(1).optional(),
   /// When true with amount=0, triggers credit walker to settle via advance credit.
   applyCredit: z.boolean().optional(),
+  /// Client-generated idempotency key to prevent duplicate payments on retry.
+  idempotencyKey: z.string().min(1).optional(),
 }).refine(
   (d) => d.amount > 0 || d.applyCredit === true,
   { message: "Either amount must be positive or applyCredit must be true", path: ["amount"] },
@@ -288,6 +291,22 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       return res.status(404).json({ message: "Villa not found" });
     }
 
+    // Idempotency: if the client sent an idempotencyKey, return the existing
+    // payment instead of creating a duplicate.
+    if (body.idempotencyKey) {
+      const existing = await prisma.maintenancePayment.findUnique({
+        where: { idempotencyKey: body.idempotencyKey },
+        include: { villa: { select: { villaNumber: true, ownerName: true } } },
+      });
+      if (existing) {
+        return res.status(200).json({
+          message: "Payment already recorded",
+          payment: existing,
+          deduplicated: true,
+        });
+      }
+    }
+
     if (body.maintenanceCollectionCycleId) {
       const adminId = req.auth!.userId;
       const cycle = await prisma.maintenanceCollectionCycle.findFirst({
@@ -308,8 +327,8 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
           },
           select: { id: true },
         }),
-        prisma.cycleVillaExclusion.findUnique({
-          where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+        prisma.cycleVillaExclusion.findFirst({
+          where: { cycleId: cycle.id, villaId: body.villaId, cycle: { societyId } },
           select: { id: true },
         }),
       ]);
@@ -375,6 +394,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
             receiptNumber,
             bankAccountId: body.bankAccountId,
             remarks: body.remarks,
+            idempotencyKey: body.idempotencyKey,
             maintenanceCollectionCycleId: cycle.id,
             villaMaintenanceSnapshotId: snapshot.id,
           },
@@ -475,6 +495,22 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       }, { timeout: 15000 });
 
       invalidateReconcileCache(body.villaId);
+      invalidateMoneySnapshotCache(societyId);
+      auditFromRequest(req, {
+        societyId,
+        adminId,
+        action: "PAYMENT_RECORDED",
+        entityType: "Villa",
+        entityId: body.villaId,
+        metadata: {
+          villaNumber: villa.villaNumber,
+          amount: body.amount,
+          month: body.month,
+          year: body.year,
+          paymentMode: body.paymentMode,
+          cycleId: body.maintenanceCollectionCycleId,
+        },
+      });
 
       // Notify villa residents about payment recorded
       void (async () => {
@@ -579,6 +615,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
             receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
             bankAccountId: body.bankAccountId,
             remarks: body.remarks,
+            idempotencyKey: body.idempotencyKey,
           },
           include: {
             villa: {
@@ -603,6 +640,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
             receiptNumber,
             bankAccountId: body.bankAccountId,
             remarks: body.remarks,
+            idempotencyKey: body.idempotencyKey,
           },
           include: {
             villa: {
@@ -637,6 +675,23 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         // Fire-and-forget
       }
     })();
+
+    invalidateMoneySnapshotCache(societyId);
+    auditFromRequest(req, {
+      societyId,
+      adminId: req.auth!.userId,
+      action: "PAYMENT_RECORDED",
+      entityType: "Villa",
+      entityId: body.villaId,
+      metadata: {
+        villaNumber: villa.villaNumber,
+        amount: body.amount,
+        month: body.month,
+        year: body.year,
+        paymentMode: body.paymentMode,
+        cycleId: body.maintenanceCollectionCycleId ?? null,
+      },
+    });
 
     return res.status(201).json({
       message: "Payment marked successfully",
@@ -788,6 +843,8 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
       }
     }, { timeout: 15000 });
 
+    invalidateMoneySnapshotCache(societyId);
+
     // Fire-and-forget: audit log
     auditFromRequest(req, {
       societyId,
@@ -863,8 +920,8 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       prisma.villaMaintenanceSnapshot.findUnique({
         where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
       }),
-      prisma.cycleVillaExclusion.findUnique({
-        where: { cycleId_villaId: { cycleId: cycle.id, villaId: body.villaId } },
+      prisma.cycleVillaExclusion.findFirst({
+        where: { cycleId: cycle.id, villaId: body.villaId, cycle: { societyId } },
         select: { id: true },
       }),
     ]);
@@ -882,18 +939,18 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       return res.status(400).json({ message: "No balance due for this billing cycle" });
     }
 
-    const { creditPool } = await getVillaCreditBalance(prisma, {
-      societyId,
-      villaId: body.villaId,
-      financialYearId: cycle.financialYearId,
-    });
-    if (creditPool <= 0) {
-      return res.status(400).json({ message: "No advance credit available for this villa" });
-    }
-
-    const creditApplied = Math.min(creditPool, remaining);
-
     const result = await prisma.$transaction(async (tx) => {
+      // Read credit balance INSIDE transaction to prevent TOCTOU race.
+      const { creditPool } = await getVillaCreditBalance(tx, {
+        societyId,
+        villaId: body.villaId,
+        financialYearId: cycle.financialYearId,
+      });
+      if (creditPool <= 0) {
+        throw { statusCode: 400, message: "No advance credit available for this villa" };
+      }
+
+      const creditApplied = Math.min(creditPool, remaining);
       const maintenanceRow = await tx.maintenance.upsert({
         where: {
           villaId_month_year: { villaId: body.villaId, month: cycle.periodMonth, year: cycle.periodYear },
@@ -992,20 +1049,38 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       }
 
       return {
+        creditApplied,
         paidAmount: Number(reconciledSnapshot?.paidAmount ?? 0),
         status: reconciledSnapshot?.status ?? "PENDING",
       };
     }, { timeout: 15000 });
 
     invalidateReconcileCache(body.villaId);
+    invalidateMoneySnapshotCache(societyId);
+    auditFromRequest(req, {
+      societyId,
+      adminId,
+      action: "CREDIT_APPLIED",
+      entityType: "Villa",
+      entityId: body.villaId,
+      metadata: {
+        villaNumber: villa.villaNumber,
+        creditApplied: result.creditApplied,
+        cycleId: body.maintenanceCollectionCycleId,
+      },
+    });
 
     return res.status(200).json({
       message: "Advance credit applied successfully",
-      creditApplied,
+      creditApplied: result.creditApplied,
       paidAmount: result.paidAmount,
       status: result.status,
     });
-  } catch (error) {
+  } catch (error: unknown) {
+    if (error && typeof error === "object" && "statusCode" in error) {
+      const e = error as { statusCode: number; message: string };
+      return res.status(e.statusCode).json({ message: e.message });
+    }
     next(error);
   }
 });
@@ -1039,8 +1114,8 @@ router.post(
         prisma.maintenanceCollectionCycle.findFirst({
           where: { id: body.maintenanceCollectionCycleId, societyId },
         }),
-        prisma.cycleVillaExclusion.findUnique({
-          where: { cycleId_villaId: { cycleId: body.maintenanceCollectionCycleId, villaId: body.villaId } },
+        prisma.cycleVillaExclusion.findFirst({
+          where: { cycleId: body.maintenanceCollectionCycleId, villaId: body.villaId, cycle: { societyId } },
           select: { id: true },
         }),
       ]);
@@ -1049,25 +1124,23 @@ router.post(
         return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
       }
 
-      // For deductions, verify there is enough credit to deduct
-      if (body.amount < 0) {
-        const { creditPool } = await getVillaCreditBalance(prisma, {
-          societyId,
-          villaId: body.villaId,
-          financialYearId: cycle.financialYearId,
-        });
-        if (creditPool < Math.abs(body.amount)) {
-          return res.status(400).json({
-            message: `Cannot deduct more than available credit (₹${creditPool.toLocaleString("en-IN")})`,
-          });
-        }
-      }
-
       const adjustmentType = body.amount > 0 ? "added" : "deducted";
       const absAmount = Math.abs(body.amount);
       const adminId = req.auth!.userId;
 
       const result = await prisma.$transaction(async (tx) => {
+        // For deductions, verify credit inside transaction to prevent TOCTOU.
+        if (body.amount < 0) {
+          const { creditPool } = await getVillaCreditBalance(tx, {
+            societyId,
+            villaId: body.villaId,
+            financialYearId: cycle.financialYearId,
+          });
+          if (creditPool < Math.abs(body.amount)) {
+            throw { statusCode: 400, message: `Cannot deduct more than available credit (₹${creditPool.toLocaleString("en-IN")})` };
+          }
+        }
+
         // Create an unlinked payment (no cycle, no snapshot) so the credit
         // walker treats it as a floating adjustment that seeds the credit pool.
         await tx.maintenancePayment.create({
@@ -1175,13 +1248,33 @@ router.post(
         return { creditPool };
       }, { timeout: 15000 });
 
+      invalidateMoneySnapshotCache(societyId);
+      auditFromRequest(req, {
+        societyId,
+        adminId: req.auth!.userId,
+        action: "CREDIT_ADJUSTED",
+        entityType: "Villa",
+        entityId: body.villaId,
+        metadata: {
+          villaNumber: villa.villaNumber,
+          adjustmentType,
+          amount: absAmount,
+          remarks: body.remarks,
+          newCreditBalance: result.creditPool,
+        },
+      });
+
       return res.status(200).json({
         message: `₹${absAmount.toLocaleString("en-IN")} advance credit ${adjustmentType} for Villa ${villa.villaNumber}`,
         adjustmentType,
         amount: absAmount,
         newCreditBalance: result.creditPool,
       });
-    } catch (error) {
+    } catch (error: unknown) {
+      if (error && typeof error === "object" && "statusCode" in error) {
+        const e = error as { statusCode: number; message: string };
+        return res.status(e.statusCode).json({ message: e.message });
+      }
       next(error);
     }
   },
@@ -1846,9 +1939,23 @@ router.post("/bulk-mark-paid", validateBody(bulkMarkPaidSchema), async (req, res
       return txResults;
     }, { timeout: 30000 });
 
-    // Bust reconcile cache for all villas touched in the batch.
+    // Bust reconcile + money snapshot caches for all villas touched in the batch.
     const villaIds = new Set(paymentsData.map((p: { villaId: string }) => p.villaId));
     for (const vid of villaIds) invalidateReconcileCache(vid);
+    invalidateMoneySnapshotCache(societyId);
+
+    auditFromRequest(req, {
+      societyId,
+      adminId,
+      action: "BULK_PAYMENT_RECORDED",
+      entityType: "Society",
+      entityId: societyId,
+      metadata: {
+        villaCount: villaIds.size,
+        paymentCount: paymentsData.length,
+        totalAmount: paymentsData.reduce((s: number, p: { amount: number }) => s + p.amount, 0),
+      },
+    });
 
     // Notify residents of each affected villa (fire-and-forget).
     void (async () => {
@@ -2274,7 +2381,94 @@ router.post("/additional-funds", validateBody(additionalFundSchema), async (req,
         createdBy: userId,
       },
     });
+
+    invalidateMoneySnapshotCache(societyId);
+    auditFromRequest(req, {
+      societyId,
+      adminId: userId,
+      action: "ADDITIONAL_FUND_CREATED",
+      entityType: "AdditionalFund",
+      entityId: row.id,
+      metadata: { title: body.title, amount: body.amount, source: body.source },
+    });
+
     return res.status(201).json({ fund: row });
+  } catch (error) {
+    next(error);
+  }
+});
+
+const updateAdditionalFundSchema = z.object({
+  title: z.string().trim().min(2).max(120).optional(),
+  amount: z.number().positive().optional(),
+  receivedDate: z.string().datetime().optional(),
+  destination: z.enum(["MERGE_WITH_MAINTENANCE", "KEEP_SEPARATE"]).optional(),
+  source: z.string().trim().max(250).optional(),
+  notes: z.string().trim().max(500).optional(),
+});
+
+router.put("/additional-funds/:id", validateBody(updateAdditionalFundSchema), async (req, res, next) => {
+  try {
+    const { societyId, userId } = req.auth!;
+    const { id } = req.params;
+    const body = req.body as z.infer<typeof updateAdditionalFundSchema>;
+
+    const existing = await prisma.additionalFund.findFirst({ where: { id, societyId } });
+    if (!existing) return res.status(404).json({ message: "Additional fund not found" });
+
+    const receivedDate = body.receivedDate ? new Date(body.receivedDate) : undefined;
+    const month = receivedDate ? receivedDate.getMonth() + 1 : undefined;
+    const year = receivedDate ? receivedDate.getFullYear() : undefined;
+
+    const updated = await prisma.additionalFund.update({
+      where: { id },
+      data: {
+        ...(body.title !== undefined ? { title: body.title } : {}),
+        ...(body.amount !== undefined ? { amount: body.amount } : {}),
+        ...(receivedDate ? { receivedDate, month, year } : {}),
+        ...(body.destination !== undefined ? { destination: body.destination } : {}),
+        ...(body.source !== undefined ? { source: body.source } : {}),
+        ...(body.notes !== undefined ? { notes: body.notes } : {}),
+      },
+    });
+
+    invalidateMoneySnapshotCache(societyId);
+    auditFromRequest(req, {
+      societyId,
+      adminId: userId,
+      action: "ADDITIONAL_FUND_UPDATED",
+      entityType: "AdditionalFund",
+      entityId: id,
+      metadata: { title: updated.title, amount: Number(updated.amount) },
+    });
+
+    return res.json({ fund: updated });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.delete("/additional-funds/:id", async (req, res, next) => {
+  try {
+    const { societyId, userId } = req.auth!;
+    const { id } = req.params;
+
+    const existing = await prisma.additionalFund.findFirst({ where: { id, societyId } });
+    if (!existing) return res.status(404).json({ message: "Additional fund not found" });
+
+    await prisma.additionalFund.delete({ where: { id } });
+
+    invalidateMoneySnapshotCache(societyId);
+    auditFromRequest(req, {
+      societyId,
+      adminId: userId,
+      action: "ADDITIONAL_FUND_DELETED",
+      entityType: "AdditionalFund",
+      entityId: id,
+      metadata: { title: existing.title, amount: Number(existing.amount) },
+    });
+
+    return res.json({ message: "Additional fund deleted" });
   } catch (error) {
     next(error);
   }
@@ -3398,6 +3592,22 @@ router.get("/trial-balance/:year/pdf", async (req, res, next) => {
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="trial_balance_${year}.pdf"`);
     return res.send(pdfBuffer);
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/maintenance-management/fund-segregation
+// Virtual wallet decomposition — shows how the bank balance is allocated across
+// maintenance operations, project reserves, advance credit, and earmarked funds.
+router.get("/fund-segregation", async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const segregation = await computeFundSegregation(prisma, societyId);
+    return res.json(segregation);
   } catch (error) {
     next(error);
   }
