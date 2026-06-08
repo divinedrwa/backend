@@ -10,8 +10,22 @@ import { invalidateMoneySnapshotCache } from '../../lib/societyFinance';
 import { expenseAttachmentMemory } from '../../lib/expenseAttachmentUpload';
 import {
   isCloudinaryConfigured,
+  resolveExpenseAttachmentUrl,
   uploadExpenseAttachmentBuffer,
 } from '../../services/cloudinaryExpenseAttachment';
+
+function withResolvedAttachmentUrls<T extends { attachments?: Array<{ fileUrl: string }> }>(
+  expense: T,
+): T {
+  if (!expense.attachments?.length) return expense;
+  return {
+    ...expense,
+    attachments: expense.attachments.map((a) => ({
+      ...a,
+      fileUrl: resolveExpenseAttachmentUrl(a.fileUrl),
+    })),
+  };
+}
 
 const router = Router();
 
@@ -304,7 +318,7 @@ router.post(
           financialYear: { select: { id: true, label: true } },
         },
       });
-      res.json(updated);
+      res.json(updated ? withResolvedAttachmentUrls(updated) : updated);
     } catch (error) {
       next(error);
     }
@@ -462,7 +476,7 @@ router.get('/', async (req, res, next) => {
       'X-Pagination',
       JSON.stringify(paginationMeta(total, expenses.length, pagination)),
     );
-    res.json(expenses);
+    res.json(expenses.map(withResolvedAttachmentUrls));
   } catch (error) {
     next(error);
   }
@@ -487,7 +501,7 @@ router.get('/:id', async (req, res, next) => {
       return res.status(404).json({ message: 'Expense not found' });
     }
 
-    res.json(expense);
+    res.json(withResolvedAttachmentUrls(expense));
   } catch (error) {
     next(error);
   }
@@ -592,7 +606,7 @@ router.post('/', validateBody(createExpenseSchema), async (req, res, next) => {
       metadata: { title: expense.title, amount: expense.amount },
     });
 
-    res.json(expense);
+    res.json(withResolvedAttachmentUrls(expense));
   } catch (error) {
     next(error);
   }
@@ -710,7 +724,7 @@ router.put('/:id', validateBody(updateExpenseSchema), async (req, res, next) => 
       entityId: id,
     });
 
-    res.json(expense);
+    res.json(withResolvedAttachmentUrls(expense));
   } catch (error) {
     next(error);
   }

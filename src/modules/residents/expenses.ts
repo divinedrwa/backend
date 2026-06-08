@@ -1,4 +1,5 @@
 import { Router } from "express";
+import { resolveExpenseAttachmentUrl } from "../../services/cloudinaryExpenseAttachment";
 import { Prisma, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -157,7 +158,13 @@ router.get("/society-expenses/:id", async (req, res, next) => {
       return res.status(404).json({ message: "Expense not found" });
     }
 
-    res.json(expense);
+    res.json({
+      ...expense,
+      attachments: expense.attachments.map((a) => ({
+        ...a,
+        fileUrl: resolveExpenseAttachmentUrl(a.fileUrl),
+      })),
+    });
   } catch (error) {
     next(error);
   }
