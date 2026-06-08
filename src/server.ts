@@ -1,3 +1,6 @@
+// Sentry must be initialized before all other imports for auto-instrumentation
+import "./instrument";
+
 import cron from "node-cron";
 import { app } from "./app";
 import { env } from "./config/env";
@@ -10,10 +13,6 @@ import { NotificationService } from "./services/notification.service";
 import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
 import { processEscalations } from "./services/sos-coordinator";
-import { initSentry } from "./lib/sentry";
-
-// Initialize Sentry error tracking (must be first)
-initSentry();
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {

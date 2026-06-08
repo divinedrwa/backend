@@ -15,14 +15,7 @@ import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
-import {
-  authLimiter as _authLimiter,
-  apiLimiter as _apiLimiter,
-  paymentLimiter as _paymentLimiter,
-  bulkLimiter as _bulkLimiter,
-  superAdminLimiter as _superAdminLimiter,
-  applyRateLimitIfEnabled,
-} from "./middlewares/rateLimiter";
+import { applyRateLimitIfEnabled } from "./middlewares/rateLimiter";
 
 export const app = express();
 
@@ -230,19 +223,6 @@ app.use((req, _res, next) => {
   if (needsApiPrefix) {
     req.url = `/api${req.url}`;
   }
-  next();
-});
-
-// Log slow requests (>500ms) at warn level for performance monitoring
-const SLOW_REQUEST_MS = 500;
-app.use((req, res, next) => {
-  const start = process.hrtime.bigint();
-  res.on("finish", () => {
-    const durationMs = Number(process.hrtime.bigint() - start) / 1e6;
-    if (durationMs > SLOW_REQUEST_MS) {
-      logger.warn({ method: req.method, path: req.originalUrl, durationMs: Math.round(durationMs), status: res.statusCode }, "slow request");
-    }
-  });
   next();
 });
 

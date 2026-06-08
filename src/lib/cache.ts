@@ -69,18 +69,29 @@ class CacheService {
   }
 
   /**
-   * Get cached value
+   * Get cached value. Returns { hit: true, value } on cache hit,
+   * { hit: false } on miss, so callers can distinguish null values from misses.
    */
-  async get<T>(key: string): Promise<T | null> {
-    if (!this.isEnabled || !this.client) return null;
-    
+  async getRaw<T>(key: string): Promise<{ hit: true; value: T } | { hit: false }> {
+    if (!this.isEnabled || !this.client) return { hit: false };
+
     try {
       const data = await this.client.get(key);
-      return data ? JSON.parse(data) : null;
+      if (data === null) return { hit: false };
+      return { hit: true, value: JSON.parse(data) as T };
     } catch (err) {
       logger.error({ err, key }, "[Cache] Get failed");
-      return null;
+      return { hit: false };
     }
+  }
+
+  /**
+   * Get cached value (convenience — returns null on miss).
+   * Cannot distinguish a cached null from a miss; use getRaw() when that matters.
+   */
+  async get<T>(key: string): Promise<T | null> {
+    const result = await this.getRaw<T>(key);
+    return result.hit ? result.value : null;
   }
 
   /**
@@ -118,32 +129,39 @@ class CacheService {
     ttl: number,
     fn: () => Promise<T>
   ): Promise<T> {
-    // Try cache first
-    const cached = await this.get<T>(key);
-    if (cached !== null) {
-      return cached;
+    // Try cache first — use getRaw to correctly handle cached null/falsy values
+    const cached = await this.getRaw<T>(key);
+    if (cached.hit) {
+      return cached.value;
     }
 
     // Execute function
     const result = await fn();
-    
+
     // Cache result
     await this.set(key, result, ttl);
-    
+
     return result;
   }
 
   /**
-   * Delete all keys matching pattern (use cautiously)
+   * Delete all keys matching pattern using SCAN (safe for production).
+   * Unlike KEYS, SCAN is non-blocking and iterates incrementally.
    */
   async delPattern(pattern: string): Promise<void> {
     if (!this.isEnabled || !this.client) return;
-    
+
     try {
-      const keys = await this.client.keys(pattern);
-      if (keys.length > 0) {
-        await this.client.del(...keys);
-      }
+      let cursor = "0";
+      do {
+        const [nextCursor, keys] = await this.client.scan(
+          cursor, "MATCH", pattern, "COUNT", 100,
+        );
+        cursor = nextCursor;
+        if (keys.length > 0) {
+          await this.client.del(...keys);
+        }
+      } while (cursor !== "0");
     } catch (err) {
       logger.error({ err, pattern }, "[Cache] DelPattern failed");
     }
