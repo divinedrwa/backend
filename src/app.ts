@@ -10,16 +10,17 @@ import pinoHttp from "pino-http";
 import routes from "./routes";
 import swaggerRoutes from "./routes/swagger";
 import { errorHandler } from "./middlewares/error";
+import { responseTimeMonitor } from "./middlewares/responseTime";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
 import {
-  authLimiter,
-  apiLimiter,
-  paymentLimiter,
-  bulkLimiter,
-  superAdminLimiter,
+  authLimiter as _authLimiter,
+  apiLimiter as _apiLimiter,
+  paymentLimiter as _paymentLimiter,
+  bulkLimiter as _bulkLimiter,
+  superAdminLimiter as _superAdminLimiter,
   applyRateLimitIfEnabled,
 } from "./middlewares/rateLimiter";
 
@@ -130,12 +131,16 @@ app.use(
       legacyHeaders: false,
       keyGenerator: (req) => {
         // Use userId if authenticated to prevent shared WiFi issues
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
         return (req as any).auth?.userId || req.ip;
       },
       message: { message: "Too many requests, please try again later" },
     })
   )
 );
+
+// Response time monitoring (logs slow requests)
+app.use(responseTimeMonitor);
 
 // Request ID: propagate incoming X-Request-Id or generate a new UUID.
 // Attached to every log line via pino-http's `genReqId` and echoed

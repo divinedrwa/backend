@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { NotificationCategory, Prisma, UserRole } from "@prisma/client";
+import { NotificationCategory, Prisma } from "@prisma/client";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";

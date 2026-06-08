@@ -1,4 +1,4 @@
-import { ComplaintStatus, NotificationCategory, UserRole } from "@prisma/client";
+import { ComplaintStatus, NotificationCategory } from "@prisma/client";
 import { residentLikeRoleFilter } from "../lib/residentLike";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
