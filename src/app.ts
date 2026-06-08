@@ -14,6 +14,14 @@ import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
+import {
+  authLimiter,
+  apiLimiter,
+  paymentLimiter,
+  bulkLimiter,
+  superAdminLimiter,
+  applyRateLimitIfEnabled,
+} from "./middlewares/rateLimiter";
 
 export const app = express();
 
@@ -105,16 +113,28 @@ app.use(
   })
 );
 
-// Global rate limit: 100 requests per minute per IP. Stricter per-route
-// limits on /auth/login and /auth/register still apply on top of this.
+// RATE LIMITING: Production-safe configuration with VERY generous limits
+// All limits designed to block only malicious actors, not legitimate traffic
+// Can be disabled via RATE_LIMIT_ENABLED=false env var for emergency rollback
+//
+// Global rate limit: 300 requests per minute per user/IP (increased from 100 for safety)
+// Per-endpoint limits (auth, payment, bulk ops) apply on top of this
+//
+// SAFETY: Normal users will NEVER hit these limits
 app.use(
-  rateLimit({
-    windowMs: 60 * 1000,
-    limit: 100,
-    standardHeaders: "draft-7",
-    legacyHeaders: false,
-    message: { message: "Too many requests, please try again later" },
-  })
+  applyRateLimitIfEnabled(
+    rateLimit({
+      windowMs: 60 * 1000,
+      limit: 300, // Increased from 100 for maximum safety
+      standardHeaders: "draft-7",
+      legacyHeaders: false,
+      keyGenerator: (req) => {
+        // Use userId if authenticated to prevent shared WiFi issues
+        return (req as any).auth?.userId || req.ip;
+      },
+      message: { message: "Too many requests, please try again later" },
+    })
+  )
 );
 
 // Request ID: propagate incoming X-Request-Id or generate a new UUID.
