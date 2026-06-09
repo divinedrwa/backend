@@ -1196,116 +1196,157 @@ function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.p
   const doc = new PDFDocument({ size: "A4", margin: 0 });
   const pageW = doc.page.width;   // 595.28
   const pageH = doc.page.height;  // 841.89
-  const M = 48;                   // content margin
+  const M = 50;                   // content margin
   const pw = pageW - M * 2;       // content width
 
   // ── Brand palette ──
-  const navy      = "#0f172a";
-  const brand     = "#1e40af";
-  const brandDark = "#1e3a8a";
-  const accent    = "#3b82f6";
-  const emerald   = "#059669";
-  const lightBg   = "#f8fafc";
-  const cardBg    = "#f1f5f9";
-  const border    = "#e2e8f0";
-  const textDark  = "#0f172a";
-  const textMid   = "#475569";
+  const navy       = "#0f172a";
+  const brand      = "#1e40af";
+  const brandDark  = "#1e3a8a";
+  const accent     = "#3b82f6";
+  const emerald    = "#059669";
+  const emeraldBg  = "#ecfdf5";
+  const emeraldBdr = "#a7f3d0";
+  const lightBg    = "#f8fafc";
+  const cardBg     = "#f1f5f9";
+  const border     = "#e2e8f0";
+  const textDark   = "#0f172a";
+  const textMid    = "#475569";
   const textLight  = "#94a3b8";
+  const white      = "#ffffff";
+
+  const isPaid = data.status === "PAID";
 
   // ═══════════════════════════════════════════════════════
-  // TOP HEADER BAND — full-width dark navy
+  // DIAGONAL "PAID" WATERMARK  (behind everything)
   // ═══════════════════════════════════════════════════════
-  const headerH = 100;
-  doc.rect(0, 0, pageW, headerH).fill(navy);
-
-  // Society name — large, white, centered
-  doc.fontSize(22).font("Helvetica-Bold").fillColor("#ffffff")
-    .text(data.societyName.toUpperCase(), M, 24, { width: pw, align: "center", characterSpacing: 1.5 });
-  if (data.societyAddress) {
-    doc.fontSize(9).font("Helvetica").fillColor("#94a3b8")
-      .text(data.societyAddress, M, doc.y + 2, { width: pw, align: "center" });
+  if (isPaid) {
+    doc.save();
+    doc.translate(pageW / 2, pageH / 2);
+    doc.rotate(-35, { origin: [0, 0] });
+    doc.fontSize(120).font("Helvetica-Bold")
+      .fillColor(emerald).fillOpacity(0.06)
+      .text("PAID", -200, -50, { width: 400, align: "center" });
+    doc.fillOpacity(1);
+    doc.restore();
   }
 
   // ═══════════════════════════════════════════════════════
-  // ACCENT STRIPE under header
+  // TOP HEADER BAND
   // ═══════════════════════════════════════════════════════
+  const headerH = 110;
+  doc.rect(0, 0, pageW, headerH).fill(navy);
+
+  // Society monogram circle (left side)
+  const initials = data.societyName
+    .split(/\s+/)
+    .filter(w => w.length > 0)
+    .slice(0, 2)
+    .map(w => w[0].toUpperCase())
+    .join("");
+  const monoR = 22;
+  const monoX = M + monoR;
+  const monoCY = headerH / 2;
+  doc.circle(monoX, monoCY, monoR).fill(accent);
+  doc.fontSize(16).font("Helvetica-Bold").fillColor(white)
+    .text(initials, monoX - monoR, monoCY - 8, { width: monoR * 2, align: "center" });
+
+  // Society name + subtitle
+  const nameX = monoX + monoR + 16;
+  const nameW = pw - (nameX - M);
+  doc.fontSize(18).font("Helvetica-Bold").fillColor(white)
+    .text(data.societyName.toUpperCase(), nameX, monoCY - 18, { width: nameW, characterSpacing: 1 });
+  doc.fontSize(9).font("Helvetica").fillColor(textLight)
+    .text("Payment Receipt", nameX, doc.y + 1, { width: nameW });
+  if (data.societyAddress) {
+    doc.fontSize(8).font("Helvetica").fillColor(textLight)
+      .text(data.societyAddress, nameX, doc.y + 1, { width: nameW });
+  }
+
+  // Accent stripe
   doc.rect(0, headerH, pageW, 4).fill(accent);
 
   // ═══════════════════════════════════════════════════════
-  // RECEIPT TITLE + META — two-column layout
+  // RECEIPT META BAR
   // ═══════════════════════════════════════════════════════
-  let cy = headerH + 24;
+  let cy = headerH + 20;
 
-  // Title badge
-  doc.roundedRect(M, cy, 160, 28, 4).fill(brand);
-  doc.fontSize(11).font("Helvetica-Bold").fillColor("#ffffff")
-    .text("PAYMENT RECEIPT", M + 14, cy + 8);
+  // Receipt badge
+  doc.roundedRect(M, cy, 150, 26, 4).fill(brand);
+  doc.fontSize(10).font("Helvetica-Bold").fillColor(white)
+    .text("RECEIPT", M + 12, cy + 7);
 
-  // Receipt no & date on right
-  const metaX = M + pw - 200;
-  doc.fontSize(8).font("Helvetica-Bold").fillColor(textMid)
-    .text("RECEIPT NO", metaX, cy + 2);
-  doc.fontSize(9).font("Helvetica").fillColor(textDark)
-    .text(data.receiptNo, metaX, cy + 12);
-  doc.fontSize(8).font("Helvetica-Bold").fillColor(textMid)
-    .text("DATE", metaX + 110, cy + 2);
-  doc.fontSize(9).font("Helvetica").fillColor(textDark)
-    .text(data.receiptDate, metaX + 110, cy + 12);
+  // Receipt No + Date on right
+  const metaX = M + pw - 210;
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(textLight)
+    .text("RECEIPT NO.", metaX, cy + 2);
+  doc.fontSize(9).font("Helvetica-Bold").fillColor(textDark)
+    .text(data.receiptNo, metaX, cy + 13);
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(textLight)
+    .text("DATE", metaX + 120, cy + 2);
+  doc.fontSize(9).font("Helvetica-Bold").fillColor(textDark)
+    .text(data.receiptDate, metaX + 120, cy + 13);
 
-  cy += 46;
+  cy += 42;
 
   // ═══════════════════════════════════════════════════════
   // BILLED TO / PAYMENT FOR — two-column cards
   // ═══════════════════════════════════════════════════════
-  const cardW = (pw - 16) / 2;
-  const cardH = 72;
+  const cardW = (pw - 20) / 2;
+  const cardH = 80;
 
   // Left card — Billed To
   doc.roundedRect(M, cy, cardW, cardH, 6).lineWidth(0.5).fillAndStroke(cardBg, border);
+  // Left accent bar
+  doc.rect(M, cy + 6, 3, cardH - 12).fill(accent);
   doc.fontSize(7).font("Helvetica-Bold").fillColor(accent)
-    .text("BILLED TO", M + 14, cy + 10);
+    .text("BILLED TO", M + 16, cy + 12);
   doc.fontSize(11).font("Helvetica-Bold").fillColor(textDark)
-    .text(data.residentName, M + 14, cy + 22, { width: cardW - 28 });
+    .text(data.residentName, M + 16, cy + 26, { width: cardW - 32 });
   doc.fontSize(9).font("Helvetica").fillColor(textMid)
-    .text(`Unit ${data.unit}`, M + 14, cy + 38);
+    .text(`Unit ${data.unit}`, M + 16, cy + 44);
   if (data.contact) {
-    doc.text(data.contact, M + 14, cy + 50);
+    doc.text(data.contact, M + 16, cy + 58);
   }
 
   // Right card — Payment For
-  const rightX = M + cardW + 16;
+  const rightX = M + cardW + 20;
   doc.roundedRect(rightX, cy, cardW, cardH, 6).lineWidth(0.5).fillAndStroke(cardBg, border);
+  doc.rect(rightX, cy + 6, 3, cardH - 12).fill(accent);
   doc.fontSize(7).font("Helvetica-Bold").fillColor(accent)
-    .text("PAYMENT FOR", rightX + 14, cy + 10);
+    .text("PAYMENT FOR", rightX + 16, cy + 12);
   doc.fontSize(11).font("Helvetica-Bold").fillColor(textDark)
-    .text(data.cycleTitle, rightX + 14, cy + 22, { width: cardW - 28 });
+    .text(data.cycleTitle, rightX + 16, cy + 26, { width: cardW - 32 });
   doc.fontSize(9).font("Helvetica").fillColor(textMid)
-    .text(`Period: ${data.billingPeriod}`, rightX + 14, cy + 38);
-  doc.text(`Mode: ${data.paymentMode}`, rightX + 14, cy + 50);
+    .text(`Period: ${data.billingPeriod}`, rightX + 16, cy + 44);
+  doc.text(`Mode: ${data.paymentMode}`, rightX + 16, cy + 58);
 
-  cy += cardH + 20;
+  cy += cardH + 24;
 
   // ═══════════════════════════════════════════════════════
   // PAYMENT BREAKDOWN TABLE
   // ═══════════════════════════════════════════════════════
+  // Section label with line
   doc.fontSize(9).font("Helvetica-Bold").fillColor(navy)
     .text("PAYMENT BREAKDOWN", M, cy);
-  cy += 16;
+  const lblEnd = M + doc.widthOfString("PAYMENT BREAKDOWN") + 10;
+  doc.moveTo(lblEnd, cy + 5).lineTo(M + pw, cy + 5).lineWidth(0.5).strokeColor(border).stroke();
+  cy += 18;
 
-  const rowH = 30;
+  const rowH = 32;
   const descCol = M;
   const valCol = M + pw * 0.6;
   const valW = pw * 0.4;
 
   // Table header
   doc.roundedRect(descCol, cy, pw, rowH, 4).fill(brandDark);
-  doc.fontSize(8).font("Helvetica-Bold").fillColor("#ffffff")
-    .text("DESCRIPTION", descCol + 16, cy + 10)
-    .text("DETAILS / AMOUNT", valCol, cy + 10, { width: valW - 16, align: "right" });
+  doc.fontSize(8).font("Helvetica-Bold").fillColor(white)
+    .text("DESCRIPTION", descCol + 16, cy + 11)
+    .text("DETAILS / AMOUNT", valCol, cy + 11, { width: valW - 16, align: "right" });
   cy += rowH;
 
   // Build rows
-  const tableRows: [string, string, boolean?][] = [
+  const tableRows: [string, string][] = [
     ["Amount Due", fmtInr(data.amountDue)],
     ["Amount Paid", fmtInr(data.amountPaid)],
   ];
@@ -1319,74 +1360,85 @@ function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.p
   tableRows.push(["Payment Date", data.paidAt]);
 
   for (let i = 0; i < tableRows.length; i++) {
-    const bg = i % 2 === 0 ? lightBg : "#ffffff";
+    const bg = i % 2 === 0 ? lightBg : white;
     doc.rect(descCol, cy, pw, rowH).lineWidth(0.3).fillAndStroke(bg, border);
     doc.fontSize(9).font("Helvetica").fillColor(textDark)
-      .text(tableRows[i][0], descCol + 16, cy + 10);
+      .text(tableRows[i][0], descCol + 16, cy + 11);
     doc.font("Helvetica-Bold").fillColor(textDark)
-      .text(tableRows[i][1], valCol, cy + 10, { width: valW - 16, align: "right" });
+      .text(tableRows[i][1], valCol, cy + 11, { width: valW - 16, align: "right" });
     cy += rowH;
   }
 
   // ═══════════════════════════════════════════════════════
   // STATUS BANNER
   // ═══════════════════════════════════════════════════════
+  cy += 6;
   const statusH = 38;
-  const isPaid = data.status === "PAID";
   const statusColor = isPaid ? emerald : brand;
-  doc.roundedRect(descCol, cy + 6, pw, statusH, 4).fill(statusColor);
-  doc.fontSize(12).font("Helvetica-Bold").fillColor("#ffffff")
-    .text("PAYMENT STATUS", descCol + 16, cy + 17);
-  doc.text(data.status, valCol, cy + 17, { width: valW - 16, align: "right" });
-  cy += statusH + 6;
+  doc.roundedRect(descCol, cy, pw, statusH, 4).fill(statusColor);
+  doc.fontSize(12).font("Helvetica-Bold").fillColor(white)
+    .text("PAYMENT STATUS", descCol + 16, cy + 13);
+  doc.text(data.status, valCol, cy + 13, { width: valW - 16, align: "right" });
+  cy += statusH;
 
   // ═══════════════════════════════════════════════════════
-  // AMOUNT SUMMARY BOX (right-aligned, prominent)
+  // GRAND TOTAL CALLOUT BOX
   // ═══════════════════════════════════════════════════════
-  cy += 14;
-  const summaryW = 220;
-  const summaryX = M + pw - summaryW;
-  const summaryH = data.creditApplied > 0 ? 72 : 52;
-  doc.roundedRect(summaryX, cy, summaryW, summaryH, 6).lineWidth(0.5).fillAndStroke("#f0fdf4", "#bbf7d0");
+  cy += 18;
+  const totalAmt = data.amountPaid + data.creditApplied;
+  const totalBoxH = data.creditApplied > 0 ? 90 : 70;
+  doc.roundedRect(M, cy, pw, totalBoxH, 8).lineWidth(1).fillAndStroke(emeraldBg, emeraldBdr);
 
-  let sy = cy + 10;
-  const sLabelX = summaryX + 14;
-  const sValX = summaryX + summaryW - 14;
+  let ty = cy + 14;
 
   if (data.creditApplied > 0) {
     doc.fontSize(9).font("Helvetica").fillColor(textMid)
-      .text("Credit Applied:", sLabelX, sy);
+      .text("Credit Applied:", M + 20, ty);
     doc.font("Helvetica-Bold").fillColor(textDark)
-      .text(fmtInr(data.creditApplied), sLabelX, sy, { width: summaryW - 28, align: "right" });
-    sy += 16;
+      .text(fmtInr(data.creditApplied), M + 20, ty, { width: pw - 40, align: "right" });
+    ty += 18;
+    doc.fontSize(9).font("Helvetica").fillColor(textMid)
+      .text("Cash Paid:", M + 20, ty);
+    doc.font("Helvetica-Bold").fillColor(textDark)
+      .text(fmtInr(data.amountPaid), M + 20, ty, { width: pw - 40, align: "right" });
+    ty += 18;
+    // Divider
+    doc.moveTo(M + 20, ty).lineTo(M + pw - 20, ty).lineWidth(0.5).strokeColor(emeraldBdr).stroke();
+    ty += 10;
   }
 
-  doc.fontSize(9).font("Helvetica").fillColor(textMid)
-    .text("Cash Paid:", sLabelX, sy);
-  doc.font("Helvetica-Bold").fillColor(textDark)
-    .text(fmtInr(data.amountPaid), sLabelX, sy, { width: summaryW - 28, align: "right" });
-  sy += 18;
+  doc.fontSize(10).font("Helvetica-Bold").fillColor(textMid)
+    .text("TOTAL AMOUNT", M + 20, ty + 2);
+  doc.fontSize(22).font("Helvetica-Bold").fillColor(emerald)
+    .text(fmtInr(totalAmt), M + 20, ty - 4, { width: pw - 40, align: "right" });
 
-  doc.moveTo(sLabelX, sy).lineTo(sValX, sy).lineWidth(0.3).strokeColor("#bbf7d0").stroke();
-  sy += 6;
+  cy += totalBoxH;
 
-  doc.fontSize(11).font("Helvetica-Bold").fillColor(emerald)
-    .text("Total:", sLabelX, sy);
-  const totalAmt = data.amountPaid + data.creditApplied;
-  doc.text(fmtInr(totalAmt), sLabelX, sy, { width: summaryW - 28, align: "right" });
-  cy += summaryH + 10;
+  // ═══════════════════════════════════════════════════════
+  // THANK YOU NOTE
+  // ═══════════════════════════════════════════════════════
+  cy += 22;
+  doc.fontSize(11).font("Helvetica-Bold").fillColor(brand)
+    .text("Thank you for your timely payment!", M, cy, { width: pw, align: "center" });
+  cy += 18;
+  doc.fontSize(8).font("Helvetica").fillColor(textLight)
+    .text("If you have any questions about this receipt, please contact your society administration.", M, cy, { width: pw, align: "center" });
 
   // ═══════════════════════════════════════════════════════
   // FOOTER
   // ═══════════════════════════════════════════════════════
-  const footerY = pageH - 60;
+  const footerY = pageH - 70;
   doc.moveTo(M, footerY).lineTo(M + pw, footerY).lineWidth(0.3).strokeColor(border).stroke();
-  doc.fontSize(7.5).font("Helvetica").fillColor(textLight)
+
+  doc.fontSize(7).font("Helvetica").fillColor(textLight)
     .text("This is a computer-generated receipt and does not require a physical signature.", M, footerY + 8, { width: pw, align: "center" });
-  doc.text(`Generated on ${formatIst(new Date())} | ${data.societyName}`, M, footerY + 20, { width: pw, align: "center" });
+  doc.fontSize(7).font("Helvetica").fillColor(textLight)
+    .text(`Generated on ${formatIst(new Date())}`, M, footerY + 20, { width: pw, align: "center" });
+  doc.fontSize(7.5).font("Helvetica-Bold").fillColor(textMid)
+    .text(data.societyName, M, footerY + 32, { width: pw, align: "center" });
 
   // Bottom brand bar
-  doc.rect(0, pageH - 4, pageW, 4).fill(accent);
+  doc.rect(0, pageH - 5, pageW, 5).fill(accent);
 
   return doc;
 }
