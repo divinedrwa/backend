@@ -1,3 +1,4 @@
+import { BillingUserPaymentStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { getVillaCreditBalancesBulk } from "./credit-walker";
 
@@ -112,6 +113,28 @@ export async function buildCycleFinancialDashboardCore(
     if (!lastPayByVilla.has(p.villaId)) lastPayByVilla.set(p.villaId, p);
   }
 
+  // Gateway (online) payments settle the snapshot without creating a cash
+  // MaintenancePayment, so they'd otherwise show no payment mode. Find the
+  // villas paid online for this period (via the matching BillingCycle) so we
+  // can label them "ONLINE" — only real gateway successes, never credit/waived.
+  const gatewayVillaIds = new Set<string>();
+  const billingCycle = await prisma.billingCycle.findFirst({
+    where: { societyId, cycleKey: cycle.periodKey },
+    select: { id: true },
+  });
+  if (billingCycle) {
+    const gatewayPayments = await prisma.userCyclePayment.findMany({
+      where: {
+        cycleId: billingCycle.id,
+        paymentStatus: BillingUserPaymentStatus.SUCCESS,
+      },
+      select: { user: { select: { villaId: true } } },
+    });
+    for (const gp of gatewayPayments) {
+      if (gp.user?.villaId) gatewayVillaIds.add(gp.user.villaId);
+    }
+  }
+
   // Compute per-villa advance credit balances
   const creditBalances = await getVillaCreditBalancesBulk(prisma, {
     societyId,
@@ -160,7 +183,8 @@ export async function buildCycleFinancialDashboardCore(
       dueDate: cycle.dueDate,
       paidAt: p?.paymentDate ?? null,
       receiptNumber: p?.receiptNumber ?? null,
-      paymentMode: p?.paymentMode ?? null,
+      paymentMode:
+        p?.paymentMode ?? (gatewayVillaIds.has(villa.id) ? "ONLINE" : null),
       ...(credit > 0 ? { advanceCredit: credit } : {}),
       ...(cashPaid > 0 ? { cashPaidThisCycle: cashPaid } : {}),
       ...(isExcluded ? { isExcluded: true } : {}),
