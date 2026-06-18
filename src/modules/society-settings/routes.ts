@@ -6,6 +6,8 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { upiQrImageMemory } from "../../lib/upiQrUpload";
 import { uploadUpiQrImageBuffer } from "../../services/cloudinaryUpiQr";
+import { letterheadImageMemory } from "../../lib/letterheadUpload";
+import { uploadLetterheadImageBuffer } from "../../services/cloudinaryLetterhead";
 
 const router = Router();
 
@@ -46,6 +48,7 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         guardCanApproveVisitors: true,
         upiVpa: true,
         upiQrCodeUrl: true,
+        letterheadUrl: true,
         lateFeePercentage: true,
         lateFeeFixedAmount: true,
         maintenanceGracePeriodDays: true,
@@ -147,6 +150,7 @@ router.patch(
           guardCanApproveVisitors: true,
           upiVpa: true,
           upiQrCodeUrl: true,
+          letterheadUrl: true,
         },
       });
 
@@ -282,6 +286,55 @@ router.delete(
       }
 
       return res.json({ message: "QR code removed" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/society-settings/upload-letterhead — upload the society letterhead image (ADMIN).
+ * Used as the branding background for generated documents (e.g. maintenance invoices).
+ */
+router.post(
+  "/upload-letterhead",
+  requireRole(UserRole.ADMIN),
+  letterheadImageMemory.single("letterhead"),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+
+      const url = await uploadLetterheadImageBuffer(req.file.buffer, societyId);
+
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { letterheadUrl: url },
+      });
+
+      return res.json({ url });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/letterhead — remove the society letterhead image (ADMIN).
+ */
+router.delete(
+  "/letterhead",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { letterheadUrl: null },
+      });
+      return res.json({ message: "Letterhead removed" });
     } catch (error) {
       next(error);
     }

@@ -22,7 +22,7 @@ router.get(
       const { societyId } = req.auth!;
       const society = await prisma.society.findUnique({
         where: { id: societyId },
-        select: { upiVpa: true, upiQrCodeUrl: true, name: true },
+        select: { upiVpa: true, upiQrCodeUrl: true, letterheadUrl: true, name: true },
       });
       if (!society) {
         return res.status(404).json({ message: "Society not found" });
@@ -57,6 +57,7 @@ router.get(
       return res.json({
         upiVpa,
         upiQrCodeUrl,
+        letterheadUrl: society.letterheadUrl,
         payeeName: society.name,
       });
     } catch (error) {

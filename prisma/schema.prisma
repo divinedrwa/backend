@@ -188,6 +188,10 @@ model Society {
   /// Optional URL to a custom UPI QR code image uploaded by the admin (e.g. from their bank app).
   upiQrCodeUrl String?
 
+  /// Optional URL to the society letterhead image uploaded by the admin, used as the
+  /// background/branding for generated documents (e.g. maintenance invoices).
+  letterheadUrl String?
+
   /// Late-fee config: percentage of monthly maintenance applied after grace period.
   /// 0 = disabled. Typical: 1-5%. Mutually exclusive with lateFeeFixedAmount.
   lateFeePercentage Float @default(0)
