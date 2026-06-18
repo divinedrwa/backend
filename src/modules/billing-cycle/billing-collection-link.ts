@@ -147,6 +147,49 @@ export async function ensureVillaSnapshotForMaintenanceCycle(
 }
 
 /**
+ * Ensure a maintenance collection cycle exists for a billing cycle AND a PENDING
+ * snapshot exists for every primary-occupant (billed) villa. Idempotent: the
+ * collection cycle is upserted and per-villa snapshots are skipped when already
+ * present, so existing/paid rows are never overwritten. Returns the number of
+ * billed villas ensured. Caller must pass the cycle's base amount.
+ */
+export async function generateSnapshotsForBillingCycle(
+  tx: Prisma.TransactionClient,
+  params: { societyId: string; billingCycleId: string; cycleAmount: number },
+): Promise<number> {
+  const { maintenanceCycleId, dueDate } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+  const occupants = await tx.user.findMany({
+    where: {
+      societyId: params.societyId,
+      isActive: true,
+      maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+      villaId: { not: null },
+      ...residentLikeRoleFilter,
+    },
+    select: { villaId: true },
+  });
+  const villaIds = [
+    ...new Set(
+      occupants
+        .map((o) => o.villaId)
+        .filter((v): v is string => typeof v === "string" && v.length > 0),
+    ),
+  ];
+  for (const villaId of villaIds) {
+    await ensureVillaSnapshotForMaintenanceCycle(tx, {
+      maintenanceCycleId,
+      villaId,
+      fallbackExpected: params.cycleAmount,
+      dueDate,
+    });
+  }
+  return villaIds.length;
+}
+
+/**
  * After snapshot/ledger update, align UserCyclePayment rows for primary residents
  * so Maintenance Billing admin matches maintenance-management.
  */

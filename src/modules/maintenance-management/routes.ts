@@ -306,6 +306,22 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       }
     }
 
+    // If the caller didn't specify a billing cycle, resolve the collection cycle
+    // for this period so the payment flows through the snapshot ledger (keeping
+    // admin Outstanding Dues / reconciliation in sync and recording partials as
+    // PARTIAL instead of marking the bill fully PAID). Falls back to the legacy
+    // path only when the society has no collection cycle for this month/year.
+    if (!body.maintenanceCollectionCycleId) {
+      const autoCycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { societyId, periodMonth: body.month, periodYear: body.year },
+        orderBy: { createdAt: "desc" },
+        select: { id: true },
+      });
+      if (autoCycle) {
+        body.maintenanceCollectionCycleId = autoCycle.id;
+      }
+    }
+
     if (body.maintenanceCollectionCycleId) {
       const adminId = req.auth!.userId;
       const cycle = await prisma.maintenanceCollectionCycle.findFirst({
@@ -2555,6 +2571,8 @@ router.get("/outstanding-dues", async (req, res, next) => {
           month: number;
           year: number;
           expectedAmount: number;
+          baseExpectedAmount: number;
+          lateFeeAmount: number;
           paidAmount: number;
           remainingDue: number;
           dueDate: string;
@@ -2569,7 +2587,11 @@ router.get("/outstanding-dues", async (req, res, next) => {
     let totalPendingCycles = 0;
 
     for (const snap of snapshots) {
-      const expected = Number(snap.expectedAmount);
+      const baseExpected = Number(snap.expectedAmount);
+      const lateFee = Number(snap.lateFeeAmount ?? 0);
+      // Total owed for the cycle includes any applied late fee — consistent with
+      // the resident ledger and the financial dashboard (which both add it).
+      const expected = baseExpected + lateFee;
       const paid = Number(snap.paidAmount);
       const remaining = expected - paid;
       if (remaining <= 0) continue;
@@ -2600,6 +2622,8 @@ router.get("/outstanding-dues", async (req, res, next) => {
         month: snap.cycle.periodMonth,
         year: snap.cycle.periodYear,
         expectedAmount: expected,
+        baseExpectedAmount: baseExpected,
+        lateFeeAmount: lateFee,
         paidAmount: paid,
         remainingDue: remaining,
         dueDate: snap.cycle.dueDate.toISOString(),

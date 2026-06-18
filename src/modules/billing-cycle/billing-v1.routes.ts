@@ -16,6 +16,7 @@ import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import {
+  generateSnapshotsForBillingCycle,
   ensureVillaLedgersAligned,
   postMarkCashToMaintenanceLedger,
 } from "./billing-collection-link";
@@ -346,6 +347,28 @@ router.post(
         metadata: { cycleKey: found.cycleKey, title: found.title },
       });
 
+      // Generate maintenance snapshots for every billed (primary-occupant) villa so
+      // admin Outstanding Dues + reconciliation reflect the cycle immediately on publish.
+      // Idempotent (collection cycle is upserted; per-villa snapshots skip when already
+      // present, so existing/paid rows are never overwritten) and best-effort so a sync
+      // failure never blocks publishing. Only runs when the cycle is linked to a financial year.
+      if (found.financialYearId) {
+        try {
+          await prisma.$transaction((tx) =>
+            generateSnapshotsForBillingCycle(tx, {
+              societyId: auth.societyId,
+              billingCycleId: id,
+              cycleAmount: Number(found.amount),
+            }),
+          );
+        } catch (snapErr) {
+          logger.error(
+            { err: snapErr },
+            "[billing-cycle.publish] maintenance snapshot generation failed",
+          );
+        }
+      }
+
       try {
         await notifySocietyRoles({
           societyId: auth.societyId,
@@ -368,6 +391,72 @@ router.post(
       next(e);
     }
   }
+);
+
+/**
+ * One-time backfill: ensure maintenance snapshots exist for every ALREADY-published
+ * billing cycle in the society (cycles published before snapshot-on-publish shipped).
+ * Idempotent — safe to run repeatedly; existing/paid snapshots are never overwritten.
+ */
+router.post(
+  "/admin/cycles/backfill-snapshots",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const cycles = await prisma.billingCycle.findMany({
+        where: {
+          societyId: auth.societyId,
+          publishedAt: { not: null },
+          financialYearId: { not: null },
+        },
+        select: { id: true, amount: true, cycleKey: true },
+      });
+
+      let cyclesProcessed = 0;
+      let cyclesFailed = 0;
+      let villasEnsured = 0;
+      for (const c of cycles) {
+        try {
+          const n = await prisma.$transaction((tx) =>
+            generateSnapshotsForBillingCycle(tx, {
+              societyId: auth.societyId,
+              billingCycleId: c.id,
+              cycleAmount: Number(c.amount),
+            }),
+          );
+          cyclesProcessed += 1;
+          villasEnsured += n;
+        } catch (err) {
+          cyclesFailed += 1;
+          logger.error(
+            { err, cycleId: c.id, cycleKey: c.cycleKey },
+            "[billing-cycle.backfill-snapshots] cycle failed",
+          );
+        }
+      }
+
+      auditFromRequest(req, {
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "billing_cycle.backfill_snapshots",
+        entityType: "BillingCycle",
+        entityId: "*",
+        metadata: { cyclesProcessed, cyclesFailed, villasEnsured },
+      });
+
+      return res.json({
+        message: "Snapshot backfill complete",
+        publishedCycles: cycles.length,
+        cyclesProcessed,
+        cyclesFailed,
+        villasEnsured,
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
 );
 
 /**

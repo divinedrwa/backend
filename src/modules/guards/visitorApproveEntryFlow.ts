@@ -102,6 +102,31 @@ export async function runVisitorApproveEntry(
       };
     }
 
+    // Villa has no unit/occupant configured — same condition the walk-in path
+    // returns as a clean 400 (was previously falling through to a 500).
+    if (message === "NO_UNIT_FOUND_FOR_VILLA" || message === "NO_OCCUPANT_UNIT") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message:
+            "No unit/occupant is set up for this villa. Link a resident to a unit before admitting visitors.",
+        },
+      };
+    }
+
+    if (message === "PRE_APPROVED_IDENTIFIER_REQUIRED") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "An OTP or pre-approval reference is required.",
+        },
+      };
+    }
+
     throw err;
   }
 }
@@ -180,6 +205,31 @@ export async function runVisitorAdmitPreApprovedById(
           admitted: false,
           verified: false,
           message: "Pre-approval has expired",
+        },
+      };
+    }
+
+    // Villa has no unit/occupant configured — same condition the walk-in path
+    // returns as a clean 400 (was previously falling through to a 500).
+    if (message === "NO_UNIT_FOUND_FOR_VILLA" || message === "NO_OCCUPANT_UNIT") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message:
+            "No unit/occupant is set up for this villa. Link a resident to a unit before admitting visitors.",
+        },
+      };
+    }
+
+    if (message === "PRE_APPROVED_IDENTIFIER_REQUIRED") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "An OTP or pre-approval reference is required.",
         },
       };
     }
