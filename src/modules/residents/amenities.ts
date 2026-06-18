@@ -112,26 +112,18 @@ router.post("/book-amenity", requireRole(UserRole.RESIDENT, UserRole.ADMIN), val
       return res.status(404).json({ message: "Amenity not found or inactive" });
     }
 
-    // Check for conflicts
+    // Check for conflicts. Standard overlap test — two ranges overlap iff
+    // existing.start < new.end AND existing.end > new.start. This catches
+    // partial, fully-contained, AND fully-enveloping overlaps (the previous
+    // OR missed the enveloping case). Strict comparisons allow back-to-back
+    // slots (an existing booking ending exactly when the new one starts).
     const conflicts = await prisma.amenityBooking.findMany({
       where: {
         amenityId,
         societyId,
         status: { in: ["PENDING", "CONFIRMED"] },
-        OR: [
-          {
-            AND: [
-              { startTime: { lte: new Date(startTime) } },
-              { endTime: { gte: new Date(startTime) } },
-            ],
-          },
-          {
-            AND: [
-              { startTime: { lte: new Date(endTime) } },
-              { endTime: { gte: new Date(endTime) } },
-            ],
-          },
-        ],
+        startTime: { lt: new Date(endTime) },
+        endTime: { gt: new Date(startTime) },
       },
     });
 
