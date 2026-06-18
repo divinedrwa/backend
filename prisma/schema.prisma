@@ -192,6 +192,12 @@ model Society {
   /// background/branding for generated documents (e.g. maintenance invoices).
   letterheadUrl String?
 
+  /// Optional URL to the authorised-signatory signature image, printed on generated documents.
+  signatureUrl String?
+
+  /// Optional URL to the society stamp/seal image, printed on generated documents.
+  stampUrl String?
+
   /// Late-fee config: percentage of monthly maintenance applied after grace period.
   /// 0 = disabled. Typical: 1-5%. Mutually exclusive with lateFeeFixedAmount.
   lateFeePercentage Float @default(0)

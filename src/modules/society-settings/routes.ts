@@ -8,6 +8,8 @@ import { upiQrImageMemory } from "../../lib/upiQrUpload";
 import { uploadUpiQrImageBuffer } from "../../services/cloudinaryUpiQr";
 import { letterheadImageMemory } from "../../lib/letterheadUpload";
 import { uploadLetterheadImageBuffer } from "../../services/cloudinaryLetterhead";
+import { brandingImageMemory } from "../../lib/brandingImageUpload";
+import { uploadBrandingImageBuffer } from "../../services/cloudinaryBranding";
 
 const router = Router();
 
@@ -49,6 +51,8 @@ router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
         upiVpa: true,
         upiQrCodeUrl: true,
         letterheadUrl: true,
+        signatureUrl: true,
+        stampUrl: true,
         lateFeePercentage: true,
         lateFeeFixedAmount: true,
         maintenanceGracePeriodDays: true,
@@ -151,6 +155,8 @@ router.patch(
           upiVpa: true,
           upiQrCodeUrl: true,
           letterheadUrl: true,
+          signatureUrl: true,
+          stampUrl: true,
         },
       });
 
@@ -335,6 +341,98 @@ router.delete(
         data: { letterheadUrl: null },
       });
       return res.json({ message: "Letterhead removed" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/society-settings/upload-signature — upload the authorised-signatory
+ * signature image (ADMIN). Printed on generated documents (e.g. invoices).
+ */
+router.post(
+  "/upload-signature",
+  requireRole(UserRole.ADMIN),
+  brandingImageMemory.single("signature"),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+      const url = await uploadBrandingImageBuffer(req.file.buffer, societyId, "signature");
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { signatureUrl: url },
+      });
+      return res.json({ url });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/signature — remove the signature image (ADMIN).
+ */
+router.delete(
+  "/signature",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { signatureUrl: null },
+      });
+      return res.json({ message: "Signature removed" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/society-settings/upload-stamp — upload the society stamp/seal image
+ * (ADMIN). Printed on generated documents (e.g. invoices).
+ */
+router.post(
+  "/upload-stamp",
+  requireRole(UserRole.ADMIN),
+  brandingImageMemory.single("stamp"),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+      const url = await uploadBrandingImageBuffer(req.file.buffer, societyId, "stamp");
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { stampUrl: url },
+      });
+      return res.json({ url });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/stamp — remove the stamp image (ADMIN).
+ */
+router.delete(
+  "/stamp",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { stampUrl: null },
+      });
+      return res.json({ message: "Stamp removed" });
     } catch (error) {
       next(error);
     }
