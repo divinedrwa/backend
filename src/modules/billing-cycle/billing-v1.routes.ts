@@ -976,7 +976,9 @@ router.post(
       }
 
       const waiveUser = await prisma.user.findFirst({
-        where: { id: userId, societyId: auth.societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] } },
+        // Occupant role set (includes admins who live in a villa) so a late-fee
+        // waiver can target a resident who is also an admin.
+        where: { id: userId, societyId: auth.societyId, ...residentLikeRoleFilter },
         select: { maintenanceBillingRole: true },
       });
       if (!waiveUser) {

@@ -671,7 +671,7 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
     void (async () => {
       try {
         const residents = await prisma.user.findMany({
-          where: { villaId: body.villaId, societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] }, isActive: true },
+          where: { villaId: body.villaId, societyId, ...residentLikeRoleFilter, isActive: true },
           select: { id: true },
         });
         if (residents.length > 0) {
@@ -881,7 +881,7 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
     void (async () => {
       try {
         const residents = await prisma.user.findMany({
-          where: { villaId: body.villaId, societyId, role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] }, isActive: true },
+          where: { villaId: body.villaId, societyId, ...residentLikeRoleFilter, isActive: true },
           select: { id: true },
         });
         if (residents.length > 0) {
@@ -2482,7 +2482,7 @@ router.post("/send-dues-reminders", async (req, res, next) => {
     const recipients = await prisma.user.findMany({
       where: {
         societyId,
-        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+        ...residentLikeRoleFilter,
         villaId: { in: villaIds },
       },
       select: { id: true, villaId: true },
@@ -2700,7 +2700,7 @@ router.post(
       const recipients = await prisma.user.findMany({
         where: {
           societyId,
-          role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+          ...residentLikeRoleFilter,
           villaId,
         },
         select: { id: true },

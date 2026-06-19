@@ -4,6 +4,7 @@ import { z } from "zod";
 import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import {
   broadcastNoticeToAllResidents,
   broadcastNoticeToSelectedResidents,
@@ -61,7 +62,9 @@ async function resolveValidatedResidentRecipientIds(
     where: {
       id: { in: unique },
       societyId,
-      role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+      // Include admins who occupy a villa so a notice can be targeted to a
+      // resident who is also an admin (same occupant role set used elsewhere).
+      ...residentLikeRoleFilter,
       isActive: true,
     },
     select: { id: true },

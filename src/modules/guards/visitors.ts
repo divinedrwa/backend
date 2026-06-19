@@ -8,6 +8,7 @@ import { validateBody } from "../../middlewares/validate";
 import { UserRole, NotificationCategory, VisitorStatus } from "@prisma/client";
 import { resolveGuardLogRange } from "./guardLogRange";
 import { runVisitorApproveEntry, runVisitorAdmitPreApprovedById } from "./visitorApproveEntryFlow";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 import {
   VISITOR_APPROVED_FOR_ENTRY,
   VISITOR_PENDING_APPROVAL,
@@ -671,7 +672,10 @@ router.post(
               where: {
                 societyId,
                 villaId: resolvedVillaId,
-                role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+                // Include admins who occupy this villa (role ADMIN) — same occupant
+                // role set as the visitor-approval resolver, so an admin-resident
+                // is notified about their own visitors.
+                ...residentLikeRoleFilter,
                 isActive: true,
               },
               select: { id: true },
@@ -793,7 +797,8 @@ router.post(
                 where: {
                   societyId,
                   villaId,
-                  role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+                  // Include admins who occupy this villa (role ADMIN).
+                  ...residentLikeRoleFilter,
                   isActive: true,
                 },
                 select: { id: true },
@@ -864,7 +869,8 @@ router.post("/visitor-entry-notify", requireRole(UserRole.GUARD), validateBody(v
       where: {
         societyId,
         villaId,
-        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+        // Include admins who occupy this villa (role ADMIN).
+        ...residentLikeRoleFilter,
         isActive: true,
       },
       select: { id: true },

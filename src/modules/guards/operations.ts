@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { UserRole, GateVehicleKind, SocBroadcastKind, IncidentSeverity, NotificationCategory } from "@prisma/client";
 import { resolveGuardLogRange } from "./guardLogRange";
+import { residentLikeRoleFilter } from "../../lib/residentLike";
 
 const router = Router();
 router.use(requireAuth);
@@ -160,7 +161,12 @@ router.get("/residents-directory", requireRole(UserRole.GUARD), async (req, res,
     const residents = await prisma.user.findMany({
       where: {
         societyId,
-        role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
+        // Villa occupants who can receive a visitor at their flat. Uses the same
+        // role set as the visitor-approval recipient resolver and occupant
+        // notifications (residentLikeRoleFilter = RESIDENT, ADMIN, RESIDENT_CUM_ADMIN)
+        // so a resident who is also an admin (role ADMIN, villa mapped) still shows
+        // up here and isn't wrongly flagged "no resident mapped to selected flat".
+        ...residentLikeRoleFilter,
         isActive: true,
         ...(q
           ? {
