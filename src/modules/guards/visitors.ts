@@ -144,6 +144,31 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
             return res.status(400).json({ message: "Invalid unit for selected property" });
           }
           unitId = unitRow.id;
+        } else if (t.residentUserId?.trim()) {
+          const resident = await prisma.user.findFirst({
+            where: {
+              id: t.residentUserId.trim(),
+              societyId,
+              villaId: t.villaId,
+              isActive: true,
+            },
+            select: { unitId: true },
+          });
+          if (resident?.unitId) {
+            unitId = resident.unitId;
+          } else {
+            const resolved = await getOrCreateDefaultUnitIdForVilla({
+              societyId,
+              villaId: t.villaId,
+            });
+            if (!resolved) {
+              return res.status(400).json({
+                message:
+                  "This property has no occupant units. Add units on the villa (e.g. Ground floor / First floor) before check-in.",
+              });
+            }
+            unitId = resolved;
+          }
         } else {
           const resolved = await getOrCreateDefaultUnitIdForVilla({
             societyId,
@@ -262,24 +287,28 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 
     let residentApprovalRecipientCount = 0;
     if (awaitResidentApproval) {
-      try {
-        const notifyResult = await notifyResidentsVisitorApprovalRequest({
-          prisma,
-          societyId,
-          visitorId: visitor.id,
-          visitorName: name,
-          purpose: purpose ?? "",
-          villaIds: uniqueVillaIds,
-          targets: notifyTargets,
-          guardUserId: userId,
-          visitorType,
-          visitorPhone: phone,
-          visitorPhoto: photo,
+      void notifyResidentsVisitorApprovalRequest({
+        prisma,
+        societyId,
+        visitorId: visitor.id,
+        visitorName: name,
+        purpose: purpose ?? "",
+        villaIds: uniqueVillaIds,
+        targets: notifyTargets,
+        guardUserId: userId,
+        visitorType,
+        visitorPhone: phone,
+        visitorPhoto: photo,
+      })
+        .then((notifyResult) => {
+          residentApprovalRecipientCount = notifyResult.recipientUserCount;
+        })
+        .catch((notifyErr) => {
+          logger.error(
+            { err: notifyErr },
+            "[visitor-checkin] notifyResidentsVisitorApprovalRequest failed",
+          );
         });
-        residentApprovalRecipientCount = notifyResult.recipientUserCount;
-      } catch (notifyErr) {
-        logger.error({ err: notifyErr }, "[visitor-checkin] notifyResidentsVisitorApprovalRequest failed");
-      }
     }
 
     // Fetch complete visitor with relations

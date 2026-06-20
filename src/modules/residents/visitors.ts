@@ -1,15 +1,24 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
+import { Prisma } from "@prisma/client";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import {
+  findResidentVisitorVillaRow,
+  residentVisitorVillaVisitWhere,
+  visitorApprovalIncludeForResident,
+} from "../../lib/residentVisitorApprovalScope";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { UserRole, VisitorStatus, VisitorVillaApprovalStatus } from "@prisma/client";
 import {
   VISITOR_PENDING_APPROVAL,
+  VISITOR_APPROVED_FOR_ENTRY,
+  VISITOR_REJECTED,
   recomputeVisitorAggregateApproval,
   notifyCreatingGuardVisitorVillaProgress,
+  notifyGuardsVisitorApprovalOutcome,
 } from "../guards/visitorResidentApproval.service";
 import {
   createPreApprovedVisitor,
@@ -404,19 +413,6 @@ function pickMyVisit(v: { villaVisits: unknown[] }) {
     | undefined;
 }
 
-function visitorApprovalInclude(villaId: string, unitId?: string | null) {
-  return {
-    gate: { select: { id: true, name: true } },
-    villaVisits: {
-      where: { villaId, ...(unitId ? { unitId } : {}) },
-      include: {
-        villa: { select: { id: true, villaNumber: true, block: true } },
-        unit: { select: { id: true, label: true, unitCode: true } },
-      },
-    },
-  } as const;
-}
-
 // GET /api/residents/visitor-approval-requests — fallback list (missed push / inbox)
 router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
@@ -435,19 +431,20 @@ router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT, UserRole
     }
 
     const villaId = user.villaId;
-    const visitSome = {
+    const visitSome = residentVisitorVillaVisitWhere({
       villaId,
-      ...(user.unitId ? { unitId: user.unitId } : {}),
-    };
+      userId,
+      unitId: user.unitId,
+    });
 
-    const baseWhere: import("@prisma/client").Prisma.VisitorWhereInput = {
+    const baseWhere: Prisma.VisitorWhereInput = {
       societyId,
       villaVisits: { some: visitSome },
     };
 
     const visitors = await prisma.visitor.findMany({
       where: baseWhere,
-      include: visitorApprovalInclude(villaId, user.unitId),
+      include: visitorApprovalIncludeForResident(villaId, userId, user.unitId),
       orderBy: { checkInTime: "desc" },
       take: 80,
     });
@@ -496,10 +493,11 @@ router.get("/visitor-approval-requests/:visitorId", requireRole(UserRole.RESIDEN
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    const visitSome = {
+    const visitSome = residentVisitorVillaVisitWhere({
       villaId: user.villaId,
-      ...(user.unitId ? { unitId: user.unitId } : {}),
-    };
+      userId,
+      unitId: user.unitId,
+    });
 
     const visitor = await prisma.visitor.findFirst({
       where: {
@@ -507,7 +505,7 @@ router.get("/visitor-approval-requests/:visitorId", requireRole(UserRole.RESIDEN
         societyId,
         villaVisits: { some: visitSome },
       },
-      include: visitorApprovalInclude(user.villaId, user.unitId),
+      include: visitorApprovalIncludeForResident(user.villaId, userId, user.unitId),
     });
 
     if (!visitor) {
@@ -559,19 +557,15 @@ async function applyResidentVisitorDecision(params: {
     return { status: 404 as const, body: { message: "Villa not assigned" } };
   }
 
-  const row = await prisma.visitorVilla.findFirst({
-    where: {
-      visitorId: params.visitorId,
-      villaId: user.villaId,
-      ...(user.unitId ? { unitId: user.unitId } : {}),
-    },
-    include: {
-      visitor: true,
-      villa: { select: { villaNumber: true, block: true } },
-    },
+  const row = await findResidentVisitorVillaRow(prisma, {
+    visitorId: params.visitorId,
+    societyId: params.societyId,
+    userId: params.userId,
+    villaId: user.villaId,
+    unitId: user.unitId,
   });
 
-  if (!row || row.visitor.societyId !== params.societyId) {
+  if (!row) {
     return { status: 404 as const, body: { message: "Visitor request not found" } };
   }
 
@@ -610,34 +604,51 @@ async function applyResidentVisitorDecision(params: {
   // Wrap both the atomic row update and the aggregate recompute in a
   // Serializable transaction to prevent duplicate guard notifications
   // when two residents approve concurrently for a multi-villa visitor.
-  const { updated, hydrated, transitioned } = await prisma.$transaction(
-    async (tx) => {
-      const upd = await tx.visitorVilla.updateMany({
-        where: {
-          id: row.id,
-          approvalStatus: VisitorVillaApprovalStatus.PENDING,
-        },
-        data: {
-          approvalStatus: target,
-          respondedAt: new Date(),
-          respondedByUserId: params.userId,
-        },
-      });
+  const runDecisionTx = async () =>
+    prisma.$transaction(
+      async (tx) => {
+        const upd = await tx.visitorVilla.updateMany({
+          where: {
+            id: row.id,
+            approvalStatus: VisitorVillaApprovalStatus.PENDING,
+          },
+          data: {
+            approvalStatus: target,
+            respondedAt: new Date(),
+            respondedByUserId: params.userId,
+          },
+        });
 
-      if (upd.count === 0) {
-        return { updated: upd, hydrated: null, transitioned: false };
-      }
+        if (upd.count === 0) {
+          return { updated: upd, hydrated: null, transitioned: false };
+        }
 
-      const result = await recomputeVisitorAggregateApproval(
-        tx as unknown as typeof prisma,
-        params.visitorId,
-        params.societyId,
-      );
+        const result = await recomputeVisitorAggregateApproval(
+          tx,
+          params.visitorId,
+          params.societyId,
+        );
 
-      return { updated: upd, hydrated: result.visitor, transitioned: result.transitioned };
-    },
-    { isolationLevel: "Serializable" },
-  );
+        return { updated: upd, hydrated: result.visitor, transitioned: result.transitioned };
+      },
+      { isolationLevel: "Serializable" },
+    );
+
+  let updated: { count: number };
+  let hydrated: Awaited<ReturnType<typeof recomputeVisitorAggregateApproval>>["visitor"] | null;
+  let transitioned: boolean;
+  try {
+    ({ updated, hydrated, transitioned } = await runDecisionTx());
+  } catch (error) {
+    if (
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === "P2034"
+    ) {
+      ({ updated, hydrated, transitioned } = await runDecisionTx());
+    } else {
+      throw error;
+    }
+  }
 
   if (updated.count === 0) {
     return { status: 409 as const, body: { message: "Already responded" } };
@@ -656,6 +667,23 @@ async function applyResidentVisitorDecision(params: {
       visitorName: hydrated.name,
       decision: params.decision,
       villaLabel: villaLabelFromRow(row.villa),
+    });
+  }
+
+  if (
+    transitioned &&
+    hydrated &&
+    (hydrated.status === VISITOR_APPROVED_FOR_ENTRY ||
+      hydrated.status === VISITOR_REJECTED)
+  ) {
+    void notifyGuardsVisitorApprovalOutcome({
+      prisma,
+      societyId: params.societyId,
+      visitorId: params.visitorId,
+      visitorName: hydrated.name,
+      outcome:
+        hydrated.status === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
+      createdByGuardId: hydrated.createdBy,
     });
   }
 

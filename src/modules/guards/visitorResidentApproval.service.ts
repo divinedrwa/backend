@@ -325,7 +325,7 @@ export async function notifyGuardsPreApprovedCreated(params: {
  * Use the state manager directly for new code.
  */
 export async function recomputeVisitorAggregateApproval(
-  prisma: PrismaClient,
+  prisma: PrismaClient | Prisma.TransactionClient,
   visitorId: string,
   societyId: string,
 ): Promise<{
@@ -341,10 +341,21 @@ export async function recomputeVisitorAggregateApproval(
 
   const previousStatus = before?.status || "";
 
-  // Delegate to centralized state manager
-  await prisma.$transaction(async (tx) => {
-    await recomputeFromStateManager(tx, { visitorId, societyId });
-  });
+  // When called inside an outer transaction, use the client directly (TransactionClient has no $transaction).
+  const client = prisma as PrismaClient | Prisma.TransactionClient;
+  if (
+    "$transaction" in client &&
+    typeof (client as PrismaClient).$transaction === "function"
+  ) {
+    await (client as PrismaClient).$transaction(async (tx) => {
+      await recomputeFromStateManager(tx, { visitorId, societyId });
+    });
+  } else {
+    await recomputeFromStateManager(client as Prisma.TransactionClient, {
+      visitorId,
+      societyId,
+    });
+  }
 
   // Get updated visitor with full payload
   const visitor = await prisma.visitor.findUnique({
