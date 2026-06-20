@@ -108,6 +108,33 @@ class CacheService {
   }
 
   /**
+   * Get a raw string value (no JSON encoding). Used by billing cache.
+   */
+  async getString(key: string): Promise<string | null> {
+    if (!this.isEnabled || !this.client) return null;
+
+    try {
+      return await this.client.get(key);
+    } catch (err) {
+      logger.error({ err, key }, "[Cache] GetString failed");
+      return null;
+    }
+  }
+
+  /**
+   * Set a raw string value with TTL (no JSON encoding).
+   */
+  async setString(key: string, value: string, ttl: number): Promise<void> {
+    if (!this.isEnabled || !this.client) return;
+
+    try {
+      await this.client.setex(key, ttl, value);
+    } catch (err) {
+      logger.error({ err, key }, "[Cache] SetString failed");
+    }
+  }
+
+  /**
    * Delete cached value(s)
    */
   async del(...keys: string[]): Promise<void> {
