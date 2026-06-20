@@ -776,6 +776,8 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
           status: resident.status,
           paymentDate: resident.paidAt ?? null,
           paymentMode: resident.paymentMode ?? null,
+          transactionId: resident.transactionId ?? null,
+          receiptNumber: resident.receiptNumber ?? null,
           notes: null,
           dueDate: resident.dueDate,
         }))
@@ -795,6 +797,8 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
             status,
             paymentDate: payment?.paymentDate ?? null,
             paymentMode: payment?.paymentMode ?? null,
+            transactionId: payment?.transactionId ?? null,
+            receiptNumber: payment?.receiptNumber ?? null,
             notes: payment?.remarks ?? null,
             dueDate: monthly?.dueDate ?? null,
           };

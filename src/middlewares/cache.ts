@@ -55,9 +55,9 @@ export function cacheMiddleware(ttlSeconds: number = 300) {
  * Invalidate cache for a society
  * Call after mutations (create/update/delete)
  */
-export async function invalidateSocietyCache(societyId: number, pattern?: string) {
-  const basePattern = pattern
-    ? `api:${societyId}:${pattern}:*`
+export async function invalidateSocietyCache(societyId: string, routePrefix?: string) {
+  const basePattern = routePrefix
+    ? `api:${societyId}:${routePrefix}:*`
     : `api:${societyId}:*`;
   await cache.delPattern(basePattern);
 }

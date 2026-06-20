@@ -2,7 +2,20 @@ import { Prisma } from "@prisma/client";
 import { NextFunction, Request, Response } from "express";
 import multer from "multer";
 import { ZodError } from "zod";
+import { Sentry } from "../instrument";
 import { logger } from "../lib/logger";
+
+function captureServerError(err: unknown, req: Request): void {
+  if (!process.env.SENTRY_DSN) return;
+  Sentry.withScope((scope) => {
+    scope.setTag("path", req.path);
+    scope.setTag("method", req.method);
+    const auth = (req as Request & { auth?: { userId?: string; societyId?: string } }).auth;
+    if (auth?.userId) scope.setUser({ id: auth.userId });
+    if (auth?.societyId) scope.setTag("societyId", auth.societyId);
+    Sentry.captureException(err);
+  });
+}
 
 export function errorHandler(
   err: unknown,
@@ -81,6 +94,7 @@ export function errorHandler(
   // PrismaClientUnknownRequestError — log detail and return 400.
   if (err instanceof Prisma.PrismaClientUnknownRequestError) {
     logger.error({ detail: err.message }, "Prisma unknown request error (CHECK constraint or raw DB error)");
+    captureServerError(err, _req);
     res.status(400).json({
       message: "The operation was rejected by the database. Please check your input and try again.",
     });
@@ -90,5 +104,6 @@ export function errorHandler(
   // Pino redacts known-sensitive fields from `err` (token, password, etc.)
   // via the central logger config — see [src/lib/logger.ts].
   logger.error({ err }, "unhandled error");
+  captureServerError(err, _req);
   res.status(500).json({ message: "Internal server error" });
 }

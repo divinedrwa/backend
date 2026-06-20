@@ -25,6 +25,7 @@ export type CycleFinancialDashboardCore =
         paidAt: Date | null;
         receiptNumber: string | null;
         paymentMode: string | null;
+        transactionId: string | null;
         advanceCredit?: number;
         cashPaidThisCycle?: number;
         isExcluded?: boolean;
@@ -118,6 +119,10 @@ export async function buildCycleFinancialDashboardCore(
   // villas paid online for this period (via the matching BillingCycle) so we
   // can label them "ONLINE" — only real gateway successes, never credit/waived.
   const gatewayVillaIds = new Set<string>();
+  const gatewayByVilla = new Map<
+    string,
+    { transactionId: string | null; receiptNumber: string | null }
+  >();
   const billingCycle = await prisma.billingCycle.findFirst({
     where: { societyId, cycleKey: cycle.periodKey },
     select: { id: true },
@@ -128,10 +133,21 @@ export async function buildCycleFinancialDashboardCore(
         cycleId: billingCycle.id,
         paymentStatus: BillingUserPaymentStatus.SUCCESS,
       },
-      select: { user: { select: { villaId: true } } },
+      select: {
+        paymentGatewayPaymentId: true,
+        paymentGatewayOrderId: true,
+        invoiceNumber: true,
+        user: { select: { villaId: true } },
+      },
     });
     for (const gp of gatewayPayments) {
-      if (gp.user?.villaId) gatewayVillaIds.add(gp.user.villaId);
+      const villaId = gp.user?.villaId;
+      if (!villaId) continue;
+      gatewayVillaIds.add(villaId);
+      gatewayByVilla.set(villaId, {
+        transactionId: gp.paymentGatewayPaymentId ?? gp.paymentGatewayOrderId ?? null,
+        receiptNumber: gp.invoiceNumber ?? null,
+      });
     }
   }
 
@@ -164,6 +180,7 @@ export async function buildCycleFinancialDashboardCore(
         paidAt: null,
         receiptNumber: null,
         paymentMode: null,
+        transactionId: null,
         ...(credit > 0 ? { advanceCredit: credit } : {}),
         ...(isExcluded ? { isExcluded: true } : {}),
       };
@@ -182,9 +199,12 @@ export async function buildCycleFinancialDashboardCore(
       status,
       dueDate: cycle.dueDate,
       paidAt: p?.paymentDate ?? null,
-      receiptNumber: p?.receiptNumber ?? null,
+      receiptNumber:
+        p?.receiptNumber ?? gatewayByVilla.get(villa.id)?.receiptNumber ?? null,
       paymentMode:
         p?.paymentMode ?? (gatewayVillaIds.has(villa.id) ? "ONLINE" : null),
+      transactionId:
+        p?.transactionId ?? gatewayByVilla.get(villa.id)?.transactionId ?? null,
       ...(credit > 0 ? { advanceCredit: credit } : {}),
       ...(cashPaid > 0 ? { cashPaidThisCycle: cashPaid } : {}),
       ...(isExcluded ? { isExcluded: true } : {}),

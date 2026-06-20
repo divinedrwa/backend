@@ -2,13 +2,14 @@ import { Router } from "express";
 import { PushPlatform, SocietyStatus } from "@prisma/client";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { cacheMiddleware } from "../../middlewares/cache";
 
 const router = Router();
 
 /**
  * GET /api/public/societies — list societies for login pickers (no auth).
  */
-router.get("/societies", async (req, res, next) => {
+router.get("/societies", cacheMiddleware(300), async (req, res, next) => {
   try {
     const pagination = getPagination(req);
     const where = { archivedAt: null };

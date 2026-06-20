@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { BannerType, NotificationCategory, Prisma } from "@prisma/client";
 import { broadcastNoticeToAllResidents } from "../../services/notification.service";
+import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
 
 const router = Router();
 
@@ -82,7 +83,7 @@ router.use(requireAuth);
 // ========================================
 
 // GET /api/banners/active/list
-router.get("/active/list", async (req, res, next) => {
+router.get("/active/list", cacheMiddleware(120), async (req, res, next) => {
   try {
     const now = new Date();
 
@@ -265,6 +266,8 @@ router.post(
         notifyResidentsAboutBanner(banner);
       }
 
+      await invalidateSocietyCache(req.auth!.societyId, "/active/list");
+
       return res.status(201).json({
         message: "Banner created successfully",
         banner
@@ -328,6 +331,8 @@ router.put(
         notifyResidentsAboutBanner(banner);
       }
 
+      await invalidateSocietyCache(req.auth!.societyId, "/active/list");
+
       return res.json({
         message: "Banner updated successfully",
         banner
@@ -361,6 +366,8 @@ router.delete(
       await prisma.banner.delete({
         where: { id: bannerId }
       });
+
+      await invalidateSocietyCache(req.auth!.societyId, "/active/list");
 
       return res.json({ message: "Banner deleted successfully" });
     } catch (error) {

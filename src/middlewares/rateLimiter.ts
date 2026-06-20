@@ -13,8 +13,15 @@
  * - No impact on existing functionality
  */
 
-import rateLimit from 'express-rate-limit';
+import rateLimit, { type Options } from 'express-rate-limit';
+import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../lib/logger';
+
+/** Skip monitoring endpoints — never rate-limit health probes. */
+function skipHealthChecks(req: Request): boolean {
+  const p = req.path ?? '';
+  return p === '/health' || p === '/api/health';
+}
 
 /**
  * Creates a standardized rate limiter with logging
@@ -23,35 +30,31 @@ function createLimiter(config: {
   windowMs: number;
   max: number;
   skipSuccessfulRequests?: boolean;
-  keyGenerator?: (req: any) => string;
+  keyGenerator?: Options['keyGenerator'];
   message: string;
-  handler?: (req: any, res: any) => void;
+  skip?: Options['skip'];
 }) {
   return rateLimit({
     windowMs: config.windowMs,
     max: config.max,
     skipSuccessfulRequests: config.skipSuccessfulRequests || false,
-    standardHeaders: true, // Return rate limit info in `RateLimit-*` headers
-    legacyHeaders: false, // Disable `X-RateLimit-*` headers
+    standardHeaders: true,
+    legacyHeaders: false,
     keyGenerator: config.keyGenerator,
+    skip: config.skip,
     handler: (req, res) => {
-      // Log rate limit violations for monitoring
       logger.warn({
         ip: req.ip,
-        userId: req.auth?.userId,
+        userId: (req as Request & { auth?: { userId?: string } }).auth?.userId,
         path: req.path,
         limit: config.max,
         window: config.windowMs / 1000 / 60 + 'min',
       }, 'Rate limit exceeded');
 
-      if (config.handler) {
-        config.handler(req, res);
-      } else {
-        res.status(429).json({
-          error: config.message,
-          retryAfter: Math.ceil(config.windowMs / 1000),
-        });
-      }
+      res.status(429).json({
+        message: config.message,
+        retryAfter: Math.ceil(config.windowMs / 1000),
+      });
     },
   });
 }
@@ -80,10 +83,10 @@ export const authLimiter = createLimiter({
 export const apiLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 300, // 300 requests/min (VERY generous)
+  skip: skipHealthChecks,
   keyGenerator: (req) => {
-    // Use userId if authenticated, otherwise IP
-    // This prevents shared WiFi issues
-    return req.auth?.userId || req.ip;
+    const auth = (req as Request & { auth?: { userId?: string } }).auth;
+    return auth?.userId || req.ip || 'unknown';
   },
   message: 'Too many requests. Please slow down and try again.',
 });
@@ -98,7 +101,10 @@ export const apiLimiter = createLimiter({
 export const paymentLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 20, // 20 payment attempts (was 10, increased for safety)
-  keyGenerator: (req) => req.auth?.userId || req.ip,
+  keyGenerator: (req) => {
+    const auth = (req as Request & { auth?: { userId?: string } }).auth;
+    return auth?.userId || req.ip || 'unknown';
+  },
   message: 'Payment rate limit exceeded. Please wait a moment before retrying.',
 });
 
@@ -125,7 +131,10 @@ export const bulkLimiter = createLimiter({
 export const superAdminLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 500, // 500 requests/min (extremely generous)
-  keyGenerator: (req) => req.auth?.userId || req.ip,
+  keyGenerator: (req) => {
+    const auth = (req as Request & { auth?: { userId?: string } }).auth;
+    return auth?.userId || req.ip || 'unknown';
+  },
   message: 'Super admin rate limit exceeded.',
 });
 
@@ -144,25 +153,15 @@ export const publicLimiter = createLimiter({
 });
 
 /**
- * HEALTH CHECK EXEMPT - No rate limiting on monitoring endpoints
- * This middleware explicitly skips rate limiting for health/monitoring
- */
-export const exemptFromRateLimit = (req: any, res: any, next: any) => {
-  // Skip rate limiting for monitoring endpoints
-  if (req.path === '/health' || req.path === '/api/health') {
-    return next();
-  }
-  next();
-};
-
-/**
  * GRADUAL ROLLOUT HELPER
- * 
+ *
  * Set RATE_LIMIT_ENABLED=false to disable all rate limiting without code changes
  * Useful for emergency rollback if needed
  */
-export function applyRateLimitIfEnabled(limiter: any) {
-  return (req: any, res: any, next: any) => {
+export function applyRateLimitIfEnabled(
+  limiter: (req: Request, res: Response, next: NextFunction) => void,
+) {
+  return (req: Request, res: Response, next: NextFunction) => {
     if (process.env.RATE_LIMIT_ENABLED === 'false') {
       logger.debug('Rate limiting disabled via RATE_LIMIT_ENABLED env var');
       return next();

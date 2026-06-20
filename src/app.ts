@@ -15,7 +15,8 @@ import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
-import { applyRateLimitIfEnabled } from "./middlewares/rateLimiter";
+import { applyRateLimitIfEnabled, apiLimiter } from "./middlewares/rateLimiter";
+import { Sentry } from "./instrument";
 
 export const app = express();
 
@@ -107,30 +108,9 @@ app.use(
   })
 );
 
-// RATE LIMITING: Production-safe configuration with VERY generous limits
-// All limits designed to block only malicious actors, not legitimate traffic
-// Can be disabled via RATE_LIMIT_ENABLED=false env var for emergency rollback
-//
-// Global rate limit: 300 requests per minute per user/IP (increased from 100 for safety)
-// Per-endpoint limits (auth, payment, bulk ops) apply on top of this
-//
-// SAFETY: Normal users will NEVER hit these limits
-app.use(
-  applyRateLimitIfEnabled(
-    rateLimit({
-      windowMs: 60 * 1000,
-      limit: 300, // Increased from 100 for maximum safety
-      standardHeaders: "draft-7",
-      legacyHeaders: false,
-      keyGenerator: (req) => {
-        // Use userId if authenticated to prevent shared WiFi issues
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        return (req as any).auth?.userId || req.ip;
-      },
-      message: { message: "Too many requests, please try again later" },
-    })
-  )
-);
+// Global API rate limit (apiLimiter) — generous per-user/IP cap.
+// Specialized limiters (auth, payment, bulk, super-admin) mount on their routers.
+app.use(applyRateLimitIfEnabled(apiLimiter));
 
 // Response time monitoring (logs slow requests)
 app.use(responseTimeMonitor);
@@ -230,4 +210,9 @@ if (process.env.NODE_ENV !== "production") {
   app.use("/api", swaggerRoutes);
 }
 app.use("/api", routes);
+
+// Capture unhandled errors for Sentry before our JSON error handler runs.
+if (process.env.SENTRY_DSN) {
+  Sentry.setupExpressErrorHandler(app);
+}
 app.use(errorHandler);

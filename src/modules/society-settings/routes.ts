@@ -10,10 +10,15 @@ import { letterheadImageMemory } from "../../lib/letterheadUpload";
 import { uploadLetterheadImageBuffer } from "../../services/cloudinaryLetterhead";
 import { brandingImageMemory } from "../../lib/brandingImageUpload";
 import { uploadBrandingImageBuffer } from "../../services/cloudinaryBranding";
+import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
 
 const router = Router();
 
 router.use(requireAuth);
+
+async function bustSocietySettingsCache(societyId: string) {
+  await invalidateSocietyCache(societyId);
+}
 
 const patchSocietySchema = z
   .object({
@@ -36,7 +41,7 @@ const patchSocietySchema = z
 /**
  * GET /api/society-settings — gate rules + lifecycle (ADMIN).
  */
-router.get("/", requireRole(UserRole.ADMIN), async (req, res, next) => {
+router.get("/", requireRole(UserRole.ADMIN), cacheMiddleware(120), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const society = await prisma.society.findUnique({
@@ -160,6 +165,8 @@ router.patch(
         },
       });
 
+      await bustSocietySettingsCache(societyId);
+
       return res.json({
         message: "Society settings updated",
         society,
@@ -210,6 +217,8 @@ router.patch(
         },
       });
 
+      await bustSocietySettingsCache(societyId);
+
       return res.json({ message: "Late fee settings updated", lateFee: society });
     } catch (error) {
       next(error);
@@ -259,6 +268,8 @@ router.post(
         });
       }
 
+      await bustSocietySettingsCache(societyId);
+
       return res.json({ url });
     } catch (error) {
       next(error);
@@ -291,6 +302,8 @@ router.delete(
         });
       }
 
+      await bustSocietySettingsCache(societyId);
+
       return res.json({ message: "QR code removed" });
     } catch (error) {
       next(error);
@@ -320,6 +333,8 @@ router.post(
         data: { letterheadUrl: url },
       });
 
+      await bustSocietySettingsCache(societyId);
+
       return res.json({ url });
     } catch (error) {
       next(error);
@@ -340,6 +355,7 @@ router.delete(
         where: { id: societyId },
         data: { letterheadUrl: null },
       });
+      await bustSocietySettingsCache(societyId);
       return res.json({ message: "Letterhead removed" });
     } catch (error) {
       next(error);
@@ -366,6 +382,7 @@ router.post(
         where: { id: societyId },
         data: { signatureUrl: url },
       });
+      await bustSocietySettingsCache(societyId);
       return res.json({ url });
     } catch (error) {
       next(error);
@@ -386,6 +403,7 @@ router.delete(
         where: { id: societyId },
         data: { signatureUrl: null },
       });
+      await bustSocietySettingsCache(societyId);
       return res.json({ message: "Signature removed" });
     } catch (error) {
       next(error);
@@ -412,6 +430,7 @@ router.post(
         where: { id: societyId },
         data: { stampUrl: url },
       });
+      await bustSocietySettingsCache(societyId);
       return res.json({ url });
     } catch (error) {
       next(error);
@@ -432,6 +451,7 @@ router.delete(
         where: { id: societyId },
         data: { stampUrl: null },
       });
+      await bustSocietySettingsCache(societyId);
       return res.json({ message: "Stamp removed" });
     } catch (error) {
       next(error);

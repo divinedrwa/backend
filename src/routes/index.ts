@@ -2,6 +2,13 @@ import { Router } from "express";
 import authRoutes from "../modules/auth/routes";
 import publicRoutes from "../modules/public/routes";
 import superRoutes from "../modules/super/routes";
+import {
+  applyRateLimitIfEnabled,
+  authLimiter,
+  bulkLimiter,
+  publicLimiter,
+  superAdminLimiter,
+} from "../middlewares/rateLimiter";
 import userRoutes from "../modules/users/routes";
 import residentManagementRoutes from "../modules/resident-management/routes";
 import villaRoutes from "../modules/villas/routes";
@@ -75,15 +82,15 @@ import guardOperationsRoutes from "../modules/guards/operations";
 
 const router = Router();
 
-// Auth & public
-router.use("/public", publicRoutes);
-router.use("/auth", authRoutes);
-router.use("/super", superRoutes);
+// Auth & public — specialized rate limits on top of global apiLimiter
+router.use("/public", applyRateLimitIfEnabled(publicLimiter), publicRoutes);
+router.use("/auth", applyRateLimitIfEnabled(authLimiter), authRoutes);
+router.use("/super", applyRateLimitIfEnabled(superAdminLimiter), superRoutes);
 router.use("/users", userRoutes);
 router.use("/resident-management", residentManagementRoutes);
 router.use("/villas", villaRoutes);
-router.use("/import", importRoutes);
-router.use("/export", exportRoutes);
+router.use("/import", applyRateLimitIfEnabled(bulkLimiter), importRoutes);
+router.use("/export", applyRateLimitIfEnabled(bulkLimiter), exportRoutes);
 
 // Maintenance & Billing (NEW SYSTEM)
 router.use("/maintenance", maintenancePaymentRoutes);

@@ -4,6 +4,7 @@ import { NotificationCategory, PaymentMethodType, UpiPaymentStatus, UserRole } f
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { cacheMiddleware } from "../../middlewares/cache";
 import { notifySociety } from "../../services/notification.service";
 
 const router = Router();
@@ -17,6 +18,7 @@ router.use(requireAuth);
 router.get(
   "/upi-config",
   requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  cacheMiddleware(120),
   async (req, res, next) => {
     try {
       const { societyId } = req.auth!;
@@ -29,6 +31,7 @@ router.get(
           signatureUrl: true,
           stampUrl: true,
           name: true,
+          address: true,
         },
       });
       if (!society) {
@@ -68,6 +71,7 @@ router.get(
         signatureUrl: society.signatureUrl,
         stampUrl: society.stampUrl,
         payeeName: society.name,
+        societyAddress: society.address,
       });
     } catch (error) {
       next(error);

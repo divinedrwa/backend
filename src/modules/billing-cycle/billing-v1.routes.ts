@@ -34,6 +34,7 @@ import { notifySocietyRoles } from "../../services/notification.service";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import phonePeRoutes from "./billing-v1-phonepe.routes";
 import razorpayRoutes from "./billing-v1-razorpay.routes";
+import { applyRateLimitIfEnabled, paymentLimiter } from "../../middlewares/rateLimiter";
 
 const router = Router();
 
@@ -1699,7 +1700,8 @@ router.get(
 );
 
 // ── Sub-routers (split from this file for maintainability) ───────
-router.use(phonePeRoutes);
-router.use(razorpayRoutes);
+// Payment gateway routes get a tighter cap than the global API limiter.
+router.use(applyRateLimitIfEnabled(paymentLimiter), phonePeRoutes);
+router.use(applyRateLimitIfEnabled(paymentLimiter), razorpayRoutes);
 
 export default router;
