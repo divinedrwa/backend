@@ -4,6 +4,7 @@ import { NotificationCategory, Prisma } from "@prisma/client";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
+import { isWaterTurnedOn } from "../../lib/waterEventAction";
 import { notifySocietyRoles, notifyUser } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -129,8 +130,9 @@ router.get("/status", requireAuth, async (req, res, next) => {
         return {
           gateId: gate.id,
           gate: gate.name,
+          gateName: gate.name,
           location: gate.location,
-          status: latestEvent?.turnedOn ? "ON" : "OFF",
+          status: latestEvent && isWaterTurnedOn(latestEvent) ? "ON" : "OFF",
           lastChanged: latestEvent?.createdAt,
           reason: latestEvent?.reason,
         };

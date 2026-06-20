@@ -87,7 +87,8 @@ router.post(
         data: {
           societyId: req.auth!.societyId,
           villaId: body.villaId,
-          description: body.description
+          description: body.description,
+          status: ParcelStatus.RECEIVED,
         },
         include: {
           villa: {

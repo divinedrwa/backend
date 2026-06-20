@@ -1020,7 +1020,7 @@ model Parcel {
   senderName      String?      // Added for mobile API
   description     String
   photoUrl        String?
-  status          ParcelStatus @default(PENDING)
+  status          ParcelStatus @default(RECEIVED)
   receivedAt      DateTime     @default(now())
   collectedAt     DateTime?
   deliveredAt     DateTime?    // Alias for mobile API compatibility

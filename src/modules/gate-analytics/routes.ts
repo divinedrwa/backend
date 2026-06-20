@@ -1,6 +1,12 @@
 import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import { prisma } from "../../lib/prisma";
+import {
+  localDateKey,
+  localDateKeysForLastDays,
+  localHour,
+  startOfLocalDayDaysAgo,
+} from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 
 const router = Router();
@@ -31,8 +37,7 @@ router.get("/overview", async (req, res, next) => {
     });
 
     // Get today's visitor count per gate
-    const startOfDay = new Date();
-    startOfDay.setHours(0, 0, 0, 0);
+    const startOfDay = startOfLocalDayDaysAgo(0);
 
     // Use groupBy to get all gate counts in 2 queries instead of 2N
     const [totalByGate, activeByGate] = await Promise.all([
@@ -82,9 +87,7 @@ router.get("/visitor-statistics", async (req, res, next) => {
     const { days = "30" } = req.query;
 
     const daysAgo = parseInt(days as string) || 30;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
-    startDate.setHours(0, 0, 0, 0);
+    const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     // Get all visitors in period
     const visitors = await prisma.visitor.findMany({
@@ -179,8 +182,7 @@ router.get("/peak-hours", async (req, res, next) => {
     const { days = "30" } = req.query;
 
     const daysAgo = parseInt(days as string) || 30;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
+    const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const visitors = await prisma.visitor.findMany({
       where: {
@@ -201,7 +203,7 @@ router.get("/peak-hours", async (req, res, next) => {
     }
 
     visitors.forEach((v) => {
-      const hour = new Date(v.checkInAt).getHours();
+      const hour = localHour(new Date(v.checkInAt));
       hourCounts[hour]++;
     });
 
@@ -251,9 +253,7 @@ router.get("/daily-trend", async (req, res, next) => {
     const { days = "7" } = req.query;
 
     const daysCount = parseInt(days as string) || 7;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysCount);
-    startDate.setHours(0, 0, 0, 0);
+    const startDate = startOfLocalDayDaysAgo(daysCount);
 
     const visitors = await prisma.visitor.findMany({
       where: {
@@ -271,15 +271,12 @@ router.get("/daily-trend", async (req, res, next) => {
     // Group by day
     const dailyData: { [date: string]: { total: number; types: { [type: string]: number } } } = {};
 
-    for (let i = 0; i < daysCount; i++) {
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + i);
-      const dateKey = date.toISOString().split("T")[0];
+    for (const dateKey of localDateKeysForLastDays(daysCount)) {
       dailyData[dateKey] = { total: 0, types: {} };
     }
 
     visitors.forEach((v) => {
-      const dateKey = new Date(v.checkInAt).toISOString().split("T")[0];
+      const dateKey = localDateKey(new Date(v.checkInAt));
       if (dailyData[dateKey]) {
         dailyData[dateKey].total++;
         const type = v.visitorType || "GUEST";

@@ -2,9 +2,11 @@ import { Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
+import { localMonthKey, localMonthKeysForLastMonths, startOfLocalMonth } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { notifyResidentsComplaintStatusChanged } from "../../services/complaintStatusNotification.service";
+import { buildComplaintStatusUpdate } from "../../services/complaintLifecycle.service";
 
 const router = Router();
 
@@ -321,10 +323,8 @@ router.get("/trend", async (req, res, next) => {
     const { months = "6" } = req.query;
 
     const monthsCount = parseInt(months as string) || 6;
-    const startDate = new Date();
-    startDate.setMonth(startDate.getMonth() - monthsCount);
-    startDate.setDate(1);
-    startDate.setHours(0, 0, 0, 0);
+    const monthKeys = localMonthKeysForLastMonths(monthsCount);
+    const startDate = startOfLocalMonth(monthKeys[0]!);
 
     const complaints = await prisma.complaint.findMany({
       where: {
@@ -344,8 +344,7 @@ router.get("/trend", async (req, res, next) => {
     const monthMap = new Map<string, ComplaintTrendStats>();
 
     complaints.forEach((complaint) => {
-      const date = new Date(complaint.createdAt);
-      const monthKey = `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}`;
+      const monthKey = localMonthKey(new Date(complaint.createdAt));
 
       if (!monthMap.has(monthKey)) {
         monthMap.set(monthKey, {
@@ -362,8 +361,9 @@ router.get("/trend", async (req, res, next) => {
 
       if (complaint.status === "RESOLVED") {
         monthData.resolvedComplaints++;
-        
+
         if (complaint.resolvedAt) {
+          const date = new Date(complaint.createdAt);
           const timeDiff = new Date(complaint.resolvedAt).getTime() - date.getTime();
           monthData.totalResolutionTime += timeDiff / (1000 * 60 * 60 * 24);
           monthData.resolvedWithTimeCount++;
@@ -372,12 +372,7 @@ router.get("/trend", async (req, res, next) => {
     });
 
     // Fill in missing months and calculate averages
-    const trendData = [];
-    const currentDate = new Date(startDate);
-    const endDate = new Date();
-
-    while (currentDate <= endDate) {
-      const monthKey = `${currentDate.getFullYear()}-${String(currentDate.getMonth() + 1).padStart(2, "0")}`;
+    const trendData = monthKeys.map((monthKey) => {
       const monthData = monthMap.get(monthKey) || {
         month: monthKey,
         totalComplaints: 0,
@@ -394,16 +389,14 @@ router.get("/trend", async (req, res, next) => {
         ? Math.round((monthData.resolvedComplaints / monthData.totalComplaints) * 100)
         : 0;
 
-      trendData.push({
+      return {
         month: monthKey,
         totalComplaints: monthData.totalComplaints,
         resolvedComplaints: monthData.resolvedComplaints,
         avgResolutionTime,
         resolutionRate,
-      });
-
-      currentDate.setMonth(currentDate.getMonth() + 1);
-    }
+      };
+    });
 
     return res.json({ trendData });
   } catch (error) {
@@ -441,17 +434,12 @@ router.patch(
 
       const previousStatus = complaint.status;
 
-      // Update complaint
-      const updateData: Prisma.ComplaintUpdateInput = {
-        status,
-      };
-
-      if (adminNotes) {
-        updateData.adminNotes = adminNotes;
-      }
-
-      if (status === "RESOLVED" && !complaint.resolvedAt) {
-        updateData.resolvedAt = new Date();
+      let updateData: Prisma.ComplaintUpdateInput;
+      try {
+        updateData = buildComplaintStatusUpdate(complaint, { status, adminNotes });
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid status transition";
+        return res.status(400).json({ message });
       }
 
       const updatedComplaint = await prisma.complaint.update({

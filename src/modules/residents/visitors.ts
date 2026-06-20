@@ -1,8 +1,6 @@
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
-import { randomInt } from "node:crypto";
 import { z } from "zod";
-import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -10,10 +8,15 @@ import { validateBody } from "../../middlewares/validate";
 import { UserRole, VisitorStatus, VisitorVillaApprovalStatus } from "@prisma/client";
 import {
   VISITOR_PENDING_APPROVAL,
-  notifyGuardsPreApprovedCreated,
   recomputeVisitorAggregateApproval,
   notifyCreatingGuardVisitorVillaProgress,
 } from "../guards/visitorResidentApproval.service";
+import {
+  createPreApprovedVisitor,
+  deactivatePreApprovedVisitor,
+  listPreApprovedVisitors,
+  mapPreApprovedForMobile,
+} from "../../services/preApprovedVisitor.service";
 
 const router = Router();
 
@@ -47,9 +50,6 @@ const preApproveVisitorSchema = z.object({
   maxUses: z.number().int().min(1).max(365).optional(),
 });
 
-/** Max active (unused) pre-approvals allowed per villa. */
-const MAX_ACTIVE_PRE_APPROVALS_PER_VILLA = 20;
-
 const updatePreApprovedVisitorSchema = z.object({
   name: z.string().min(2).max(120).transform((s) => s.trim()).optional(),
   phone: z
@@ -62,20 +62,6 @@ const updatePreApprovedVisitorSchema = z.object({
   purpose: z.string().trim().max(2000).optional(),
   validUntil: z.string().datetime().optional().nullable(),
 });
-
-/** Generate a crypto-secure 6-digit OTP unique among active pre-approvals in the society. */
-async function generateUniqueOtp(societyId: string, maxAttempts = 10): Promise<string> {
-  for (let i = 0; i < maxAttempts; i++) {
-    const otp = randomInt(100000, 999999).toString();
-    const exists = await prisma.preApprovedVisitor.findFirst({
-      where: { societyId, otp, isActive: true, isUsed: false },
-      select: { id: true },
-    });
-    if (!exists) return otp;
-  }
-  // Extremely unlikely — 900k codes vs typically <100 active entries
-  return randomInt(100000, 999999).toString();
-}
 
 // GET /api/residents/my-visitors - Get my visitor history
 router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
@@ -226,7 +212,6 @@ router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRo
     const limitRaw = parseInt(String(req.query.limit ?? "200"), 10);
     const take = Number.isFinite(limitRaw) ? Math.min(Math.max(limitRaw, 1), 500) : 200;
 
-    // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
       select: { villaId: true },
@@ -236,45 +221,17 @@ router.get(["/my-pre-approved", "/my-pre-approved-visitors"], requireRole(UserRo
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    const preApproved = await prisma.preApprovedVisitor.findMany({
-      where: {
-        villaId: user.villaId,
-        societyId,
-        isActive: true,
-      },
-      include: {
-        villa: { select: { villaNumber: true, block: true } },
-        approvedBy: { select: { id: true, name: true } },
-      },
-      orderBy: { createdAt: "desc" },
+    const { rows, summary } = await listPreApprovedVisitors(prisma, {
+      societyId,
+      villaId: user.villaId,
       take,
     });
 
-    // Separate by validity: recurring passes stay active even when usedCount > 0
-    const now = new Date();
-    const active = preApproved.filter((v) => {
-      if (v.validUntil && new Date(v.validUntil) <= now) return false;
-      if (v.isRecurring) {
-        if (v.maxUses && v.usedCount >= v.maxUses) return false;
-        return v.isActive;
-      }
-      return !v.isUsed;
-    });
-    const expired = preApproved.filter((v) => !active.includes(v));
-
-    // Map response: add 'passcode' alias for 'otp' (Flutter expects 'passcode')
-    const mapped = preApproved.map((v) => ({
-      ...v,
-      passcode: v.otp,
-    }));
+    const mapped = rows.map((v) => mapPreApprovedForMobile(v));
 
     return res.json({
       preApproved: mapped,
-      summary: {
-        total: preApproved.length,
-        active: active.length,
-        expired: expired.length,
-      },
+      summary,
     });
   } catch (error) {
     next(error);
@@ -287,7 +244,6 @@ router.post("/pre-approve-visitor", preApproveRateLimiter, requireRole(UserRole.
     const { userId, societyId } = req.auth!;
     const { name, phone, purpose, validUntil, visitorType, isRecurring, maxUses } = req.body;
 
-    // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
       select: { villaId: true },
@@ -297,90 +253,36 @@ router.post("/pre-approve-visitor", preApproveRateLimiter, requireRole(UserRole.
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    if (validUntil) {
-      const until = new Date(validUntil);
-      if (until.getTime() <= Date.now() - 60_000) {
-        return res.status(400).json({
-          message: "Visit end date/time must be in the future.",
-        });
-      }
-    }
-
-    // --- Guard: max active pre-approvals per villa ---
-    const activeCount = await prisma.preApprovedVisitor.count({
-      where: {
-        villaId: user.villaId,
-        societyId,
-        isActive: true,
-        isUsed: false,
-        OR: [{ validUntil: null }, { validUntil: { gte: new Date() } }],
-      },
-    });
-    if (activeCount >= MAX_ACTIVE_PRE_APPROVALS_PER_VILLA) {
-      return res.status(400).json({
-        message: `Maximum ${MAX_ACTIVE_PRE_APPROVALS_PER_VILLA} active pre-approvals per flat. Please remove expired or unused entries first.`,
-      });
-    }
-
-    // --- Guard: duplicate phone for same villa ---
-    const duplicatePhone = await prisma.preApprovedVisitor.findFirst({
-      where: {
-        villaId: user.villaId,
-        societyId,
-        phone,
-        isActive: true,
-        isUsed: false,
-        OR: [{ validUntil: null }, { validUntil: { gte: new Date() } }],
-      },
-      select: { id: true, name: true },
-    });
-    if (duplicatePhone) {
-      return res.status(409).json({
-        message: `An active pre-approval already exists for this phone number (${duplicatePhone.name}). Remove it first or use a different number.`,
-      });
-    }
-
-    const otp = await generateUniqueOtp(societyId);
-    const preApproved = await prisma.preApprovedVisitor.create({
-      data: {
-        societyId,
-        villaId: user.villaId,
-        name,
-        phone,
-        purpose: typeof purpose === "string" && purpose.trim() ? purpose.trim() : undefined,
-        visitorType: visitorType || "GUEST",
-        validUntil: validUntil ? new Date(validUntil) : null,
-        otp,
-        approvedById: userId,
-        isActive: true,
-        isRecurring: isRecurring ?? false,
-        maxUses: isRecurring ? (maxUses ?? null) : null,
-      },
-      include: {
-        villa: { select: { villaNumber: true, block: true } },
-      },
+    const preApproved = await createPreApprovedVisitor(prisma, {
+      societyId,
+      villaId: user.villaId,
+      approvedById: userId,
+      name,
+      phone,
+      purpose: typeof purpose === "string" && purpose.trim() ? purpose.trim() : undefined,
+      visitorType: visitorType || "GUEST",
+      validUntil: validUntil ? new Date(validUntil) : null,
+      isRecurring: isRecurring ?? false,
+      maxUses: isRecurring ? (maxUses ?? null) : null,
     });
 
-    try {
-      await notifyGuardsPreApprovedCreated({
-        prisma,
-        societyId,
-        preApprovedId: preApproved.id,
-        visitorName: preApproved.name,
-        visitorPhone: preApproved.phone,
-        villa: preApproved.villa,
-      });
-    } catch (notifyErr) {
-      logger.error({ err: notifyErr }, "[pre-approve-visitor] guard notify error");
-    }
-
+    const otp = preApproved.otp ?? "";
     return res.status(201).json({
       message: "Visitor pre-approved successfully",
-      preApproved: { ...preApproved, passcode: otp },
+      preApproved: mapPreApprovedForMobile(preApproved),
       otp,
       passcode: otp,
     });
   } catch (error) {
+    const statusCode =
+      error && typeof error === "object" && "statusCode" in error
+        ? Number((error as { statusCode: number }).statusCode)
+        : undefined;
+    if (statusCode) {
+      return res.status(statusCode).json({
+        message: error instanceof Error ? error.message : "Request failed",
+      });
+    }
     next(error);
   }
 });
@@ -388,37 +290,59 @@ router.post("/pre-approve-visitor", preApproveRateLimiter, requireRole(UserRole.
 // DELETE /api/residents/pre-approved/:id - Remove pre-approval
 router.delete("/pre-approved/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
-    const { userId, societyId } = req.auth!;
+    const { userId, societyId, role, villaId: authVillaId } = req.auth!;
     const { id } = req.params;
 
-    // Get user's villa
-    const user = await prisma.user.findFirst({
-      where: { id: userId, societyId },
-      select: { villaId: true },
-    });
+    if (role === UserRole.RESIDENT) {
+      const user = await prisma.user.findFirst({
+        where: { id: userId, societyId },
+        select: { villaId: true },
+      });
 
-    if (!user || !user.villaId) {
-      return res.status(404).json({ message: "Villa not assigned" });
+      if (!user?.villaId) {
+        return res.status(404).json({ message: "Villa not assigned" });
+      }
+
+      try {
+        await deactivatePreApprovedVisitor(prisma, {
+          id,
+          societyId,
+          role,
+          actorVillaId: user.villaId,
+        });
+      } catch (error) {
+        const statusCode =
+          error && typeof error === "object" && "statusCode" in error
+            ? Number((error as { statusCode: number }).statusCode)
+            : undefined;
+        if (statusCode) {
+          return res.status(statusCode).json({
+            message: error instanceof Error ? error.message : "Request failed",
+          });
+        }
+        throw error;
+      }
+    } else {
+      try {
+        await deactivatePreApprovedVisitor(prisma, {
+          id,
+          societyId,
+          role,
+          actorVillaId: authVillaId,
+        });
+      } catch (error) {
+        const statusCode =
+          error && typeof error === "object" && "statusCode" in error
+            ? Number((error as { statusCode: number }).statusCode)
+            : undefined;
+        if (statusCode) {
+          return res.status(statusCode).json({
+            message: error instanceof Error ? error.message : "Request failed",
+          });
+        }
+        throw error;
+      }
     }
-
-    // Verify ownership
-    const preApproved = await prisma.preApprovedVisitor.findFirst({
-      where: {
-        id,
-        villaId: user.villaId,
-        societyId,
-      },
-    });
-
-    if (!preApproved) {
-      return res.status(404).json({ message: "Pre-approved visitor not found" });
-    }
-
-    // Soft delete by marking inactive
-    await prisma.preApprovedVisitor.update({
-      where: { id },
-      data: { isActive: false },
-    });
 
     return res.json({ message: "Pre-approval removed successfully" });
   } catch (error) {

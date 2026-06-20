@@ -5,29 +5,13 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import {
+  assertComplaintStatusTransition,
+  computeComplaintSlaDeadline,
+} from "../../services/complaintLifecycle.service";
 import { notifyResidentsComplaintStatusChanged } from "../../services/complaintStatusNotification.service";
 
 const router = Router();
-
-/** Valid complaint status transitions (state machine). */
-const VALID_TRANSITIONS: Record<ComplaintStatus, ComplaintStatus[]> = {
-  OPEN: [ComplaintStatus.IN_PROGRESS, ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED],
-  IN_PROGRESS: [ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED, ComplaintStatus.OPEN],
-  RESOLVED: [ComplaintStatus.CLOSED, ComplaintStatus.OPEN],
-  CLOSED: [ComplaintStatus.OPEN], // Allow re-opening
-};
-
-/** Default SLA hours per priority level. */
-const SLA_HOURS: Record<ComplaintPriority, number> = {
-  LOW: 168, // 7 days
-  MEDIUM: 72, // 3 days
-  HIGH: 24, // 1 day
-  URGENT: 6, // 6 hours
-};
-
-function computeSlaDeadline(priority: ComplaintPriority, from: Date = new Date()): Date {
-  return new Date(from.getTime() + SLA_HOURS[priority] * 3600_000);
-}
 
 const createComplaintSchema = z.object({
   villaId: z.string().cuid(),
@@ -108,7 +92,7 @@ router.post(
           description: body.description,
           category: body.category?.trim() || "General",
           priority,
-          slaDeadline: computeSlaDeadline(priority),
+          slaDeadline: computeComplaintSlaDeadline(priority),
         },
         include: {
           villa: {
@@ -145,14 +129,11 @@ router.patch(
         return res.status(404).json({ message: "Complaint not found" });
       }
 
-      // Validate status transition
-      if (status !== existing.status) {
-        const allowed = VALID_TRANSITIONS[existing.status as ComplaintStatus] ?? [];
-        if (!allowed.includes(status)) {
-          return res.status(400).json({
-            message: `Cannot transition from ${existing.status} to ${status}`,
-          });
-        }
+      try {
+        assertComplaintStatusTransition(existing.status, status);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : "Invalid status transition";
+        return res.status(400).json({ message });
       }
 
       const data: Record<string, unknown> = {};
@@ -160,8 +141,7 @@ router.patch(
       if (status === "RESOLVED" && !existing.resolvedAt) data.resolvedAt = new Date();
       if (priority && priority !== existing.priority) {
         data.priority = priority;
-        // Recompute SLA from original creation time with new priority
-        data.slaDeadline = computeSlaDeadline(priority, existing.createdAt);
+        data.slaDeadline = computeComplaintSlaDeadline(priority, existing.createdAt);
       }
 
       if (Object.keys(data).length > 0) {

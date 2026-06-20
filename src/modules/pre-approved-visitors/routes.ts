@@ -1,14 +1,17 @@
-import { Prisma, UserRole } from "@prisma/client";
+import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
-import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
-import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { notifyGuardsPreApprovedCreated } from "../guards/visitorResidentApproval.service";
+import { runVisitorApproveEntry } from "../guards/visitorApproveEntryFlow";
+import {
+  createPreApprovedVisitor,
+  deactivatePreApprovedVisitor,
+  listPreApprovedVisitors,
+} from "../../services/preApprovedVisitor.service";
 
 const router = Router();
 
@@ -25,11 +28,6 @@ const verifyOtpSchema = z.object({
   otp: z.string().length(6)
 });
 
-// Generate 6-digit OTP
-function generateOTP(): string {
-  return Math.floor(100000 + Math.random() * 900000).toString();
-}
-
 router.use(requireAuth);
 
 const otpRateLimiter = rateLimit({
@@ -40,46 +38,33 @@ const otpRateLimiter = rateLimit({
   message: { message: "Too many OTP attempts. Please wait and try again." },
 });
 
-// List pre-approved visitors (admin sees all, resident sees own)
+// List pre-approved visitors (admin sees all, resident sees own villa)
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: Prisma.PreApprovedVisitorWhereInput = {
-      societyId: req.auth!.societyId,
-      validUntil: { gte: new Date() },
-      isUsed: false
-    };
-
-    // Residents see only their villa's pre-approved visitors
-    if (req.auth!.role === UserRole.RESIDENT && req.auth!.villaId) {
-      whereClause.villaId = req.auth!.villaId;
-    }
-
+    const { societyId, role, villaId: authVillaId } = req.auth!;
     const pagination = getPagination(req);
-    const [visitors, total] = await Promise.all([
-      prisma.preApprovedVisitor.findMany({
-        where: whereClause,
-        include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true
-            }
-          }
-        },
-        orderBy: { validFrom: "asc" },
-        take: pagination.take,
-        skip: pagination.skip,
-      }),
-      prisma.preApprovedVisitor.count({ where: whereClause }),
-    ]);
 
-    return res.json({ visitors, ...paginationMeta(total, visitors.length, pagination) });
+    const villaId =
+      role === UserRole.RESIDENT && authVillaId ? authVillaId : undefined;
+
+    const { rows, summary } = await listPreApprovedVisitors(prisma, {
+      societyId,
+      villaId,
+      gateEligibleOnly: true,
+      take: pagination.take,
+      skip: pagination.skip,
+    });
+
+    return res.json({
+      visitors: rows,
+      ...paginationMeta(summary.total, rows.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
 });
 
-// Create pre-approved visitor with OTP (residents and admins only)
+// Create pre-approved visitor (same rules as POST /residents/pre-approve-visitor)
 router.post(
   "/",
   requireRole(UserRole.ADMIN, UserRole.RESIDENT),
@@ -87,70 +72,79 @@ router.post(
   async (req, res, next) => {
     try {
       const body = req.body as z.infer<typeof createPreApprovedVisitorSchema>;
+      const { userId, societyId, role, villaId: authVillaId } = req.auth!;
 
-      // Verify villa access
-      const villa = await prisma.villa.findFirst({
-        where: {
-          id: body.villaId,
-          societyId: req.auth!.societyId
-        }
-      });
-
-      if (!villa) {
-        return res.status(404).json({ message: "Villa not found" });
-      }
-
-      // Residents can only pre-approve for their villa
-      if (req.auth!.role === UserRole.RESIDENT) {
-        if (req.auth!.villaId !== body.villaId) {
+      if (role === UserRole.RESIDENT) {
+        if (!authVillaId || authVillaId !== body.villaId) {
           return res.status(403).json({ message: "Cannot pre-approve for another villa" });
         }
       }
 
-      const otp = generateOTP();
-
-      const visitor = await prisma.preApprovedVisitor.create({
-        data: {
-          societyId: req.auth!.societyId,
-          villaId: body.villaId,
-          name: body.name,
-          phone: body.phone,
-          purpose: body.purpose,
-          validFrom: new Date(body.validFrom),
-          validUntil: new Date(body.validUntil),
-          otp
-        },
-        include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true
-            }
-          }
-        }
+      const visitor = await createPreApprovedVisitor(prisma, {
+        societyId,
+        villaId: body.villaId,
+        approvedById: userId,
+        name: body.name,
+        phone: body.phone,
+        purpose: body.purpose,
+        validFrom: new Date(body.validFrom),
+        validUntil: new Date(body.validUntil),
       });
 
-      try {
-        await notifyGuardsPreApprovedCreated({
-          prisma,
-          societyId: req.auth!.societyId,
-          preApprovedId: visitor.id,
-          visitorName: visitor.name,
-          visitorPhone: visitor.phone,
-          villa: visitor.villa,
-        });
-      } catch (notifyErr) {
-        logger.error({ err: notifyErr }, "[pre-approved-visitors POST] guard notify error");
-      }
-
+      const otp = visitor.otp ?? "";
       return res.status(201).json({ visitor, otp });
     } catch (error) {
+      const statusCode =
+        error && typeof error === "object" && "statusCode" in error
+          ? Number((error as { statusCode: number }).statusCode)
+          : undefined;
+      if (statusCode) {
+        return res.status(statusCode).json({
+          message: error instanceof Error ? error.message : "Request failed",
+        });
+      }
       next(error);
     }
   }
 );
 
-// Verify OTP at gate (guards)
+// DELETE /api/pre-approved-visitors/:id — soft-remove (web admin + residents)
+router.delete(
+  "/:id",
+  requireRole(UserRole.ADMIN, UserRole.RESIDENT),
+  async (req, res, next) => {
+    try {
+      const { societyId, role, villaId: authVillaId } = req.auth!;
+      const { id } = req.params;
+
+      try {
+        await deactivatePreApprovedVisitor(prisma, {
+          id,
+          societyId,
+          role,
+          actorVillaId: authVillaId,
+        });
+      } catch (error) {
+        const statusCode =
+          error && typeof error === "object" && "statusCode" in error
+            ? Number((error as { statusCode: number }).statusCode)
+            : undefined;
+        if (statusCode) {
+          return res.status(statusCode).json({
+            message: error instanceof Error ? error.message : "Request failed",
+          });
+        }
+        throw error;
+      }
+
+      return res.json({ message: "Pre-approved visitor removed" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// Verify OTP at gate — uses the same atomic admit flow as /guards/visitor-approve-entry
 router.post(
   "/verify",
   otpRateLimiter,
@@ -158,70 +152,30 @@ router.post(
   validateBody(verifyOtpSchema),
   async (req, res, next) => {
     try {
+      const { userId, societyId } = req.auth!;
       const { otp } = req.body as z.infer<typeof verifyOtpSchema>;
 
-      const visitor = await prisma.preApprovedVisitor.findFirst({
+      const match = await prisma.preApprovedVisitor.findFirst({
         where: {
           otp,
-          societyId: req.auth!.societyId,
-          isUsed: false,
-          validFrom: { lte: new Date() },
-          validUntil: { gte: new Date() }
+          societyId,
+          isActive: true,
         },
-        include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true,
-              ownerName: true
-            }
-          }
-        }
+        select: { villaId: true },
       });
 
-      if (!visitor) {
+      if (!match) {
         return res.status(404).json({ message: "Invalid or expired OTP" });
       }
 
-      // Mark as used
-      await prisma.preApprovedVisitor.update({
-        where: { id: visitor.id },
-        data: {
-          isUsed: true,
-          usedAt: new Date()
-        }
+      const result = await runVisitorApproveEntry(prisma, {
+        userId,
+        societyId,
+        otp,
+        villaId: match.villaId,
       });
 
-      const unitId = await getOrCreateDefaultUnitIdForVilla({
-        societyId: req.auth!.societyId,
-        villaId: visitor.villaId,
-      });
-      if (!unitId) {
-        return res.status(400).json({
-          message:
-            "This property has no occupant units. Add at least one unit on the villa before verifying this visitor.",
-        });
-      }
-
-      // Create visitor log entry
-      await prisma.visitor.create({
-        data: {
-          societyId: req.auth!.societyId,
-          createdBy: req.auth!.userId,
-          name: visitor.name,
-          phone: visitor.phone,
-          purpose: visitor.purpose || "Pre-approved visit",
-          villaVisits: {
-            create: {
-              villaId: visitor.villaId,
-              unitId,
-              notifiedAt: new Date()
-            }
-          }
-        }
-      });
-
-      return res.json({ message: "Visitor verified and checked in", visitor });
+      return res.status(result.status).json(result.body);
     } catch (error) {
       next(error);
     }

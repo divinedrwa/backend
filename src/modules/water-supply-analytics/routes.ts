@@ -1,7 +1,14 @@
 import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import { prisma } from "../../lib/prisma";
+import {
+  localDateKey,
+  localDateKeysForLastDays,
+  localHour,
+  startOfLocalDayDaysAgo,
+} from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
+import { isWaterTurnedOff, isWaterTurnedOn } from "./waterEventAction";
 
 const router = Router();
 
@@ -16,9 +23,7 @@ router.get("/overview", async (req, res, next) => {
     const { days = "7" } = req.query;
 
     const daysAgo = parseInt(days as string) || 7;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
-    startDate.setHours(0, 0, 0, 0);
+    const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     // Get all water supply events in period
     const events = await prisma.waterSupplyEvent.findMany({
@@ -41,8 +46,8 @@ router.get("/overview", async (req, res, next) => {
 
     // Calculate statistics
     const totalEvents = events.length;
-    const onEvents = events.filter((e) => e.action === "ON").length;
-    const offEvents = events.filter((e) => e.action === "OFF").length;
+    const onEvents = events.filter((e) => isWaterTurnedOn(e)).length;
+    const offEvents = events.filter((e) => isWaterTurnedOff(e)).length;
 
     // Calculate average duration (time between ON and OFF)
     const durations: number[] = [];
@@ -52,9 +57,9 @@ router.get("/overview", async (req, res, next) => {
       .sort((a, b) => new Date(a.createdAt).getTime() - new Date(b.createdAt).getTime())
       .forEach((event) => {
         const key = event.gateId || "general";
-        if (event.action === "ON") {
+        if (isWaterTurnedOn(event)) {
           onEventMap.set(key, new Date(event.createdAt));
-        } else if (event.action === "OFF" && onEventMap.has(key)) {
+        } else if (isWaterTurnedOff(event) && onEventMap.has(key)) {
           const onTime = onEventMap.get(key)!;
           const offTime = new Date(event.createdAt);
           const durationMinutes = (offTime.getTime() - onTime.getTime()) / (1000 * 60);
@@ -82,8 +87,8 @@ router.get("/overview", async (req, res, next) => {
             gateName: e.gate?.name || "Unknown",
           };
         }
-        if (e.action === "ON") gateBreakdown[e.gateId].on++;
-        if (e.action === "OFF") gateBreakdown[e.gateId].off++;
+        if (isWaterTurnedOn(e)) gateBreakdown[e.gateId].on++;
+        if (isWaterTurnedOff(e)) gateBreakdown[e.gateId].off++;
       }
     });
 
@@ -114,7 +119,11 @@ router.get("/overview", async (req, res, next) => {
         return {
           gateId: gate.id,
           gateName: gate.name,
-          currentStatus: lastEvent?.action || "UNKNOWN",
+          currentStatus: lastEvent
+            ? isWaterTurnedOn(lastEvent)
+              ? "ON"
+              : "OFF"
+            : "UNKNOWN",
           lastUpdated: lastEvent?.createdAt || null,
         };
       })
@@ -149,9 +158,7 @@ router.get("/daily-usage", async (req, res, next) => {
     const { days = "7" } = req.query;
 
     const daysCount = parseInt(days as string) || 7;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysCount);
-    startDate.setHours(0, 0, 0, 0);
+    const startDate = startOfLocalDayDaysAgo(daysCount);
 
     const events = await prisma.waterSupplyEvent.findMany({
       where: {
@@ -163,6 +170,7 @@ router.get("/daily-usage", async (req, res, next) => {
       select: {
         createdAt: true,
         action: true,
+        turnedOn: true,
       },
     });
 
@@ -171,18 +179,15 @@ router.get("/daily-usage", async (req, res, next) => {
       [date: string]: { on: number; off: number };
     } = {};
 
-    for (let i = 0; i < daysCount; i++) {
-      const date = new Date(startDate);
-      date.setDate(date.getDate() + i);
-      const dateKey = date.toISOString().split("T")[0];
+    for (const dateKey of localDateKeysForLastDays(daysCount)) {
       dailyData[dateKey] = { on: 0, off: 0 };
     }
 
     events.forEach((e) => {
-      const dateKey = new Date(e.createdAt).toISOString().split("T")[0];
+      const dateKey = localDateKey(new Date(e.createdAt));
       if (dailyData[dateKey]) {
-        if (e.action === "ON") dailyData[dateKey].on++;
-        if (e.action === "OFF") dailyData[dateKey].off++;
+        if (isWaterTurnedOn(e)) dailyData[dateKey].on++;
+        if (isWaterTurnedOff(e)) dailyData[dateKey].off++;
       }
     });
 
@@ -211,8 +216,7 @@ router.get("/hourly-pattern", async (req, res, next) => {
     const { days = "30" } = req.query;
 
     const daysAgo = parseInt(days as string) || 30;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
+    const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const events = await prisma.waterSupplyEvent.findMany({
       where: {
@@ -224,6 +228,7 @@ router.get("/hourly-pattern", async (req, res, next) => {
       select: {
         createdAt: true,
         action: true,
+        turnedOn: true,
       },
     });
 
@@ -234,9 +239,9 @@ router.get("/hourly-pattern", async (req, res, next) => {
     }
 
     events.forEach((e) => {
-      const hour = new Date(e.createdAt).getHours();
-      if (e.action === "ON") hourlyData[hour].on++;
-      if (e.action === "OFF") hourlyData[hour].off++;
+      const hour = localHour(new Date(e.createdAt));
+      if (isWaterTurnedOn(e)) hourlyData[hour].on++;
+      if (isWaterTurnedOff(e)) hourlyData[hour].off++;
     });
 
     const formatHour = (hour: number) => {
@@ -295,7 +300,8 @@ router.get("/recent-events", async (req, res, next) => {
 
     const recentEvents = events.map((e) => ({
       id: e.id,
-      action: e.action,
+      action: isWaterTurnedOn(e) ? "ON" : "OFF",
+      turnedOn: e.turnedOn,
       timestamp: e.createdAt,
       reason: e.reason,
       gate: e.gate
@@ -323,8 +329,7 @@ router.get("/gate-performance", async (req, res, next) => {
     const { days = "30" } = req.query;
 
     const daysAgo = parseInt(days as string) || 30;
-    const startDate = new Date();
-    startDate.setDate(startDate.getDate() - daysAgo);
+    const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const gates = await prisma.gate.findMany({
       where: { societyId },
@@ -347,17 +352,17 @@ router.get("/gate-performance", async (req, res, next) => {
           orderBy: { createdAt: "asc" },
         });
 
-        const onEvents = events.filter((e) => e.action === "ON").length;
-        const offEvents = events.filter((e) => e.action === "OFF").length;
+        const onEvents = events.filter((e) => isWaterTurnedOn(e)).length;
+        const offEvents = events.filter((e) => isWaterTurnedOff(e)).length;
 
         // Calculate durations
         const durations: number[] = [];
         let lastOnTime: Date | null = null;
 
         events.forEach((event) => {
-          if (event.action === "ON") {
+          if (isWaterTurnedOn(event)) {
             lastOnTime = new Date(event.createdAt);
-          } else if (event.action === "OFF" && lastOnTime) {
+          } else if (isWaterTurnedOff(event) && lastOnTime) {
             const duration =
               (new Date(event.createdAt).getTime() - lastOnTime.getTime()) /
               (1000 * 60);
@@ -385,7 +390,11 @@ router.get("/gate-performance", async (req, res, next) => {
           offEvents,
           avgDurationMinutes: avgDuration,
           completedCycles: durations.length,
-          currentStatus: lastEvent?.action || "UNKNOWN",
+          currentStatus: lastEvent
+            ? isWaterTurnedOn(lastEvent)
+              ? "ON"
+              : "OFF"
+            : "UNKNOWN",
           lastEventTime: lastEvent?.createdAt || null,
         };
       })

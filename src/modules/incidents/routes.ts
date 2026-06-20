@@ -30,7 +30,7 @@ const resolveIncidentSchema = z.object({
 router.use(requireAuth);
 
 // List incidents (admin sees all, guard sees own)
-router.get("/", async (req, res, next) => {
+router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const { search, severity } = req.query;
     const whereClause: Prisma.IncidentWhereInput = {
