@@ -2,7 +2,7 @@ import { Prisma, ResidentType, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, invalidateAuthCache } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
 const router = Router();
@@ -240,6 +240,8 @@ router.post("/move-out", validateBody(moveOutSchema), async (req, res, next) => 
       },
     });
 
+    invalidateAuthCache(userId);
+
     return res.json({
       message: "Move-out processed successfully",
       resident: updatedUser,
@@ -290,6 +292,8 @@ router.patch("/:id/reactivate", async (req, res, next) => {
         },
       },
     });
+
+    invalidateAuthCache(id);
 
     return res.json({
       message: "Resident reactivated successfully",

@@ -3,7 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { PushPlatform, SocietyStatus, UserRole } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, invalidateAuthCacheForSociety } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { signAuthToken } from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
@@ -371,6 +371,7 @@ router.delete("/societies/:societyId", async (req, res, next) => {
         return;
       }
       await prisma.society.delete({ where: { id: societyId } });
+      await invalidateAuthCacheForSociety(societyId);
       auditFromRequest(req, {
         adminId: req.auth!.userId,
         action: "HARD_DELETE_SOCIETY",
@@ -404,6 +405,7 @@ router.delete("/societies/:societyId", async (req, res, next) => {
       },
       select: { id: true, name: true, archivedAt: true, archivedBy: true, status: true },
     });
+    await invalidateAuthCacheForSociety(societyId);
     auditFromRequest(req, {
       adminId: req.auth!.userId,
       action: "ARCHIVE_SOCIETY",
@@ -463,6 +465,7 @@ router.post("/societies/:societyId/restore", async (req, res, next) => {
         archivedAt: true,
       },
     });
+    await invalidateAuthCacheForSociety(societyId);
     auditFromRequest(req, {
       adminId: req.auth!.userId,
       action: "RESTORE_SOCIETY",

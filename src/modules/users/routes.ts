@@ -9,7 +9,7 @@ import {
 } from "../../lib/maintenanceBillingRole";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, invalidateAuthCache } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { resolveResidentDwelling } from "../../lib/residentUnitResolve";
 import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
@@ -617,6 +617,8 @@ router.patch(
         });
       }
 
+      invalidateAuthCache(id);
+
       return res.json({
         user: {
           ...updatedUser,
@@ -647,6 +649,8 @@ router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
     await prisma.user.deleteMany({
       where: { id, societyId: req.auth!.societyId },
     });
+
+    invalidateAuthCache(id);
 
     if (deleted) {
       auditFromRequest(req, {

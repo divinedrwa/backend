@@ -3,7 +3,7 @@ import "./instrument";
 
 import cron from "node-cron";
 import { app } from "./app";
-import { env } from "./config/env";
+import { env, validateProductionEnv } from "./config/env";
 import { AdvisoryLockKeys, withAdvisoryLock } from "./lib/advisoryLock";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
@@ -13,6 +13,8 @@ import { NotificationService } from "./services/notification.service";
 import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
 import { processEscalations } from "./services/sos-coordinator";
+
+validateProductionEnv();
 
 const host = process.env.HOST ?? "0.0.0.0";
 const server = app.listen(env.PORT, host, () => {

@@ -13,7 +13,7 @@ import {
   buildPendingDuesFromLedger,
   reconcileVillaLedgersForRecentCycles,
 } from "../billing-cycle/services/resident-pending-dues";
-import { requireAuth, requireRole } from "../../middlewares/auth";
+import { requireAuth, requireRole, invalidateAuthCache } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
@@ -508,6 +508,8 @@ router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req,
         }),
       ]);
 
+      invalidateAuthCache(userId);
+
       return res.json({
         ok: true,
         mode: "hard_deleted",
@@ -534,6 +536,8 @@ router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req,
         data: { isActive: false },
       }),
     ]);
+
+    invalidateAuthCache(userId);
 
     return res.json({
       ok: true,

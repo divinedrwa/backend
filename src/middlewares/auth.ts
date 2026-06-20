@@ -59,6 +59,17 @@ export function invalidateAuthCache(userId: string): void {
   authUserCache.delete(userId);
 }
 
+/** Evict all cached users for a society (archive/restore/status changes). */
+export async function invalidateAuthCacheForSociety(societyId: string): Promise<void> {
+  const users = await prisma.user.findMany({
+    where: { societyId },
+    select: { id: true },
+  });
+  for (const u of users) {
+    authUserCache.delete(u.id);
+  }
+}
+
 const SUPER_ALLOWED_PATH_PREFIXES = ["/api/auth", "/api/public", "/api/super"];
 
 function isSuperAdminAllowedPath(req: Request): boolean {
