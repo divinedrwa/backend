@@ -12,6 +12,11 @@ const router = Router();
 
 router.use(requireAuth);
 
+/** Prisma `Parcel.description` is required — guards often omit notes. */
+export function normalizeParcelDescription(description?: string | null): string {
+  return description?.trim() ?? "";
+}
+
 // Validation schema
 const logParcelSchema = z.object({
   villaId: z.string(),
@@ -44,7 +49,7 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
         deliveryService,
         trackingNumber,
         senderName,
-        description,
+        description: normalizeParcelDescription(description),
         photoUrl,
         receivedAt: new Date(),
         status: ParcelStatus.RECEIVED, // Use enum
