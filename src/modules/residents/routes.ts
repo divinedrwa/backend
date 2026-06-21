@@ -185,7 +185,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     let personalPendingCount = 0;
     let personalPendingAmount = 0;
     if (!maintenanceBillingExcluded && villaId) {
-      await reconcileVillaLedgersForRecentCycles(societyId, villaId);
+      await reconcileVillaLedgersForRecentCycles(societyId, villaId, 6);
       const personalDues = await buildPendingDuesFromLedger(societyId, userId);
       personalPendingCount = personalDues.length;
       personalPendingAmount = personalDues.reduce((sum, row) => sum + row.remainingDue, 0);
