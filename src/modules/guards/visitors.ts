@@ -287,28 +287,29 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 
     let residentApprovalRecipientCount = 0;
     if (awaitResidentApproval) {
-      void notifyResidentsVisitorApprovalRequest({
-        prisma,
-        societyId,
-        visitorId: visitor.id,
-        visitorName: name,
-        purpose: purpose ?? "",
-        villaIds: uniqueVillaIds,
-        targets: notifyTargets,
-        guardUserId: userId,
-        visitorType,
-        visitorPhone: phone,
-        visitorPhoto: photo,
-      })
-        .then((notifyResult) => {
-          residentApprovalRecipientCount = notifyResult.recipientUserCount;
-        })
-        .catch((notifyErr) => {
-          logger.error(
-            { err: notifyErr },
-            "[visitor-checkin] notifyResidentsVisitorApprovalRequest failed",
-          );
+      // Must await: the response payload (residentApprovalRecipientCount + the
+      // "no resident accounts linked" message) depends on the recipient count.
+      try {
+        const notifyResult = await notifyResidentsVisitorApprovalRequest({
+          prisma,
+          societyId,
+          visitorId: visitor.id,
+          visitorName: name,
+          purpose: purpose ?? "",
+          villaIds: uniqueVillaIds,
+          targets: notifyTargets,
+          guardUserId: userId,
+          visitorType,
+          visitorPhone: phone,
+          visitorPhoto: photo,
         });
+        residentApprovalRecipientCount = notifyResult.recipientUserCount;
+      } catch (notifyErr) {
+        logger.error(
+          { err: notifyErr },
+          "[visitor-checkin] notifyResidentsVisitorApprovalRequest failed",
+        );
+      }
     }
 
     // Fetch complete visitor with relations

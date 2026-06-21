@@ -13,7 +13,7 @@
  * - No impact on existing functionality
  */
 
-import rateLimit, { type Options } from 'express-rate-limit';
+import rateLimit, { ipKeyGenerator, type Options } from 'express-rate-limit';
 import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../lib/logger';
 
@@ -21,6 +21,17 @@ import { logger } from '../lib/logger';
 function skipHealthChecks(req: Request): boolean {
   const p = req.path ?? '';
   return p === '/health' || p === '/api/health';
+}
+
+/**
+ * Key by authenticated user, else by IP. IPv6 addresses must go through
+ * express-rate-limit's `ipKeyGenerator` (normalizes to a /64) — returning a raw
+ * `req.ip` is rejected by v8 validation and lets IPv6 clients rotate addresses
+ * within a subnet to bypass the limit.
+ */
+function userOrIpKey(req: Request): string {
+  const auth = (req as Request & { auth?: { userId?: string } }).auth;
+  return auth?.userId || ipKeyGenerator(req.ip || 'unknown');
 }
 
 /**
@@ -84,10 +95,7 @@ export const apiLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 300, // 300 requests/min (VERY generous)
   skip: skipHealthChecks,
-  keyGenerator: (req) => {
-    const auth = (req as Request & { auth?: { userId?: string } }).auth;
-    return auth?.userId || req.ip || 'unknown';
-  },
+  keyGenerator: userOrIpKey,
   message: 'Too many requests. Please slow down and try again.',
 });
 
@@ -101,10 +109,7 @@ export const apiLimiter = createLimiter({
 export const paymentLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 20, // 20 payment attempts (was 10, increased for safety)
-  keyGenerator: (req) => {
-    const auth = (req as Request & { auth?: { userId?: string } }).auth;
-    return auth?.userId || req.ip || 'unknown';
-  },
+  keyGenerator: userOrIpKey,
   message: 'Payment rate limit exceeded. Please wait a moment before retrying.',
 });
 
@@ -131,10 +136,7 @@ export const bulkLimiter = createLimiter({
 export const superAdminLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 500, // 500 requests/min (extremely generous)
-  keyGenerator: (req) => {
-    const auth = (req as Request & { auth?: { userId?: string } }).auth;
-    return auth?.userId || req.ip || 'unknown';
-  },
+  keyGenerator: userOrIpKey,
   message: 'Super admin rate limit exceeded.',
 });
 
