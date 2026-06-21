@@ -520,8 +520,11 @@ export async function admitPreApprovedVisitor(
     throw new Error("PRE_APPROVED_EXHAUSTED");
   }
 
-  // Check expiry
+  // Check validity window
   const now = new Date();
+  if (preApproved.validFrom && now < preApproved.validFrom) {
+    throw new Error("PRE_APPROVED_NOT_YET_VALID");
+  }
   if (preApproved.validUntil && now > preApproved.validUntil) {
     throw new Error("PRE_APPROVED_EXPIRED");
   }

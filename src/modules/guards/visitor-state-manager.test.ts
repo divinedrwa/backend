@@ -6,7 +6,7 @@ import {
   VisitorStatus,
   VisitorVillaApprovalStatus,
 } from "@prisma/client";
-import { recomputeVisitorAggregateApproval } from "./visitor-state-manager.js";
+import { admitPreApprovedVisitor, recomputeVisitorAggregateApproval } from "./visitor-state-manager.js";
 
 describe("recomputeVisitorAggregateApproval", () => {
   it("returns APPROVED for ANY_ONE when one villa approves", async () => {
@@ -69,5 +69,47 @@ describe("recomputeVisitorAggregateApproval", () => {
 
     assert.equal(status, VisitorStatus.DENIED);
     assert.equal(updatedTo, VisitorStatus.DENIED);
+  });
+});
+
+describe("admitPreApprovedVisitor validity window", () => {
+  function txWithPreApproval(row: Record<string, unknown>) {
+    let updated = false;
+    const tx = {
+      preApprovedVisitor: {
+        findFirst: async () => row,
+        update: async () => {
+          updated = true;
+          return {};
+        },
+      },
+    } as unknown as Prisma.TransactionClient;
+    return { tx, didUpdate: () => updated };
+  }
+
+  it("rejects a pre-approval whose start time is in the future", async () => {
+    const future = new Date(Date.now() + 60 * 60 * 1000);
+    const { tx, didUpdate } = txWithPreApproval({
+      id: "pa1",
+      isRecurring: false,
+      isUsed: false,
+      maxUses: null,
+      usedCount: 0,
+      validFrom: future,
+      validUntil: null,
+      villa: { id: "v1", villaNumber: "101", block: "A" },
+    });
+
+    await assert.rejects(
+      admitPreApprovedVisitor(tx, {
+        preApprovedId: "pa1",
+        gateId: "g1",
+        guardUserId: "guard1",
+        societyId: "soc1",
+      }),
+      /PRE_APPROVED_NOT_YET_VALID/,
+    );
+    // Must reject before consuming the pre-approval.
+    assert.equal(didUpdate(), false);
   });
 });

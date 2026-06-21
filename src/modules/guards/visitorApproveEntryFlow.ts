@@ -91,6 +91,17 @@ export async function runVisitorApproveEntry(
       };
     }
     
+    if (message === "PRE_APPROVED_NOT_YET_VALID") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "Pre-approval is not yet valid (start time is in the future)",
+        },
+      };
+    }
+
     if (message === "PRE_APPROVED_EXPIRED") {
       return {
         status: 400,
@@ -198,6 +209,17 @@ export async function runVisitorAdmitPreApprovedById(
       };
     }
     
+    if (message === "PRE_APPROVED_NOT_YET_VALID") {
+      return {
+        status: 400,
+        body: {
+          admitted: false,
+          verified: false,
+          message: "Pre-approval is not yet valid (start time is in the future)",
+        },
+      };
+    }
+
     if (message === "PRE_APPROVED_EXPIRED") {
       return {
         status: 400,
