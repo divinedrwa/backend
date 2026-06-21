@@ -17,10 +17,22 @@ import rateLimit, { ipKeyGenerator, type Options } from 'express-rate-limit';
 import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../lib/logger';
 
-/** Skip monitoring endpoints — never rate-limit health probes. */
-function skipHealthChecks(req: Request): boolean {
+/**
+ * Paths the global apiLimiter must not touch:
+ * - health probes (never rate-limit monitoring).
+ * - payment-gateway webhooks/callbacks. These are unauthenticated, so the
+ *   global limiter keys them by IP; gateways call from a handful of shared IPs,
+ *   so a burst of legitimate callbacks could trip the 300/min cap. They already
+ *   have a dedicated webhookLimiter (30/min) in app.ts — let that govern them.
+ */
+function skipGlobalLimiter(req: Request): boolean {
   const p = req.path ?? '';
-  return p === '/health' || p === '/api/health';
+  return (
+    p === '/health' ||
+    p === '/api/health' ||
+    p === '/api/v1/payments/webhook' ||
+    p === '/api/v1/payments/phonepe/callback'
+  );
 }
 
 /**
@@ -94,7 +106,7 @@ export const authLimiter = createLimiter({
 export const apiLimiter = createLimiter({
   windowMs: 60 * 1000, // 1 minute
   max: 300, // 300 requests/min (VERY generous)
-  skip: skipHealthChecks,
+  skip: skipGlobalLimiter,
   keyGenerator: userOrIpKey,
   message: 'Too many requests. Please slow down and try again.',
 });
