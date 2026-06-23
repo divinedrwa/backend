@@ -9,6 +9,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
+import { getPagination, paginationMeta } from "../../lib/pagination";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
@@ -1184,7 +1185,16 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
       }
     );
 
-    res.json({ rows, cycles, totals });
+    const pagination = getPagination(req);
+    const total = rows.length;
+    const pageRows = rows.slice(pagination.skip, pagination.skip + pagination.take);
+
+    res.json({
+      rows: pageRows,
+      cycles,
+      totals,
+      ...paginationMeta(total, pageRows.length, pagination),
+    });
   } catch (e) {
     next(e);
   }

@@ -98,13 +98,31 @@ const bulkMaintenanceAmountSchema = z.object({
     .default([]),
 });
 
-// GET /api/villas - List all villas
+// GET /api/villas - List all villas (?search= or ?q= filters villaNumber, block, ownerName)
 router.get("/", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const pagination = getPagination(req);
 
-    const where = { societyId };
+    const rawSearch =
+      typeof req.query.search === "string"
+        ? req.query.search
+        : typeof req.query.q === "string"
+          ? req.query.q
+          : "";
+    const search = rawSearch.trim();
+
+    const where =
+      search.length > 0
+        ? {
+            societyId,
+            OR: [
+              { villaNumber: { contains: search, mode: "insensitive" as const } },
+              { block: { contains: search, mode: "insensitive" as const } },
+              { ownerName: { contains: search, mode: "insensitive" as const } },
+            ],
+          }
+        : { societyId };
     const [villas, total] = await Promise.all([
       prisma.villa.findMany({
         where,
