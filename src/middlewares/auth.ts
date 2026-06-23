@@ -1,5 +1,5 @@
 import { NextFunction, Request, Response } from "express";
-import { SocietyStatus, UserRole } from "@prisma/client";
+import { SocietyStatus, SocietySubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { verifyAuthToken } from "../utils/jwt";
 
@@ -19,7 +19,11 @@ type AuthCacheEntry = {
     societyId: string | null;
     villaId: string | null;
     unitId: string | null;
-    society: { status: SocietyStatus; archivedAt: Date | null } | null;
+    society: {
+      status: SocietyStatus;
+      archivedAt: Date | null;
+      subscription: { status: SocietySubscriptionStatus; trialEndsAt: Date | null } | null;
+    } | null;
   } | null;
 };
 const authUserCache = new Map<string, AuthCacheEntry>();
@@ -46,7 +50,13 @@ async function getAuthUser(userId: string) {
       societyId: true,
       villaId: true,
       unitId: true,
-      society: { select: { status: true, archivedAt: true } },
+      society: {
+        select: {
+          status: true,
+          archivedAt: true,
+          subscription: { select: { status: true, trialEndsAt: true } },
+        },
+      },
     },
   });
 
@@ -71,6 +81,26 @@ export async function invalidateAuthCacheForSociety(societyId: string): Promise<
 }
 
 const SUPER_ALLOWED_PATH_PREFIXES = ["/api/auth", "/api/public", "/api/super"];
+
+function isSubscriptionBlocked(
+  sub: { status: SocietySubscriptionStatus; trialEndsAt: Date | null } | null | undefined,
+): boolean {
+  if (!sub) return false;
+  if (
+    sub.status === SocietySubscriptionStatus.SUSPENDED ||
+    sub.status === SocietySubscriptionStatus.CANCELLED
+  ) {
+    return true;
+  }
+  if (
+    sub.status === SocietySubscriptionStatus.TRIAL &&
+    sub.trialEndsAt &&
+    sub.trialEndsAt.getTime() < Date.now()
+  ) {
+    return true;
+  }
+  return false;
+}
 
 function isSuperAdminAllowedPath(req: Request): boolean {
   const path = req.originalUrl.split("?")[0] ?? "";
@@ -144,6 +174,10 @@ export async function requireAuth(req: Request, res: Response, next: NextFunctio
         user.role !== UserRole.RESIDENT_CUM_ADMIN
       ) {
         res.status(403).json({ message: "Society is inactive" });
+        return;
+      }
+      if (isSubscriptionBlocked(user.society?.subscription)) {
+        res.status(403).json({ message: "Society subscription expired" });
         return;
       }
     }

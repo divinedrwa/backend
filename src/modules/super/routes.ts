@@ -1,7 +1,17 @@
 import bcrypt from "bcryptjs";
 import { Router } from "express";
 import { z } from "zod";
-import { PushPlatform, SocietyStatus, UserRole } from "@prisma/client";
+import {
+  BillingCycleStatus,
+  BillingPaymentSource,
+  BillingUserPaymentStatus,
+  Prisma,
+  PushPlatform,
+  SocietyStatus,
+  SocietySubscriptionPlan,
+  SocietySubscriptionStatus,
+  UserRole,
+} from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole, invalidateAuthCacheForSociety } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -9,6 +19,8 @@ import { signAuthToken } from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
 import { auditFromRequest } from "../../services/audit.service";
 import { compareSemver } from "../../lib/semver";
+import { computeOnboardingStatus } from "../../lib/societyOnboarding";
+import { aggregatePlatformRevenue } from "../../lib/platformRevenue";
 
 const router = Router();
 
@@ -20,19 +32,39 @@ const createSocietySchema = z.object({
   address: z.string().trim().max(500).optional(),
 });
 
+function parseSocietySearch(req: { query: Record<string, unknown> }): string | undefined {
+  const raw = typeof req.query.search === "string" ? req.query.search : "";
+  const q = raw.trim();
+  return q.length > 0 ? q : undefined;
+}
+
 /**
  * POST /api/super/societies — create a tenant society.
  */
 router.post("/societies", validateBody(createSocietySchema), async (req, res, next) => {
   try {
     const body = req.body as z.infer<typeof createSocietySchema>;
-    const society = await prisma.society.create({
-      data: {
-        name: body.name.trim(),
-        address: body.address?.trim() || null,
-        createdByUserId: req.auth!.userId,
-      },
-      select: { id: true, name: true, address: true, status: true },
+    const trialEndsAt = new Date();
+    trialEndsAt.setDate(trialEndsAt.getDate() + 30);
+
+    const society = await prisma.$transaction(async (tx) => {
+      const created = await tx.society.create({
+        data: {
+          name: body.name.trim(),
+          address: body.address?.trim() || null,
+          createdByUserId: req.auth!.userId,
+        },
+        select: { id: true, name: true, address: true, status: true },
+      });
+      await tx.societySubscription.create({
+        data: {
+          societyId: created.id,
+          plan: SocietySubscriptionPlan.TRIAL,
+          status: SocietySubscriptionStatus.TRIAL,
+          trialEndsAt,
+        },
+      });
+      return created;
     });
     auditFromRequest(req, {
       adminId: req.auth!.userId,
@@ -183,14 +215,37 @@ router.post("/societies/:societyId/tenant-session", async (req, res, next) => {
 });
 
 /**
+ * GET /api/super/platform-revenue — aggregate platform fees from gateway payments.
+ */
+router.get("/platform-revenue", async (_req, res, next) => {
+  try {
+    const revenue = await aggregatePlatformRevenue();
+    res.json(revenue);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
  * GET /api/super/societies — list all societies (platform view).
  *
  * Includes archived societies so the operator can restore them. The list is
  * sorted by name; clients should rely on `archivedAt` to filter/sort.
  */
-router.get("/societies", async (_req, res, next) => {
+router.get("/societies", async (req, res, next) => {
   try {
+    const search = parseSocietySearch(req);
+    const where: Prisma.SocietyWhereInput = search
+      ? {
+          OR: [
+            { name: { contains: search, mode: "insensitive" } },
+            { address: { contains: search, mode: "insensitive" } },
+          ],
+        }
+      : {};
+
     const rows = await prisma.society.findMany({
+      where,
       orderBy: { name: "asc" },
       select: {
         id: true,
@@ -200,6 +255,26 @@ router.get("/societies", async (_req, res, next) => {
         archivedAt: true,
         archivedBy: true,
         createdAt: true,
+        subscription: {
+          select: {
+            plan: true,
+            status: true,
+            trialEndsAt: true,
+            currentPeriodEnd: true,
+            monthlyAmount: true,
+          },
+        },
+        _count: {
+          select: {
+            villas: true,
+            billingCycles: true,
+          },
+        },
+        billingCycles: {
+          where: { status: BillingCycleStatus.OPEN },
+          select: { id: true },
+          take: 1,
+        },
         users: {
           where: { role: UserRole.ADMIN, isActive: true },
           orderBy: { createdAt: "asc" },
@@ -212,10 +287,47 @@ router.get("/societies", async (_req, res, next) => {
         },
       },
     });
-    const societies = rows.map(({ users, ...s }) => ({
+
+    const societyIds = rows.map((r) => r.id);
+    const cyclesWithPayments = societyIds.length
+      ? await prisma.billingCycle.findMany({
+          where: {
+            societyId: { in: societyIds },
+            payments: {
+              some: {
+                paymentStatus: BillingUserPaymentStatus.SUCCESS,
+                source: BillingPaymentSource.GATEWAY,
+              },
+            },
+          },
+          select: { societyId: true },
+          distinct: ["societyId"],
+        })
+      : [];
+    const societiesWithGatewayPayments = new Set(cyclesWithPayments.map((c) => c.societyId));
+
+    const societies = rows.map(({ users, subscription, _count, billingCycles, ...s }) => ({
       ...s,
       admins: users,
+      subscription: subscription
+        ? {
+            plan: subscription.plan,
+            status: subscription.status,
+            trialEndsAt: subscription.trialEndsAt,
+            currentPeriodEnd: subscription.currentPeriodEnd,
+            monthlyAmount:
+              subscription.monthlyAmount != null ? Number(subscription.monthlyAmount) : null,
+          }
+        : null,
+      onboardingStatus: computeOnboardingStatus({
+        archivedAt: s.archivedAt,
+        villaCount: _count.villas,
+        billingCycleCount: _count.billingCycles,
+        openBillingCycleCount: billingCycles.length,
+        gatewayPaymentCount: societiesWithGatewayPayments.has(s.id) ? 1 : 0,
+      }),
     }));
+
     res.json({ societies });
   } catch (e) {
     next(e);
@@ -227,6 +339,109 @@ const updateSocietySchema = z.object({
   address: z.union([z.string().trim().max(500), z.null()]).optional(),
   status: z.nativeEnum(SocietyStatus).optional(),
 });
+
+const updateSubscriptionSchema = z.object({
+  plan: z.nativeEnum(SocietySubscriptionPlan).optional(),
+  status: z.nativeEnum(SocietySubscriptionStatus).optional(),
+  trialEndsAt: z.union([z.string().datetime(), z.null()]).optional(),
+  currentPeriodEnd: z.union([z.string().datetime(), z.null()]).optional(),
+  monthlyAmount: z.union([z.number().min(0), z.null()]).optional(),
+  notes: z.union([z.string().trim().max(2000), z.null()]).optional(),
+});
+
+/**
+ * GET /api/super/societies/:societyId/subscription
+ */
+router.get("/societies/:societyId/subscription", async (req, res, next) => {
+  try {
+    const societyId = req.params.societyId?.trim();
+    if (!societyId) {
+      res.status(400).json({ message: "Missing society id" });
+      return;
+    }
+
+    const subscription = await prisma.societySubscription.findUnique({
+      where: { societyId },
+    });
+    if (!subscription) {
+      res.status(404).json({ message: "Subscription not found" });
+      return;
+    }
+
+    res.json({
+      subscription: {
+        ...subscription,
+        monthlyAmount:
+          subscription.monthlyAmount != null ? Number(subscription.monthlyAmount) : null,
+      },
+    });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * PATCH /api/super/societies/:societyId/subscription
+ */
+router.patch(
+  "/societies/:societyId/subscription",
+  validateBody(updateSubscriptionSchema),
+  async (req, res, next) => {
+    try {
+      const societyId = req.params.societyId?.trim();
+      if (!societyId) {
+        res.status(400).json({ message: "Missing society id" });
+        return;
+      }
+
+      const body = req.body as z.infer<typeof updateSubscriptionSchema>;
+      const existing = await prisma.societySubscription.findUnique({
+        where: { societyId },
+        select: { id: true },
+      });
+      if (!existing) {
+        res.status(404).json({ message: "Subscription not found" });
+        return;
+      }
+
+      const data: Prisma.SocietySubscriptionUpdateInput = {};
+      if (body.plan !== undefined) data.plan = body.plan;
+      if (body.status !== undefined) data.status = body.status;
+      if (body.trialEndsAt !== undefined) {
+        data.trialEndsAt = body.trialEndsAt ? new Date(body.trialEndsAt) : null;
+      }
+      if (body.currentPeriodEnd !== undefined) {
+        data.currentPeriodEnd = body.currentPeriodEnd ? new Date(body.currentPeriodEnd) : null;
+      }
+      if (body.monthlyAmount !== undefined) {
+        data.monthlyAmount = body.monthlyAmount;
+      }
+      if (body.notes !== undefined) data.notes = body.notes;
+
+      if (Object.keys(data).length === 0) {
+        res.status(400).json({ message: "No fields to update" });
+        return;
+      }
+
+      const subscription = await prisma.societySubscription.update({
+        where: { societyId },
+        data,
+      });
+
+      await invalidateAuthCacheForSociety(societyId);
+
+      res.json({
+        subscription: {
+          ...subscription,
+          monthlyAmount:
+            subscription.monthlyAmount != null ? Number(subscription.monthlyAmount) : null,
+        },
+      });
+    } catch (e) {
+      next(e);
+    }
+  },
+);
 
 /**
  * GET /api/super/societies/:societyId — single society + aggregate counts.

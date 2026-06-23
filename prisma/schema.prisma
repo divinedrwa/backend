@@ -109,6 +109,21 @@ enum SocietyStatus {
   INACTIVE
 }
 
+enum SocietySubscriptionPlan {
+  TRIAL
+  STARTER
+  GROWTH
+  ENTERPRISE
+}
+
+enum SocietySubscriptionStatus {
+  TRIAL
+  ACTIVE
+  PAST_DUE
+  SUSPENDED
+  CANCELLED
+}
+
 enum InvitationStatus {
   PENDING
   ACCEPTED
@@ -226,6 +241,24 @@ model Society {
   meetings              Meeting[]
   staffAttendance       StaffAttendance[]
   waterSupplyRequests   WaterSupplyRequest[]
+
+  subscription SocietySubscription?
+
+  @@index([status])
+}
+
+model SocietySubscription {
+  id               String                    @id @default(cuid())
+  societyId        String                    @unique
+  society          Society                   @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  plan             SocietySubscriptionPlan   @default(TRIAL)
+  status           SocietySubscriptionStatus @default(TRIAL)
+  trialEndsAt      DateTime?
+  currentPeriodEnd DateTime?
+  monthlyAmount    Decimal?                  @db.Decimal(12, 2)
+  notes            String?
+  createdAt        DateTime                  @default(now())
+  updatedAt        DateTime                  @updatedAt
 
   @@index([status])
 }

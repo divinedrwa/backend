@@ -1,10 +1,18 @@
 import { Router } from "express";
-import { PushPlatform, SocietyStatus } from "@prisma/client";
+import { Prisma, PushPlatform, SocietyStatus } from "@prisma/client";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { cacheMiddleware } from "../../middlewares/cache";
 
 const router = Router();
+
+function parseSocietySearch(req: { query: Record<string, unknown> }): string | undefined {
+  const raw =
+    (typeof req.query.search === "string" ? req.query.search : "") ||
+    (typeof req.query.q === "string" ? req.query.q : "");
+  const q = raw.trim();
+  return q.length > 0 ? q : undefined;
+}
 
 /**
  * GET /api/public/societies — list societies for login pickers (no auth).
@@ -12,7 +20,18 @@ const router = Router();
 router.get("/societies", cacheMiddleware(300), async (req, res, next) => {
   try {
     const pagination = getPagination(req);
-    const where = { archivedAt: null };
+    const search = parseSocietySearch(req);
+    const where: Prisma.SocietyWhereInput = {
+      archivedAt: null,
+      ...(search
+        ? {
+            OR: [
+              { name: { contains: search, mode: "insensitive" } },
+              { address: { contains: search, mode: "insensitive" } },
+            ],
+          }
+        : {}),
+    };
     /** All tenants for login pickers (mobile + web). Exclude archived societies. */
     const [rows, total] = await Promise.all([
       prisma.society.findMany({
