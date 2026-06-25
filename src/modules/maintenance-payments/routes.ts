@@ -113,19 +113,15 @@ router.post(
 
     // Residents can only pay for their own villa
     if (req.auth?.role === UserRole.RESIDENT) {
-      // Residents cannot self-record CASH or CHEQUE payments — admin must confirm receipt
-      if (paymentMode === "CASH" || paymentMode === "CHEQUE") {
-        return res.status(403).json({
-          message: "Cash and cheque payments must be recorded by an admin after verification",
-        });
-      }
-      const resident = await prisma.user.findFirst({
-        where: { id: userId, societyId },
-        select: { villaId: true },
+      // Residents cannot self-record any payment mode through this route.
+      // - CASH / CHEQUE: admin must confirm physical receipt.
+      // - ONLINE / UPI / BANK_TRANSFER: use the dedicated gateway/UPI-submission flows
+      //   which enforce approval before touching the ledger.
+      // Only ADMIN may call this endpoint to write a payment directly.
+      return res.status(403).json({
+        message: "Residents cannot record payments directly. Use the online payment or UPI submission flow.",
+        code: "RESIDENT_DIRECT_PAYMENT_FORBIDDEN",
       });
-      if (!resident?.villaId || resident.villaId !== villaId) {
-        return res.status(403).json({ message: "You can only pay for your own villa" });
-      }
     }
 
     // 🔥 CRITICAL FIX: Wrap ALL operations in transaction

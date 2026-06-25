@@ -22,6 +22,8 @@ import {
 } from "./services/razorpay-billing";
 import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
 import { isGatewayLedgerSynced, reconcileRazorpayFromPoll } from "./gateway-payment-settle";
+import { checkRazorpayOrderStatus } from "./services/razorpay-billing";
+import { mergeRazorpayStatusWithLocal } from "../../services/razorpay-status";
 import {
   computeRazorpayCheckoutBreakup,
   getRazorpayGatewayFeeConfigForSociety,
@@ -29,17 +31,20 @@ import {
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
 
 /**
- * Decide what to do with an existing PENDING Razorpay order.
+ * Decide what to do with an existing Razorpay order row.
  *
- * Only blocks new-order creation when the payment is already SUCCESS
- * (returns `{ autoSettled: true }`). For PENDING or FAILED, always
- * returns `null` so a fresh Razorpay order is created — the user
- * clicked "Pay", so open the checkout instead of a spinner.
+ * - SUCCESS already in DB → return `{ autoSettled: true }` (no new order needed).
+ * - PENDING in DB → poll Razorpay to detect race between checkout completion and
+ *   DB write.  If Razorpay reports captured/paid, settle and return `{ autoSettled: true }`.
+ *   If Razorpay reports the order as still `created` (not expired/failed), return
+ *   `{ reuseOrderId: orderId }` so the caller can hand the same orderId back to the
+ *   checkout SDK — this prevents orphaned orders.
+ * - FAILED in DB or Razorpay → return `null` so a fresh order is created.
  */
 async function reconcileExistingRazorpayOrder(
   societyId: string,
   orderId: string,
-): Promise<{ autoSettled?: boolean } | null> {
+): Promise<{ autoSettled?: boolean; reuseOrderId?: string } | null> {
   const row = await prisma.userCyclePayment.findFirst({
     where: { paymentGatewayOrderId: orderId },
     select: { paymentStatus: true },
@@ -51,8 +56,36 @@ async function reconcileExistingRazorpayOrder(
     return { autoSettled: true };
   }
 
-  // FAILED or PENDING → always create a fresh Razorpay order.
-  return null;
+  if (row.paymentStatus === BillingUserPaymentStatus.FAILED) {
+    // Definitively failed — allow a new order.
+    return null;
+  }
+
+  // PENDING: poll Razorpay to see if payment was captured but webhook/poll hasn't fired yet.
+  try {
+    const gatewayStatus = await checkRazorpayOrderStatus(societyId, orderId);
+    const merged = mergeRazorpayStatusWithLocal(gatewayStatus, BillingUserPaymentStatus.PENDING);
+
+    if (merged.outcome === "completed" || merged.outcome === "recorded") {
+      // Payment captured at Razorpay but DB not yet updated — settle inline.
+      await reconcileRazorpayFromPoll(societyId, orderId);
+      return { autoSettled: true };
+    }
+
+    if (merged.outcome === "failed" || merged.outcome === "unknown") {
+      // Order expired/failed at Razorpay — let caller create a new order.
+      return null;
+    }
+
+    // outcome === "pending" → order still `created` at Razorpay (not expired, not paid).
+    // Return the existing orderId so the SDK opens the same checkout session —
+    // prevents a second Razorpay order being orphaned if the user just went back.
+    return { reuseOrderId: orderId };
+  } catch (err) {
+    logger.warn({ err, orderId }, "[razorpay] reconcileExistingRazorpayOrder poll failed — creating new order");
+    // Fail open: if Razorpay API is down, allow a new order so the user isn't blocked.
+    return null;
+  }
 }
 
 const router = Router();
@@ -105,7 +138,19 @@ router.post(
             });
             return;
           }
-          // reconciled === null → PENDING or FAILED, fall through to create new order
+          if (reconciled?.reuseOrderId) {
+            // Razorpay order still open — reuse it so the checkout SDK reopens the same session.
+            res.status(200).json({
+              orderId: reconciled.reuseOrderId,
+              paymentId: idempotentRow.id,
+              totalDue: Number(idempotentRow.amountPaid),
+              existingOrder: true,
+              reuseOrder: true,
+              idempotent: true,
+            });
+            return;
+          }
+          // reconciled === null → order expired/failed, fall through to create new order
         }
       }
 
@@ -193,7 +238,7 @@ router.post(
       }
 
       // Prevent orphaned orders: if a PENDING payment already has a gateway order,
-      // check its age and status before deciding whether to reuse or create new.
+      // poll Razorpay to decide whether to settle, reuse, or mint a new order.
       if (
         existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
         existing.paymentGatewayOrderId
@@ -212,7 +257,23 @@ router.post(
           });
           return;
         }
-        // reconciled === null → PENDING or FAILED, fall through to create new order
+        if (reconciled?.reuseOrderId) {
+          // Order still open at Razorpay — hand back the same orderId so the SDK
+          // continues the existing checkout rather than creating a second orphaned order.
+          const key = await getPublishableKeyForSociety(auth.societyId);
+          res.status(200).json({
+            orderId: reconciled.reuseOrderId,
+            amountPaise: Math.round(adjustedDue * 100),
+            currency: "INR",
+            key,
+            paymentId: existing.id,
+            totalDue: adjustedDue,
+            existingOrder: true,
+            reuseOrder: true,
+          });
+          return;
+        }
+        // reconciled === null → order expired/failed at Razorpay, fall through to create new order
       }
 
       if (!(await isRazorpayConfiguredForSociety(auth.societyId))) {

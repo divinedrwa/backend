@@ -39,12 +39,32 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
 
   // If global verification failed, try per-society secret
   if (!globalVerified) {
-    // Extract societyId from order notes to look up per-society secret
+    // Extract societyId from order notes to look up per-society secret.
+    // Razorpay attaches notes to the Order, not always to the payment entity directly,
+    // so fall back to a DB lookup by order_id when notes.societyId is missing.
     const payloadRoot = parsed.payload as Record<string, unknown> | undefined;
     const payContainer = payloadRoot?.payment as Record<string, unknown> | undefined;
     const entity = ((payContainer?.entity as Record<string, unknown>) || payContainer || {}) as Record<string, unknown>;
     const notes = entity.notes as Record<string, string> | undefined;
-    const societyId = notes?.societyId;
+    let societyId = notes?.societyId;
+
+    // Fallback: look up societyId from our DB via the payment's order_id
+    if (!societyId) {
+      const orderId = typeof entity.order_id === "string" ? entity.order_id : undefined;
+      if (orderId) {
+        const row = await prisma.userCyclePayment.findFirst({
+          where: { paymentGatewayOrderId: orderId },
+          select: { cycleId: true },
+        });
+        if (row?.cycleId) {
+          const cycle = await prisma.billingCycle.findUnique({
+            where: { id: row.cycleId },
+            select: { societyId: true },
+          });
+          societyId = cycle?.societyId ?? undefined;
+        }
+      }
+    }
 
     let perSocietyVerified = false;
     if (societyId && sigStr) {
@@ -160,8 +180,31 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         if (amountPaise < expectedPaise - 1) {
           logger.error(
             { orderId, paymentId, expectedPaise, actualPaise: amountPaise, maintenancePaiseFromNotes, platformFeePaiseFromNotes, platformFeeGstPaiseFromNotes },
-            "[billing webhook] AMOUNT UNDERPAID — gateway charged less than expected order amount",
+            "[billing webhook] AMOUNT UNDERPAID — gateway charged less than expected; marking FAILED for manual review",
           );
+          // Mark the row FAILED so a new order can be created and the resident is notified.
+          // This prevents money being captured without the ledger being updated.
+          await tx.userCyclePayment.update({
+            where: { id: lockedRow.id },
+            data: {
+              paymentStatus: BillingUserPaymentStatus.FAILED,
+              paymentGatewayPaymentId: paymentId,
+              paidAt: null,
+              source: BillingPaymentSource.GATEWAY,
+            },
+          });
+          // Log the mismatch for ops review
+          if (lockedRow.userId) {
+            await tx.billingPaymentLog.create({
+              data: {
+                societyId: cycle?.societyId ?? "unknown",
+                userId: lockedRow.userId,
+                cycleId: lockedRow.cycleId,
+                status: "amount_mismatch_failed",
+                responsePayload: { paymentId, orderId, expectedPaise, actualPaise: amountPaise } as object,
+              },
+            });
+          }
           return { action: "skip" as const, reason: "amount_mismatch" };
         }
       }

@@ -89,17 +89,10 @@ export async function recordPaymentAndSyncLedgers(
     });
   }
 
-  // 2. Check for existing payment
-  const existingPayment = await tx.maintenancePayment.findFirst({
-    where: { societyId, villaId, month, year },
-    orderBy: { paymentDate: "desc" },
-    select: { id: true, receiptNumber: true },
-  });
-
-  // Generate unique receipt number
-  const receiptNumber = existingPayment?.receiptNumber
-    ? existingPayment.receiptNumber
-    : `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
+  // Always generate a new receipt number for each payment record.
+  // Multiple payments for the same month (e.g. partial cash + UPI balance) are valid
+  // and each must have its own receipt. The ledger walker aggregates them.
+  const receiptNumber = `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
 
   // 3. Resolve matching MaintenanceCollectionCycle
   const mcc = await tx.maintenanceCollectionCycle.findFirst({
@@ -114,27 +107,10 @@ export async function recordPaymentAndSyncLedgers(
       })
     : null;
 
-  // 4. Create or update payment
-  const payment = existingPayment
-    ? await tx.maintenancePayment.update({
-        where: { id: existingPayment.id },
-        data: {
-          maintenanceId: maintenance.id,
-          amount,
-          paymentDate: new Date(paymentDate),
-          paymentMode: paymentMode as PaymentMode,
-          transactionId,
-          bankAccountId,
-          remarks,
-          maintenanceCollectionCycleId: mcc?.id ?? undefined,
-          villaMaintenanceSnapshotId: snapshot?.id ?? undefined,
-        },
-        include: {
-          villa: { select: { villaNumber: true, ownerName: true } },
-          bankAccount: { select: { bankName: true, accountNumber: true } },
-        },
-      })
-    : await tx.maintenancePayment.create({
+  // 4. Always create a new payment row (never overwrite an existing one).
+  // Each payment — cash, UPI, Razorpay — is an independent ledger event.
+  // Idempotency is already enforced above via the idempotencyKey unique index.
+  const payment = await tx.maintenancePayment.create({
         data: {
           societyId,
           villaId,
