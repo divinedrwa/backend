@@ -238,8 +238,11 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     // overpayments.  Villa A's advance credit belongs to Villa A, it doesn't
     // reduce what Villa B still owes.
     const pendingDues = money.outstandingDues;
-    // Projected balance: what the fund would be if every pending due is paid.
-    const projectedBalance = currentBalance + pendingDues;
+    // Projected balance: spendable society fund if every pending due is paid.
+    // Excludes advance credit — that's residents' prepaid money for future
+    // cycles (a liability), already sitting in currentBalance as cash. Matches
+    // the app's "Society Fund Balance" headline (currentBalance - advanceCredit).
+    const projectedBalance = currentBalance - money.totalAdvanceCredit + pendingDues;
     // Collection rate (0–100) based on capped collected vs expected.
     const collectedForRate = money.expectedAllTime - money.outstandingDues;
     const collectionRate =
