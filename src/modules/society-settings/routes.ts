@@ -12,6 +12,7 @@ import { brandingImageMemory } from "../../lib/brandingImageUpload";
 import { uploadBrandingImageBuffer } from "../../services/cloudinaryBranding";
 import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
 import {
+  isMissingColumnError,
   isMissingThemeColorsColumn,
   societyThemeColorsColumnExists,
 } from "../../lib/schemaChecks";
@@ -45,16 +46,16 @@ async function fetchSocietySettings(societyId: string) {
   try {
     return await prisma.society.findUnique({
       where: { id: societyId },
-      select: { ...societySettingsSelectBase, themeColors: true },
+      select: { ...societySettingsSelectBase, themeColors: true, splashUrl: true },
     });
   } catch (error) {
-    if (!isMissingThemeColorsColumn(error)) throw error;
+    if (!isMissingColumnError(error)) throw error;
     const society = await prisma.society.findUnique({
       where: { id: societyId },
       select: societySettingsSelectBase,
     });
     if (!society) return null;
-    return { ...society, themeColors: null };
+    return { ...society, themeColors: null, splashUrl: null };
   }
 }
 
@@ -512,6 +513,54 @@ router.delete(
       });
       await bustSocietySettingsCache(societyId);
       return res.json({ message: "Stamp removed" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * POST /api/society-settings/upload-splash — upload the mobile app splash image
+ * (ADMIN). Shown full-screen under a brand-gradient tint on the app splash.
+ */
+router.post(
+  "/upload-splash",
+  requireRole(UserRole.ADMIN),
+  brandingImageMemory.single("splash"),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+      const url = await uploadBrandingImageBuffer(req.file.buffer, societyId, "splash");
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { splashUrl: url },
+      });
+      await bustSocietySettingsCache(societyId);
+      return res.json({ url });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/splash — remove the splash image (ADMIN).
+ */
+router.delete(
+  "/splash",
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      await prisma.society.updateMany({
+        where: { id: societyId },
+        data: { splashUrl: null },
+      });
+      await bustSocietySettingsCache(societyId);
+      return res.json({ message: "Splash removed" });
     } catch (error) {
       next(error);
     }

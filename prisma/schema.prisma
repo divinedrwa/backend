@@ -217,6 +217,10 @@ model Society {
   /// Keys match the ThemeColors interface. Null = use app defaults.
   themeColors Json?
 
+  /// Optional URL to an admin-uploaded app splash image (mobile). The app shows
+  /// it full-screen under a brand-gradient tint. Null = themed gradient only.
+  splashUrl String?
+
   /// Late-fee config: percentage of monthly maintenance applied after grace period.
   /// 0 = disabled. Typical: 1-5%. Mutually exclusive with lateFeeFixedAmount.
   lateFeePercentage Float @default(0)

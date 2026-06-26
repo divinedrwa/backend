@@ -26,6 +26,14 @@ export async function societyThemeColorsColumnExists(): Promise<boolean> {
   return themeColorsColumnKnown;
 }
 
+/** True for any "column does not exist" error (Prisma P2022) — used to tolerate
+ *  optional newer columns (themeColors, splashUrl) when a migration lags a deploy. */
+export function isMissingColumnError(error: unknown): boolean {
+  return (
+    error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2022"
+  );
+}
+
 export function isMissingThemeColorsColumn(error: unknown): boolean {
   if (!(error instanceof Prisma.PrismaClientKnownRequestError)) return false;
   if (error.code !== "P2022") return false;

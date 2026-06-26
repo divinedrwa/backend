@@ -4,7 +4,7 @@ import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { cacheMiddleware } from "../../middlewares/cache";
 import { requireAuth } from "../../middlewares/auth";
-import { isMissingThemeColorsColumn } from "../../lib/schemaChecks";
+import { isMissingColumnError } from "../../lib/schemaChecks";
 
 const router = Router();
 
@@ -83,8 +83,8 @@ router.get("/app-version", async (req, res, next) => {
 });
 
 /**
- * GET /api/public/society-theme — current society's theme colors (any authenticated role).
- * Returns { themeColors: {...} | null }.
+ * GET /api/public/society-theme — current society's theme colors + splash image
+ * (any authenticated role). Returns { themeColors: {...} | null, splashUrl: string | null }.
  */
 router.get("/society-theme", requireAuth, async (req, res, next) => {
   try {
@@ -92,12 +92,15 @@ router.get("/society-theme", requireAuth, async (req, res, next) => {
     try {
       const society = await prisma.society.findUnique({
         where: { id: societyId },
-        select: { themeColors: true },
+        select: { themeColors: true, splashUrl: true },
       });
-      return res.json({ themeColors: society?.themeColors ?? null });
+      return res.json({
+        themeColors: society?.themeColors ?? null,
+        splashUrl: society?.splashUrl ?? null,
+      });
     } catch (error) {
-      if (!isMissingThemeColorsColumn(error)) throw error;
-      return res.json({ themeColors: null });
+      if (!isMissingColumnError(error)) throw error;
+      return res.json({ themeColors: null, splashUrl: null });
     }
   } catch (e) {
     next(e);

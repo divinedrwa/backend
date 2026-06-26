@@ -1,9 +1,9 @@
 import { v2 as cloudinary } from "cloudinary";
 import { isCloudinaryConfigured } from "./cloudinaryProfile";
 
-export type BrandingImageKind = "signature" | "stamp";
+export type BrandingImageKind = "signature" | "stamp" | "splash";
 
-/** Upload a branding image (signature/stamp) to Cloudinary; returns `secure_url`. */
+/** Upload a branding image (signature/stamp/splash) to Cloudinary; returns `secure_url`. */
 export async function uploadBrandingImageBuffer(
   buffer: Buffer,
   societyId: string,
