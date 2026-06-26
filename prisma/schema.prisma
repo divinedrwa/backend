@@ -213,6 +213,10 @@ model Society {
   /// Optional URL to the society stamp/seal image, printed on generated documents.
   stampUrl String?
 
+  /// Admin-configurable UI theme colors (JSON object).
+  /// Keys match the ThemeColors interface. Null = use app defaults.
+  themeColors Json?
+
   /// Late-fee config: percentage of monthly maintenance applied after grace period.
   /// 0 = disabled. Typical: 1-5%. Mutually exclusive with lateFeeFixedAmount.
   lateFeePercentage Float @default(0)
@@ -2023,11 +2027,14 @@ model UserCyclePayment {
   manualMarkedByAdminId      String?
   invoiceNumber              String?                    @unique
   paidAt                     DateTime?
-  idempotencyKey             String?                    @unique
+  idempotencyKey             String?
   createdAt                  DateTime                   @default(now())
   updatedAt                  DateTime                   @updatedAt
 
   @@unique([userId, cycleId])
+  // Scope client idempotency keys per-resident rather than globally, so two
+  // residents submitting the same key can't collide.
+  @@unique([userId, idempotencyKey])
   @@index([userId])
   @@index([cycleId])
   @@map("user_payments")

@@ -107,32 +107,46 @@ export async function recordPaymentAndSyncLedgers(
       })
     : null;
 
-  // 4. Always create a new payment row (never overwrite an existing one).
+  // 4. Create a new payment row (never overwrite an existing one).
   // Each payment — cash, UPI, Razorpay — is an independent ledger event.
-  // Idempotency is already enforced above via the idempotencyKey unique index.
-  const payment = await tx.maintenancePayment.create({
-        data: {
-          societyId,
-          villaId,
-          maintenanceId: maintenance.id,
-          month,
-          year,
-          amount,
-          paymentDate: new Date(paymentDate),
-          paymentMode: paymentMode as PaymentMode,
-          transactionId,
-          receiptNumber,
-          bankAccountId,
-          remarks,
-          idempotencyKey,
-          maintenanceCollectionCycleId: mcc?.id ?? null,
-          villaMaintenanceSnapshotId: snapshot?.id ?? null,
-        },
-        include: {
-          villa: { select: { villaNumber: true, ownerName: true } },
-          bankAccount: { select: { bankName: true, accountNumber: true } },
-        },
-      });
+  // Idempotency: when an idempotencyKey is supplied (e.g. gateway pay-all settle,
+  // which can be replayed by webhook + poll + resume-recovery), reuse the existing
+  // row instead of inserting a duplicate. The credit walker sums every
+  // MaintenancePayment for the villa, so a duplicate would silently double-credit.
+  const paymentInclude = {
+    villa: { select: { villaNumber: true, ownerName: true } },
+    bankAccount: { select: { bankName: true, accountNumber: true } },
+  } as const;
+
+  const existingByKey = idempotencyKey
+    ? await tx.maintenancePayment.findUnique({
+        where: { idempotencyKey },
+        include: paymentInclude,
+      })
+    : null;
+
+  const payment =
+    existingByKey ??
+    (await tx.maintenancePayment.create({
+      data: {
+        societyId,
+        villaId,
+        maintenanceId: maintenance.id,
+        month,
+        year,
+        amount,
+        paymentDate: new Date(paymentDate),
+        paymentMode: paymentMode as PaymentMode,
+        transactionId,
+        receiptNumber,
+        bankAccountId,
+        remarks,
+        idempotencyKey,
+        maintenanceCollectionCycleId: mcc?.id ?? null,
+        villaMaintenanceSnapshotId: snapshot?.id ?? null,
+      },
+      include: paymentInclude,
+    }));
 
   // 5. Run credit walker to reconcile snapshot from MP ledger
   if (mcc) {

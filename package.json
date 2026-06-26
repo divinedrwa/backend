@@ -26,6 +26,7 @@
     "verify:super-admin": "tsx scripts/verify-super-admin.ts",
     "diagnose:db": "tsx scripts/diagnose-db-overview.ts",
     "diagnose:schema-drift": "tsx scripts/check-schema-drift.ts",
+    "repair:theme-colors-column": "tsx scripts/repair-theme-colors-column.ts",
     "diagnose:gateway-payment": "tsx scripts/diagnose-gateway-payment.ts",
     "verify:migrations-safe": "tsx scripts/verify-migrations-safe.ts",
     "smoke:http": "tsx scripts/smoke-http.ts",

@@ -6,6 +6,7 @@ import {
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
+import { notifyUser } from "../../services/notification.service";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
 import {
   checkPhonePeStatus,
@@ -49,6 +50,115 @@ export async function isPayAllGatewayPayment(
     select: { requestPayload: true },
   });
   return parsePayAllFromLog(log?.requestPayload);
+}
+
+async function notifyGatewayBillingPayment(
+  userId: string,
+  cycleId: string,
+  outcome: "success" | "failed",
+): Promise<void> {
+  try {
+    if (outcome === "success") {
+      await notifyUser(userId, {
+        title: "Payment received",
+        body: "Your maintenance payment was recorded successfully.",
+        data: { cycleId, type: "billing_payment_success" },
+      });
+    } else {
+      await notifyUser(userId, {
+        title: "Payment failed",
+        body: "Your maintenance payment could not be processed. Please try again.",
+        data: { cycleId, type: "billing_payment_failed" },
+      });
+    }
+  } catch {
+    /* optional push */
+  }
+}
+
+async function markGatewayPaymentFailed(
+  row: PaymentRow & { cycle: { societyId: string; id: string } },
+  logStatus: string,
+  responsePayload: object,
+): Promise<boolean> {
+  const transitioned = await prisma.$transaction(async (tx) => {
+    const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
+      `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
+      row.id,
+    );
+    if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return false;
+    if (locked.paymentStatus === BillingUserPaymentStatus.FAILED) return false;
+
+    await tx.userCyclePayment.update({
+      where: { id: row.id },
+      data: {
+        paymentStatus: BillingUserPaymentStatus.FAILED,
+        paidAt: null,
+        source: BillingPaymentSource.GATEWAY,
+      },
+    });
+
+    if (row.userId) {
+      await tx.billingPaymentLog.create({
+        data: {
+          societyId: row.cycle.societyId,
+          userId: row.userId,
+          cycleId: row.cycle.id,
+          status: logStatus,
+          responsePayload,
+        },
+      });
+    }
+    return true;
+  });
+
+  if (transitioned && row.userId) {
+    await notifyGatewayBillingPayment(row.userId, row.cycle.id, "failed");
+  }
+  return transitioned;
+}
+
+/**
+ * Maintenance amount to credit on gateway settle/repair.
+ * Falls back to create-order log or cycle amount when the payment row has 0
+ * (stale reuse / idempotent retry).
+ */
+export async function resolveGatewayMaintenanceAmount(
+  row: PaymentRow,
+  initiateStatus: "create_order" | "phonepe_initiate",
+): Promise<number> {
+  const stored = Number(row.amountPaid);
+  if (stored > 0.005) return stored;
+
+  const log = await prisma.billingPaymentLog.findFirst({
+    where: {
+      userId: row.userId ?? undefined,
+      cycleId: row.cycleId,
+      status: initiateStatus,
+    },
+    orderBy: { createdAt: "desc" },
+    select: { requestPayload: true },
+  });
+  const payload = log?.requestPayload as Record<string, unknown> | undefined;
+  const fromLog = Number(payload?.maintenanceAmount);
+  if (Number.isFinite(fromLog) && fromLog > 0.005) return fromLog;
+
+  const cycle = await prisma.billingCycle.findUnique({
+    where: { id: row.cycleId },
+    select: { amount: true },
+  });
+  const fromCycle = Number(cycle?.amount ?? 0);
+  if (fromCycle > 0.005) return fromCycle;
+
+  return Math.max(0, stored);
+}
+
+function gatewayShouldAttemptLedgerRepair(gateway: PhonePeStatusResult): boolean {
+  return (
+    gateway.outcome === "completed" ||
+    gateway.outcome === "recorded" ||
+    gateway.gatewaySuccessFlag === true
+  );
 }
 
 /**
@@ -106,6 +216,11 @@ export async function applyGatewayPaymentSuccess(
       paymentDate: paidAt.toISOString(),
       paymentMode,
       transactionId: gatewayTransactionId,
+      // Stable per-charge key so a replay (webhook + poll + resume-recovery all
+      // firing for the same order) reuses the row instead of double-crediting.
+      // row.id (the UserCyclePayment) is the same across every settle path for
+      // one gateway order, unlike gatewayTransactionId (orderId vs paymentId).
+      idempotencyKey: `gw-payall:${row.id}`,
       remarks,
       recordedByUserId: row.userId,
       auditAction: "GATEWAY_PAY_ALL",
@@ -171,17 +286,30 @@ async function hasGatewayMaintenancePayment(
   row: PaymentRow,
   gatewayTransactionId: string,
 ): Promise<boolean> {
-  if (!row.userId || !gatewayTransactionId) return false;
+  if (!row.userId) return false;
   const user = await prisma.user.findUnique({
     where: { id: row.userId },
     select: { villaId: true },
   });
   if (!user?.villaId) return false;
+
+  const paymentRow = await prisma.userCyclePayment.findUnique({
+    where: { id: row.id },
+    select: { paymentGatewayOrderId: true, paymentGatewayPaymentId: true },
+  });
+  const txnIds = [
+    gatewayTransactionId,
+    paymentRow?.paymentGatewayOrderId,
+    paymentRow?.paymentGatewayPaymentId,
+  ].filter((id): id is string => typeof id === "string" && id.length > 0);
+
+  if (txnIds.length === 0) return false;
+
   const existing = await prisma.maintenancePayment.findFirst({
     where: {
       societyId: row.cycle.societyId,
       villaId: user.villaId,
-      transactionId: gatewayTransactionId,
+      transactionId: { in: txnIds },
     },
     select: { id: true },
   });
@@ -247,9 +375,10 @@ export async function reconcilePhonePeFromPoll(
       (gateway.outcome === "completed" ||
         isPhonePePaymentSuccessful(gateway.gatewaySuccessFlag, gateway.rawState, gateway.rawCode))
     ) {
+      const maintenanceAmount = await resolveGatewayMaintenanceAmount(row, "phonepe_initiate");
       const repaired = await repairGatewayLedger(row, {
         gatewayTransactionId: merchantTransactionId,
-        maintenanceAmount: Number(row.amountPaid),
+        maintenanceAmount,
         paymentMode: PaymentMode.PHONEPE,
         payAllInitiateStatus: "phonepe_initiate",
         remarks: "PhonePe ledger repair (billing was SUCCESS, admin ledger missing)",
@@ -298,37 +427,10 @@ export async function reconcilePhonePeFromPoll(
   }
 
   if (gateway.outcome === "failed") {
-    await prisma.$transaction(async (tx) => {
-      const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
-        `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
-        row.id,
-      );
-      if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;
-
-      await tx.userCyclePayment.update({
-        where: { id: row.id },
-        data: {
-          paymentStatus: BillingUserPaymentStatus.FAILED,
-          paidAt: null,
-          source: BillingPaymentSource.GATEWAY,
-        },
-      });
-
-      if (row.userId) {
-        await tx.billingPaymentLog.create({
-          data: {
-            societyId: row.cycle.societyId,
-            userId: row.userId,
-            cycleId: row.cycle.id,
-            status: "phonepe.poll.failed",
-            responsePayload: {
-              merchantTransactionId,
-              rawState: gateway.rawState,
-              rawCode: gateway.rawCode,
-            } as object,
-          },
-        });
-      }
+    await markGatewayPaymentFailed(row, "phonepe.poll.failed", {
+      merchantTransactionId,
+      rawState: gateway.rawState,
+      rawCode: gateway.rawCode,
     });
 
     return {
@@ -374,18 +476,18 @@ async function settleGatewayPayment(
   row: PaymentRow & { cycle: { societyId: string; id: string } },
   params: SettleGatewayParams,
 ): Promise<PhonePePollReconcileResult> {
-  const maintenanceAmount = Number(row.amountPaid);
+  const maintenanceAmount = await resolveGatewayMaintenanceAmount(row, params.payAllInitiateStatus);
   const paidAt = new Date();
 
   try {
-    await prisma.$transaction(
+    const newlySettled = await prisma.$transaction(
       async (tx) => {
         const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
           `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
           row.id,
         );
         if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-          return;
+          return false;
         }
 
         const payAllPending = await isPayAllGatewayPayment(row, params.payAllInitiateStatus);
@@ -404,6 +506,7 @@ async function settleGatewayPayment(
           where: { id: row.id },
           data: {
             paymentStatus: BillingUserPaymentStatus.SUCCESS,
+            amountPaid: maintenanceAmount,
             paidAt,
             source: BillingPaymentSource.GATEWAY,
             paymentGatewayPaymentId: params.gatewayTransactionId,
@@ -421,9 +524,14 @@ async function settleGatewayPayment(
             },
           });
         }
+        return true;
       },
       { timeout: 30_000 },
     );
+
+    if (newlySettled && row.userId) {
+      await notifyGatewayBillingPayment(row.userId, row.cycle.id, "success");
+    }
   } catch (err) {
     const detail = formatGatewayReconcileError(err);
     logger.error(
@@ -462,6 +570,15 @@ async function repairGatewayLedger(
   try {
     await prisma.$transaction(
       async (tx) => {
+        // Serialize concurrent repairs for this payment row (the public PhonePe
+        // redirect page and the mobile status poll can both invoke repair at once).
+        // Without this lock both pass the outer isGatewayLedgerSynced() check and
+        // race; the lock makes the loser see the committed ledger and no-op via the
+        // transactionId / idempotencyKey dedup inside applyGatewayPaymentSuccess.
+        await tx.$queryRawUnsafe(
+          `SELECT id FROM "user_payments" WHERE id = $1 FOR UPDATE`,
+          row.id,
+        );
         const payAllPending = await isPayAllGatewayPayment(row, params.payAllInitiateStatus);
         await applyGatewayPaymentSuccess(tx, {
           row,
@@ -471,6 +588,16 @@ async function repairGatewayLedger(
           remarks: params.remarks,
           payAllPending,
           gatewayTransactionId: params.gatewayTransactionId,
+        });
+        await tx.userCyclePayment.update({
+          where: { id: row.id },
+          data: {
+            amountPaid: params.maintenanceAmount,
+            paymentStatus: BillingUserPaymentStatus.SUCCESS,
+            paidAt,
+            source: BillingPaymentSource.GATEWAY,
+            paymentGatewayPaymentId: params.gatewayTransactionId,
+          },
         });
         if (row.userId) {
           await tx.billingPaymentLog.create({
@@ -529,10 +656,11 @@ export async function reconcileRazorpayFromPoll(
 
   if (row.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
     let ledgerSynced = await isGatewayLedgerSynced(row, razorpayPaymentId);
-    if (!ledgerSynced && gateway.outcome === "completed") {
+    if (!ledgerSynced && gatewayShouldAttemptLedgerRepair(gateway)) {
+      const maintenanceAmount = await resolveGatewayMaintenanceAmount(row, "create_order");
       const repaired = await repairGatewayLedger(row, {
         gatewayTransactionId: razorpayPaymentId,
-        maintenanceAmount: Number(row.amountPaid),
+        maintenanceAmount,
         paymentMode: PaymentMode.ONLINE,
         payAllInitiateStatus: "create_order",
         remarks: "Razorpay ledger repair (billing was SUCCESS, admin ledger missing)",
@@ -576,37 +704,10 @@ export async function reconcileRazorpayFromPoll(
   }
 
   if (gateway.outcome === "failed") {
-    await prisma.$transaction(async (tx) => {
-      const [locked] = await tx.$queryRawUnsafe<{ paymentStatus: string }[]>(
-        `SELECT "paymentStatus" FROM "user_payments" WHERE id = $1 FOR UPDATE`,
-        row.id,
-      );
-      if (!locked || locked.paymentStatus === BillingUserPaymentStatus.SUCCESS) return;
-
-      await tx.userCyclePayment.update({
-        where: { id: row.id },
-        data: {
-          paymentStatus: BillingUserPaymentStatus.FAILED,
-          paidAt: null,
-          source: BillingPaymentSource.GATEWAY,
-        },
-      });
-
-      if (row.userId) {
-        await tx.billingPaymentLog.create({
-          data: {
-            societyId: row.cycle.societyId,
-            userId: row.userId,
-            cycleId: row.cycle.id,
-            status: "razorpay.poll.failed",
-            responsePayload: {
-              orderId,
-              rawState: gateway.rawState,
-              rawCode: gateway.rawCode,
-            } as object,
-          },
-        });
-      }
+    await markGatewayPaymentFailed(row, "razorpay.poll.failed", {
+      orderId,
+      rawState: gateway.rawState,
+      rawCode: gateway.rawCode,
     });
 
     return {

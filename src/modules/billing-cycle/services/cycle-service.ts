@@ -19,6 +19,9 @@ import {
   pendingDuesToCurrentCycleShape,
 } from "./resident-pending-dues";
 
+/** Residents and payment flows only see billing cycles after admin publishes them. */
+export const publishedBillingCycleFilter = { publishedAt: { not: null } } as const;
+
 export type BillingLedgerCycleRow = {
   cycleId: string;
   cycleKey: string;
@@ -88,7 +91,7 @@ export async function findDisplayCycle(societyId: string, nowUtc = new Date()): 
   const cachedId = await billingCacheGet(k);
   if (cachedId) {
     const c = await prisma.billingCycle.findUnique({ where: { id: cachedId } });
-    if (c && c.societyId === societyId) {
+    if (c && c.societyId === societyId && c.publishedAt) {
       return c;
     }
   }
@@ -143,7 +146,11 @@ export async function buildCurrentCycleResponse(input: {
   let cycle: BillingCycle | null = null;
   if (input.billingCycleId?.trim()) {
     cycle = await prisma.billingCycle.findFirst({
-      where: { id: input.billingCycleId.trim(), societyId: input.societyId },
+      where: {
+        id: input.billingCycleId.trim(),
+        societyId: input.societyId,
+        ...publishedBillingCycleFilter,
+      },
     });
     if (!cycle) {
       throw new Error("BILLING_CYCLE_NOT_FOUND");
@@ -290,7 +297,7 @@ export async function computeUserBillingLedger(
   const villaId = user?.villaId ?? null;
 
   const cycles = await prisma.billingCycle.findMany({
-    where: { societyId },
+    where: { societyId, ...publishedBillingCycleFilter },
     orderBy: [{ cycleKey: "asc" }],
     select: { id: true, cycleKey: true, title: true, amount: true, financialYearId: true },
   });

@@ -29,6 +29,55 @@ import {
   getRazorpayGatewayFeeConfigForSociety,
 } from "./services/razorpay-gateway-fee";
 import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
+import {
+  buildGatewayCreateOrderLogPayload,
+  buildRazorpayMaintenanceOrderNotes,
+  loadGatewayPaymentResidentContext,
+} from "./services/razorpay-order-notes";
+
+/** True when the client is continuing the same checkout (back from Razorpay), not a fresh attempt. */
+function isSameRazorpayCheckoutAttempt(
+  existing: { idempotencyKey: string | null },
+  requestKey: string | undefined,
+): boolean {
+  if (!requestKey) return true;
+  if (!existing.idempotencyKey) return false;
+  return existing.idempotencyKey === requestKey;
+}
+
+type RazorpayReuseCheckoutPayload = {
+  orderId: string;
+  paymentId: string;
+  breakup: ReturnType<typeof computeRazorpayCheckoutBreakup>;
+  existingOrder?: boolean;
+  idempotent?: boolean;
+};
+
+async function buildRazorpayReuseCheckoutResponse(
+  auth: { societyId: string },
+  payload: RazorpayReuseCheckoutPayload,
+) {
+  await prisma.userCyclePayment.update({
+    where: { id: payload.paymentId },
+    data: { amountPaid: payload.breakup.maintenanceAmount },
+  });
+  const key = await getPublishableKeyForSociety(auth.societyId);
+  return {
+    orderId: payload.orderId,
+    amountPaise: payload.breakup.totalPayablePaise,
+    currency: "INR",
+    key,
+    paymentId: payload.paymentId,
+    totalDue: payload.breakup.maintenanceAmount,
+    maintenanceAmount: payload.breakup.maintenanceAmount,
+    platformFee: payload.breakup.platformFee,
+    platformFeeGst: payload.breakup.platformFeeGst,
+    totalPayable: payload.breakup.totalPayable,
+    existingOrder: payload.existingOrder ?? true,
+    reuseOrder: true,
+    ...(payload.idempotent ? { idempotent: true } : {}),
+  };
+}
 
 /**
  * Decide what to do with an existing Razorpay order row.
@@ -111,49 +160,7 @@ router.post(
       const body = req.body as z.infer<typeof createOrderSchema>;
       const { idempotencyKey, payAllPending } = body;
 
-      // Server-side idempotency: if the same key was already used for a
-      // PENDING order, return that order to prevent duplicate gateway charges.
-      if (idempotencyKey) {
-        const idempotentRow = await prisma.userCyclePayment.findFirst({
-          where: {
-            userId: auth.userId,
-            idempotencyKey,
-            paymentStatus: BillingUserPaymentStatus.PENDING,
-            paymentGatewayOrderId: { not: null },
-          },
-        });
-        if (idempotentRow?.paymentGatewayOrderId) {
-          const reconciled = await reconcileExistingRazorpayOrder(
-            auth.societyId,
-            idempotentRow.paymentGatewayOrderId,
-          );
-          if (reconciled?.autoSettled) {
-            res.status(200).json({
-              orderId: idempotentRow.paymentGatewayOrderId,
-              paymentId: idempotentRow.id,
-              totalDue: Number(idempotentRow.amountPaid),
-              existingOrder: true,
-              autoSettled: true,
-              idempotent: true,
-            });
-            return;
-          }
-          if (reconciled?.reuseOrderId) {
-            // Razorpay order still open — reuse it so the checkout SDK reopens the same session.
-            res.status(200).json({
-              orderId: reconciled.reuseOrderId,
-              paymentId: idempotentRow.id,
-              totalDue: Number(idempotentRow.amountPaid),
-              existingOrder: true,
-              reuseOrder: true,
-              idempotent: true,
-            });
-            return;
-          }
-          // reconciled === null → order expired/failed, fall through to create new order
-        }
-      }
-
+      // Idempotency key match is resolved with the cycle payment row after breakup is computed.
       const payAllQuote = payAllPending
         ? await computePayAllQuote(auth.societyId, auth.userId)
         : null;
@@ -169,6 +176,10 @@ router.post(
       });
       if (!cycle) {
         res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+      if (!cycle.publishedAt) {
+        res.status(400).json({ message: "Billing cycle is not published yet", code: "CYCLE_NOT_PUBLISHED" });
         return;
       }
 
@@ -237,11 +248,15 @@ router.post(
         return;
       }
 
-      // Prevent orphaned orders: if a PENDING payment already has a gateway order,
-      // poll Razorpay to decide whether to settle, reuse, or mint a new order.
+      const feeConfig = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
+      const breakup = computeRazorpayCheckoutBreakup(adjustedDue, feeConfig);
+
+      // Reconcile or reuse only for the same checkout attempt (same idempotency key).
+      // A new key means the resident reopened pay after failure — mint a fresh order.
       if (
         existing?.paymentStatus === BillingUserPaymentStatus.PENDING &&
-        existing.paymentGatewayOrderId
+        existing.paymentGatewayOrderId &&
+        isSameRazorpayCheckoutAttempt(existing, idempotencyKey)
       ) {
         const reconciled = await reconcileExistingRazorpayOrder(
           auth.societyId,
@@ -251,26 +266,23 @@ router.post(
           res.status(200).json({
             orderId: existing.paymentGatewayOrderId,
             paymentId: existing.id,
-            totalDue: adjustedDue,
+            totalDue: breakup.maintenanceAmount,
+            maintenanceAmount: breakup.maintenanceAmount,
             existingOrder: true,
             autoSettled: true,
+            ...(idempotencyKey ? { idempotent: true } : {}),
           });
           return;
         }
         if (reconciled?.reuseOrderId) {
-          // Order still open at Razorpay — hand back the same orderId so the SDK
-          // continues the existing checkout rather than creating a second orphaned order.
-          const key = await getPublishableKeyForSociety(auth.societyId);
-          res.status(200).json({
-            orderId: reconciled.reuseOrderId,
-            amountPaise: Math.round(adjustedDue * 100),
-            currency: "INR",
-            key,
-            paymentId: existing.id,
-            totalDue: adjustedDue,
-            existingOrder: true,
-            reuseOrder: true,
-          });
+          res.status(200).json(
+            await buildRazorpayReuseCheckoutResponse(auth, {
+              orderId: reconciled.reuseOrderId,
+              paymentId: existing.id,
+              breakup,
+              idempotent: Boolean(idempotencyKey),
+            }),
+          );
           return;
         }
         // reconciled === null → order expired/failed at Razorpay, fall through to create new order
@@ -292,23 +304,25 @@ router.post(
         logger.warn({ err: linkErr, cycleId }, "[razorpay] billing→collection pre-link failed");
       }
 
-      const feeConfig = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
-      const breakup = computeRazorpayCheckoutBreakup(adjustedDue, feeConfig);
+      const resident = await loadGatewayPaymentResidentContext(auth.societyId, auth.userId);
+      const orderNotes = buildRazorpayMaintenanceOrderNotes({
+        societyId: auth.societyId,
+        cycleId,
+        userId: auth.userId,
+        cycleKey: cycle.cycleKey,
+        cycleTitle: cycle.title,
+        breakup,
+        resident,
+        payAllPending: payAllPending === true,
+        pendingCycleCount: payAllQuote?.pendingCount,
+      });
 
       const receipt = `mb_${cycle.cycleKey}_${auth.userId}`.slice(0, 40);
       const order = await createMaintenanceOrderForSociety({
         societyId: auth.societyId,
         amountPaise: breakup.totalPayablePaise,
         receipt,
-        notes: {
-          societyId: auth.societyId,
-          cycleId,
-          userId: auth.userId,
-          maintenanceAmountPaise: String(breakup.maintenanceAmountPaise),
-          platformFeePaise: String(breakup.platformFeePaise),
-          platformFeeGstPaise: String(breakup.platformFeeGstPaise),
-          ...(payAllPending ? { payAllPending: "true" } : {}),
-        },
+        notes: orderNotes,
       });
 
       // Atomically create or update. The transaction ensures a concurrent
@@ -351,15 +365,16 @@ router.post(
           userId: auth.userId,
           cycleId,
           status: "create_order",
-          requestPayload: {
+          requestPayload: buildGatewayCreateOrderLogPayload({
             orderId: order.id,
-            maintenanceAmount: breakup.maintenanceAmount,
-            platformFee: breakup.platformFee,
-            platformFeeGst: breakup.platformFeeGst,
-            totalPayable: breakup.totalPayable,
+            breakup,
+            resident,
+            cycleId,
+            cycleKey: cycle.cycleKey,
+            cycleTitle: cycle.title,
             payAllPending: payAllPending === true,
             pendingCycleCount: payAllQuote?.pendingCount,
-          } as object,
+          }) as object,
         },
       });
 

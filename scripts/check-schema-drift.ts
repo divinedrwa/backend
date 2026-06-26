@@ -8,7 +8,11 @@
  * or paste prisma/migrations/20260528140000_repair_baselined_schema_drift/migration.sql in the DB SQL console.
  */
 import "dotenv/config";
+import path from "path";
+import dotenv from "dotenv";
 import { PrismaClient } from "@prisma/client";
+
+dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
 
 const prisma = new PrismaClient();
 
@@ -60,6 +64,7 @@ async function main() {
     ["VillaMaintenanceSnapshot", "lateFeeAppliedAt"],
     ["Society", "lateFeePercentage"],
     ["Society", "maintenanceGracePeriodDays"],
+    ["Society", "themeColors"],
   ];
 
   for (const [table, column] of columnChecks) {

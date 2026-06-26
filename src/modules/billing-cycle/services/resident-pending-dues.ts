@@ -2,7 +2,7 @@ import { MaintenanceBillingRole } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc } from "../domain/cycleStatus";
 import { ensureVillaLedgersAligned } from "../billing-collection-link";
-import { computeUserBillingLedger } from "./cycle-service";
+import { computeUserBillingLedger, publishedBillingCycleFilter } from "./cycle-service";
 
 export type UserPendingDueRow = {
   cycleId: string;
@@ -49,7 +49,7 @@ export async function reconcileVillaLedgersForRecentCycles(
   }
 
   const cycles = await prisma.billingCycle.findMany({
-    where: { societyId },
+    where: { societyId, ...publishedBillingCycleFilter },
     orderBy: { cycleKey: "desc" },
     take: maxCycles,
     select: { id: true },
@@ -93,7 +93,7 @@ export async function buildPendingDuesFromLedger(
   const [ledger, cycles] = await Promise.all([
     computeUserBillingLedger(societyId, userId),
     prisma.billingCycle.findMany({
-      where: { societyId },
+      where: { societyId, ...publishedBillingCycleFilter },
       select: {
         id: true,
         cycleKey: true,

@@ -13,6 +13,7 @@ import { errorHandler } from "./middlewares/error";
 import { responseTimeMonitor } from "./middlewares/responseTime";
 import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
+import { societyThemeColorsColumnExists } from "./lib/schemaChecks";
 import { billingPaymentWebhookHandler } from "./modules/billing-cycle/billing-webhook";
 import { phonePeCallbackHandler } from "./modules/billing-cycle/phonepe-webhook";
 import { applyRateLimitIfEnabled, apiLimiter } from "./middlewares/rateLimiter";
@@ -181,7 +182,8 @@ app.use("/uploads", (_req, res, next) => {
 app.get("/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
-    res.json({ ok: true, db: true });
+    const societyThemeColors = await societyThemeColorsColumnExists();
+    res.json({ ok: true, db: true, schema: { societyThemeColors } });
   } catch {
     res.status(503).json({ ok: false, db: false });
   }

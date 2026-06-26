@@ -10,7 +10,11 @@ import {
   verifyPhonePeV2Webhook,
 } from "../../services/phonepe-billing";
 import { notifyUser } from "../../services/notification.service";
-import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
+import {
+  applyGatewayPaymentSuccess,
+  isPayAllGatewayPayment,
+  resolveGatewayMaintenanceAmount,
+} from "./gateway-payment-settle";
 
 // ---------------------------------------------------------------------------
 // V2 webhook handler
@@ -242,7 +246,13 @@ async function settlePhonePePayment(params: {
     };
 
     const paidAt = isSuccess ? new Date() : null;
-    const maintenanceAmountNum = Number(lockedRow.amountPaid);
+    // Mirror the Razorpay webhook: never settle/validate against a stale 0 amount.
+    // A zeroed amountPaid would make expectedPaise 0 (bypassing the underpayment
+    // guard) and credit the resident's ledger 0 while marking the row SUCCESS.
+    let maintenanceAmountNum = Number(lockedRow.amountPaid);
+    if (maintenanceAmountNum <= 0.005) {
+      maintenanceAmountNum = await resolveGatewayMaintenanceAmount(row, "phonepe_initiate");
+    }
     const payAllPending = await isPayAllGatewayPayment(row, "phonepe_initiate");
     const gatewayTxnId = phonepeTransactionId;
 
@@ -275,6 +285,7 @@ async function settlePhonePePayment(params: {
       data: {
         paymentStatus: isFailure ? BillingUserPaymentStatus.FAILED : BillingUserPaymentStatus.SUCCESS,
         paymentGatewayPaymentId: gatewayTxnId,
+        ...(isFailure ? {} : { amountPaid: maintenanceAmountNum }),
         paidAt,
         source: BillingPaymentSource.GATEWAY,
       },

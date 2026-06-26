@@ -4,9 +4,13 @@
  *
  * Overrides: QA_GUARD_USERNAME, QA_GUARD_PASSWORD, QA_RESIDENT_USERNAME, QA_RESIDENT_PASSWORD
  */
-import "dotenv/config";
+import path from "path";
+import dotenv from "dotenv";
 import bcrypt from "bcryptjs";
 import { PrismaClient, type UserRole } from "@prisma/client";
+
+dotenv.config();
+dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
 
 const prisma = new PrismaClient();
 

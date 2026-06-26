@@ -18,6 +18,8 @@ import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/aut
 import { validateBody } from "../../middlewares/validate";
 import {
   generateSnapshotsForBillingCycle,
+  ensureMaintenanceCollectionForBillingCycle,
+  refreshUnpaidSnapshotsForBillingCycleAmount,
   ensureVillaLedgersAligned,
   postMarkCashToMaintenanceLedger,
 } from "./billing-collection-link";
@@ -26,6 +28,7 @@ import {
   buildCurrentCycleResponse,
   computeUserBillingLedger,
   invalidateDisplayCycleHint,
+  publishedBillingCycleFilter,
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
 import { reconcileVillaLedgersForRecentCycles, invalidateReconcileCache } from "./services/resident-pending-dues";
@@ -250,7 +253,26 @@ router.put(
         data,
       });
 
+      const amountChanged = body.amount !== undefined && Number(found.amount) !== Number(cycle.amount);
+      if (found.financialYearId) {
+        try {
+          await prisma.$transaction(async (tx) => {
+            const linked = await ensureMaintenanceCollectionForBillingCycle(tx, id);
+            if (found.publishedAt && amountChanged) {
+              await refreshUnpaidSnapshotsForBillingCycleAmount(tx, {
+                billingCycleId: id,
+                cycleAmount: Number(cycle.amount),
+                dueDate: linked.dueDate,
+              });
+            }
+          });
+        } catch (linkErr) {
+          logger.warn({ err: linkErr, cycleId: id }, "[billing-cycle.update] collection sync failed");
+        }
+      }
+
       await invalidateDisplayCycleHint(auth.societyId);
+      await invalidateReconcileCache(auth.societyId);
       auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
@@ -283,23 +305,30 @@ router.delete(
         return;
       }
 
-      const paymentCount = await prisma.userCyclePayment.count({
-        where: { cycleId: id, cycle: { societyId: auth.societyId } },
+      const successPaymentCount = await prisma.userCyclePayment.count({
+        where: {
+          cycleId: id,
+          cycle: { societyId: auth.societyId },
+          paymentStatus: BillingUserPaymentStatus.SUCCESS,
+        },
       });
-      if (paymentCount > 0) {
+      if (successPaymentCount > 0) {
         res.status(409).json({
-          message: "Cannot delete cycle with payment records. Close it instead.",
+          message:
+            "Cannot delete a cycle with successful payments. Unpublish it or close the period instead.",
         });
         return;
       }
 
       await prisma.$transaction(async (tx) => {
+        await tx.userCyclePayment.deleteMany({ where: { cycleId: id } });
         await tx.billingLateFeeWaiver.deleteMany({ where: { cycleId: id } });
         await tx.billingPaymentLog.deleteMany({ where: { cycleId: id } });
         await tx.billingCycle.delete({ where: { id } });
       });
 
       await invalidateDisplayCycleHint(auth.societyId);
+      await invalidateReconcileCache(auth.societyId);
       auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
@@ -388,11 +417,74 @@ router.post(
         logger.error({ err: notifyErr }, "[billing-cycle.publish] resident notify failed");
       }
 
+      await invalidateReconcileCache(auth.societyId);
       res.json({ cycle });
     } catch (e) {
       next(e);
     }
   }
+);
+
+router.post(
+  "/admin/cycles/:id/unpublish",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const auth = req.auth!;
+      const { id } = req.params;
+      const found = await prisma.billingCycle.findFirst({
+        where: { id, societyId: auth.societyId },
+      });
+      if (!found) {
+        res.status(404).json({ message: "Cycle not found" });
+        return;
+      }
+      if (!found.publishedAt) {
+        res.status(409).json({ message: "Cycle is not published" });
+        return;
+      }
+
+      // Unpublishing hides the cycle from every resident-facing ledger query
+      // (publishedBillingCycleFilter). If residents have already paid, that would
+      // drop their payments from dues/dashboards and shift the rolling balance of
+      // every later cycle. Block it, mirroring the DELETE guard.
+      const successPaymentCount = await prisma.userCyclePayment.count({
+        where: {
+          cycleId: id,
+          cycle: { societyId: auth.societyId },
+          paymentStatus: BillingUserPaymentStatus.SUCCESS,
+        },
+      });
+      if (successPaymentCount > 0) {
+        res.status(409).json({
+          message:
+            "Cannot unpublish a cycle with successful payments — residents have already paid. Reopen or close the period instead.",
+        });
+        return;
+      }
+
+      const cycle = await prisma.billingCycle.update({
+        where: { id },
+        data: { publishedAt: null },
+      });
+
+      await invalidateDisplayCycleHint(auth.societyId);
+      await invalidateReconcileCache(auth.societyId);
+      auditFromRequest(req, {
+        societyId: auth.societyId,
+        adminId: auth.userId,
+        action: "billing_cycle.unpublish",
+        entityType: "BillingCycle",
+        entityId: id,
+        metadata: { cycleKey: found.cycleKey, title: found.title },
+      });
+
+      res.json({ cycle });
+    } catch (e) {
+      next(e);
+    }
+  },
 );
 
 /**
@@ -515,11 +607,13 @@ router.get(
         res.status(404).json({ message: "Financial year not found" });
         return;
       }
-      // Both admins and residents see every cycle for the financial year here,
-      // including unpublished drafts — the picker is for viewing the expense
-      // breakdown of any created/closed cycle, not for billing actions.
+      // Residents only see published cycles; admins see drafts for management.
       const cycles = await prisma.billingCycle.findMany({
-        where: { societyId: auth.societyId, financialYearId },
+        where: {
+          societyId: auth.societyId,
+          financialYearId,
+          ...(auth.role === UserRole.RESIDENT ? publishedBillingCycleFilter : {}),
+        },
         orderBy: { cycleKey: "asc" },
         select: {
           id: true,
@@ -574,7 +668,11 @@ router.get(
         return;
       }
       const cycle = await prisma.billingCycle.findFirst({
-        where: { id: billingCycleId, societyId: auth.societyId },
+        where: {
+          id: billingCycleId,
+          societyId: auth.societyId,
+          ...(auth.role === UserRole.RESIDENT ? publishedBillingCycleFilter : {}),
+        },
         select: {
           id: true,
           cycleKey: true,

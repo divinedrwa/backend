@@ -3,6 +3,8 @@ import { Prisma, PushPlatform, SocietyStatus } from "@prisma/client";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { cacheMiddleware } from "../../middlewares/cache";
+import { requireAuth } from "../../middlewares/auth";
+import { isMissingThemeColorsColumn } from "../../lib/schemaChecks";
 
 const router = Router();
 
@@ -75,6 +77,28 @@ router.get("/app-version", async (req, res, next) => {
       },
     });
     res.json({ config: config ?? null });
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/public/society-theme — current society's theme colors (any authenticated role).
+ * Returns { themeColors: {...} | null }.
+ */
+router.get("/society-theme", requireAuth, async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    try {
+      const society = await prisma.society.findUnique({
+        where: { id: societyId },
+        select: { themeColors: true },
+      });
+      return res.json({ themeColors: society?.themeColors ?? null });
+    } catch (error) {
+      if (!isMissingThemeColorsColumn(error)) throw error;
+      return res.json({ themeColors: null });
+    }
   } catch (e) {
     next(e);
   }

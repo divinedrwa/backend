@@ -139,6 +139,10 @@ router.post(
         res.status(404).json({ message: "Cycle not found" });
         return;
       }
+      if (!cycle.publishedAt) {
+        res.status(400).json({ message: "Billing cycle is not published yet", code: "CYCLE_NOT_PUBLISHED" });
+        return;
+      }
 
       if (!payAllPending) {
         const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);

@@ -189,6 +189,36 @@ export async function generateSnapshotsForBillingCycle(
   return villaIds.length;
 }
 
+/** Update expected amount on unpaid villa snapshots after admin edits a published cycle. */
+export async function refreshUnpaidSnapshotsForBillingCycleAmount(
+  tx: Prisma.TransactionClient,
+  params: { billingCycleId: string; cycleAmount: number; dueDate: Date },
+): Promise<void> {
+  const { maintenanceCycleId } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+  const snaps = await tx.villaMaintenanceSnapshot.findMany({
+    where: {
+      cycleId: maintenanceCycleId,
+      status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
+    },
+    select: { id: true, paidAmount: true },
+  });
+  const expected = Math.max(0, params.cycleAmount);
+  for (const snap of snaps) {
+    const paid = Number(snap.paidAmount);
+    const status = refreshSnapshotStatus(expected, paid, params.dueDate);
+    await tx.villaMaintenanceSnapshot.update({
+      where: { id: snap.id },
+      data: {
+        expectedAmount: new Prisma.Decimal(expected),
+        status,
+      },
+    });
+  }
+}
+
 /**
  * After snapshot/ledger update, align UserCyclePayment rows for primary residents
  * so Maintenance Billing admin matches maintenance-management.

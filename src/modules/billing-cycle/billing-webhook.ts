@@ -5,7 +5,8 @@ import { prisma } from "../../lib/prisma";
 import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecret } from "./services/razorpay-webhook-verify";
 import { getWebhookSecretForSociety } from "./services/razorpay-billing";
 import { notifyUser } from "../../services/notification.service";
-import { applyGatewayPaymentSuccess, isPayAllGatewayPayment } from "./gateway-payment-settle";
+import { applyGatewayPaymentSuccess, isPayAllGatewayPayment, resolveGatewayMaintenanceAmount } from "./gateway-payment-settle";
+import { parseRazorpayOrderNoteAmounts } from "./services/razorpay-order-notes";
 import {
   isRazorpayWebhookFailEvent,
   isRazorpayWebhookSettleEvent,
@@ -157,7 +158,14 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       };
 
       const paidAt = isFailure ? null : new Date();
-      const maintenanceAmountNum = Number(lockedRow.amountPaid);
+      const noteAmounts = parseRazorpayOrderNoteAmounts(notes);
+      let maintenanceAmountNum =
+        noteAmounts.maintenanceAmount > 0
+          ? noteAmounts.maintenanceAmount
+          : Number(lockedRow.amountPaid);
+      if (maintenanceAmountNum <= 0.005) {
+        maintenanceAmountNum = await resolveGatewayMaintenanceAmount(row, "create_order");
+      }
       const amountChargedRupees = amountPaise ? amountPaise / 100 : null;
 
       // Amount validation: the gateway-reported amount must be at least the
@@ -167,19 +175,23 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       // than our expected total — that's fine.  We only reject when the
       // payment is LESS than expected (possible tampering / partial pay).
       if (isSuccess && amountPaise > 0) {
-        const maintenancePaiseFromNotes = Number(notes?.maintenanceAmountPaise || 0);
-        const platformFeePaiseFromNotes = Number(notes?.platformFeePaise || 0);
-        const platformFeeGstPaiseFromNotes = Number(notes?.platformFeeGstPaise || 0);
-        // If notes carry a fee breakdown, expected = maintenance + fee + GST.
-        // Otherwise fall back to DB-stored amountPaid (no fees).
-        const expectedPaise = maintenancePaiseFromNotes > 0
-          ? maintenancePaiseFromNotes + platformFeePaiseFromNotes + platformFeeGstPaiseFromNotes
-          : Math.round(maintenanceAmountNum * 100);
+        const expectedPaise =
+          noteAmounts.expectedPaise > 0
+            ? noteAmounts.expectedPaise
+            : Math.round(maintenanceAmountNum * 100);
         // Allow amountPaise >= expectedPaise (Razorpay convenience fee on top).
         // Reject only if charged LESS than expected (tolerance 1 paisa).
         if (amountPaise < expectedPaise - 1) {
           logger.error(
-            { orderId, paymentId, expectedPaise, actualPaise: amountPaise, maintenancePaiseFromNotes, platformFeePaiseFromNotes, platformFeeGstPaiseFromNotes },
+            {
+              orderId,
+              paymentId,
+              expectedPaise,
+              actualPaise: amountPaise,
+              maintenanceAmount: noteAmounts.maintenanceAmount,
+              platformFee: noteAmounts.platformFee,
+              platformFeeGst: noteAmounts.platformFeeGst,
+            },
             "[billing webhook] AMOUNT UNDERPAID — gateway charged less than expected; marking FAILED for manual review",
           );
           // Mark the row FAILED so a new order can be created and the resident is notified.
@@ -232,6 +244,7 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         data: {
           paymentStatus: isFailure ? BillingUserPaymentStatus.FAILED : BillingUserPaymentStatus.SUCCESS,
           paymentGatewayPaymentId: paymentId,
+          ...(isFailure ? {} : { amountPaid: maintenanceAmountNum }),
           paidAt,
           source: BillingPaymentSource.GATEWAY,
         },

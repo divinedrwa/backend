@@ -4,7 +4,7 @@ import { prisma } from "../../lib/prisma";
 import { logger } from "../../lib/logger";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { MaintenanceBillingRole, UserRole } from "@prisma/client";
-import { computeUserBillingLedger } from "../billing-cycle/services/cycle-service";
+import { computeUserBillingLedger, publishedBillingCycleFilter } from "../billing-cycle/services/cycle-service";
 import { reconcileVillaLedgersForRecentCycles } from "../billing-cycle/services/resident-pending-dues";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 
@@ -87,7 +87,7 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
   const [ledger, cycles] = await Promise.all([
     computeUserBillingLedger(societyId, userId),
     prisma.billingCycle.findMany({
-      where: { societyId },
+      where: { societyId, ...publishedBillingCycleFilter },
       select: {
         id: true,
         cycleKey: true,
@@ -738,7 +738,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     let billingCycleAmount: number | null = null;
     if (!cycleCore && billingCycleId) {
       const bc = await prisma.billingCycle.findFirst({
-        where: { id: billingCycleId, societyId },
+        where: { id: billingCycleId, societyId, ...publishedBillingCycleFilter },
         select: { amount: true },
       });
       if (bc) billingCycleAmount = Number(bc.amount);
@@ -905,7 +905,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     // Phase 2: Fallback — enrich with BillingCycle data for months that have
     // neither old Maintenance records nor MaintenanceCollectionCycle snapshots.
     const yearBillingCycles = await prisma.billingCycle.findMany({
-      where: { societyId, cycleKey: { startsWith: `${year}-` } },
+      where: { societyId, cycleKey: { startsWith: `${year}-` }, ...publishedBillingCycleFilter },
       select: {
         id: true,
         cycleKey: true,

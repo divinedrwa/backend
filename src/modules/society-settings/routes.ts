@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
-import { PaymentMethodType, UserRole, VisitorMultiVillaApprovalMode } from "@prisma/client";
+import { PaymentMethodType, Prisma, UserRole, VisitorMultiVillaApprovalMode } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -11,6 +11,10 @@ import { uploadLetterheadImageBuffer } from "../../services/cloudinaryLetterhead
 import { brandingImageMemory } from "../../lib/brandingImageUpload";
 import { uploadBrandingImageBuffer } from "../../services/cloudinaryBranding";
 import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
+import {
+  isMissingThemeColorsColumn,
+  societyThemeColorsColumnExists,
+} from "../../lib/schemaChecks";
 
 const router = Router();
 
@@ -20,6 +24,81 @@ async function bustSocietySettingsCache(societyId: string) {
   await invalidateSocietyCache(societyId);
 }
 
+const societySettingsSelectBase = {
+  id: true,
+  name: true,
+  status: true,
+  visitorMultiVillaApprovalMode: true,
+  visitorApprovalRequired: true,
+  guardCanApproveVisitors: true,
+  upiVpa: true,
+  upiQrCodeUrl: true,
+  letterheadUrl: true,
+  signatureUrl: true,
+  stampUrl: true,
+  lateFeePercentage: true,
+  lateFeeFixedAmount: true,
+  maintenanceGracePeriodDays: true,
+} as const;
+
+async function fetchSocietySettings(societyId: string) {
+  try {
+    return await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { ...societySettingsSelectBase, themeColors: true },
+    });
+  } catch (error) {
+    if (!isMissingThemeColorsColumn(error)) throw error;
+    const society = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: societySettingsSelectBase,
+    });
+    if (!society) return null;
+    return { ...society, themeColors: null };
+  }
+}
+
+const hexColor = z.string().regex(/^#[0-9A-Fa-f]{6}$/, "Must be a 6-digit hex color");
+const rgbaColor = z
+  .string()
+  .regex(
+    /^rgba?\(\s*\d+\s*,\s*\d+\s*,\s*\d+(\s*,\s*[\d.]+)?\s*\)$/i,
+    "Must be rgb() or rgba()",
+  );
+const themeColorValue = z.union([hexColor, rgbaColor]);
+
+const themeColorsSchema = z
+  .object({
+    primaryColor: hexColor,
+    primaryHover: hexColor,
+    primaryLight: hexColor,
+    primaryContainer: hexColor,
+    secondaryColor: hexColor,
+    accentColor: hexColor,
+    gradientStart: hexColor,
+    gradientMiddle: hexColor,
+    gradientEnd: hexColor,
+    buttonBg: hexColor,
+    buttonText: hexColor,
+    secondaryButtonBg: hexColor,
+    secondaryButtonText: hexColor,
+    headingColor: hexColor,
+    bodyTextColor: hexColor,
+    mutedTextColor: hexColor,
+    backgroundColor: hexColor,
+    cardColor: hexColor,
+    fieldBg: themeColorValue,
+    fieldText: hexColor,
+    sidebarBg: hexColor,
+    sidebarActiveColor: hexColor,
+    borderColor: hexColor,
+    iconColor: hexColor,
+    iconBg: hexColor,
+    warningColor: hexColor,
+    errorColor: hexColor,
+  })
+  .partial();
+
 const patchSocietySchema = z
   .object({
     visitorMultiVillaApprovalMode: z.nativeEnum(VisitorMultiVillaApprovalMode).optional(),
@@ -27,6 +106,7 @@ const patchSocietySchema = z
     guardCanApproveVisitors: z.boolean().optional(),
     upiVpa: z.string().trim().min(3).regex(/@/, "Must contain @").nullable().optional(),
     upiQrCodeUrl: z.string().url().nullable().optional(),
+    themeColors: themeColorsSchema.nullable().optional(),
   })
   .refine(
     (body) =>
@@ -34,7 +114,8 @@ const patchSocietySchema = z
       body.visitorApprovalRequired != null ||
       body.guardCanApproveVisitors != null ||
       body.upiVpa !== undefined ||
-      body.upiQrCodeUrl !== undefined,
+      body.upiQrCodeUrl !== undefined ||
+      body.themeColors !== undefined,
     { message: "Send at least one field to update" },
   );
 
@@ -44,25 +125,7 @@ const patchSocietySchema = z
 router.get("/", requireRole(UserRole.ADMIN), cacheMiddleware(120), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const society = await prisma.society.findUnique({
-      where: { id: societyId },
-      select: {
-        id: true,
-        name: true,
-        status: true,
-        visitorMultiVillaApprovalMode: true,
-        visitorApprovalRequired: true,
-        guardCanApproveVisitors: true,
-        upiVpa: true,
-        upiQrCodeUrl: true,
-        letterheadUrl: true,
-        signatureUrl: true,
-        stampUrl: true,
-        lateFeePercentage: true,
-        lateFeeFixedAmount: true,
-        maintenanceGracePeriodDays: true,
-      },
-    });
+    const society = await fetchSocietySettings(societyId);
     if (!society) {
       return res.status(404).json({ message: "Society not found" });
     }
@@ -90,6 +153,7 @@ router.patch(
         guardCanApproveVisitors?: boolean;
         upiVpa?: string | null;
         upiQrCodeUrl?: string | null;
+        themeColors?: Prisma.InputJsonValue | typeof Prisma.DbNull;
       } = {};
 
       if (body.visitorMultiVillaApprovalMode != null) {
@@ -106,6 +170,16 @@ router.patch(
       }
       if (body.upiQrCodeUrl !== undefined) {
         data.upiQrCodeUrl = body.upiQrCodeUrl;
+      }
+      if (body.themeColors !== undefined) {
+        const hasColumn = await societyThemeColorsColumnExists();
+        if (!hasColumn) {
+          return res.status(503).json({
+            message:
+              'Database schema is out of date (missing Society.themeColors). Run `npm run repair:theme-colors-column` on the API service (or prisma migrate deploy), then restart.',
+          });
+        }
+        data.themeColors = body.themeColors === null ? Prisma.DbNull : body.themeColors;
       }
 
       const updated = await prisma.society.updateMany({
@@ -148,22 +222,7 @@ router.patch(
         }
       }
 
-      const society = await prisma.society.findUnique({
-        where: { id: societyId },
-        select: {
-          id: true,
-          name: true,
-          status: true,
-          visitorMultiVillaApprovalMode: true,
-          visitorApprovalRequired: true,
-          guardCanApproveVisitors: true,
-          upiVpa: true,
-          upiQrCodeUrl: true,
-          letterheadUrl: true,
-          signatureUrl: true,
-          stampUrl: true,
-        },
-      });
+      const society = await fetchSocietySettings(societyId);
 
       await bustSocietySettingsCache(societyId);
 
