@@ -107,4 +107,32 @@ router.get("/society-theme", requireAuth, async (req, res, next) => {
   }
 });
 
+/**
+ * GET /api/public/society-appearance/:societyId — theme colors + splash image for
+ * a society, WITHOUT auth. Used by the app at startup (splash/login, pre-login) so
+ * the selected theme and uploaded splash appear before the user is authenticated.
+ * Only non-sensitive appearance data is returned. Returns
+ * { themeColors: {...} | null, splashUrl: string | null }.
+ */
+router.get("/society-appearance/:societyId", async (req, res, next) => {
+  try {
+    const { societyId } = req.params;
+    try {
+      const society = await prisma.society.findUnique({
+        where: { id: societyId },
+        select: { themeColors: true, splashUrl: true },
+      });
+      return res.json({
+        themeColors: society?.themeColors ?? null,
+        splashUrl: society?.splashUrl ?? null,
+      });
+    } catch (error) {
+      if (!isMissingColumnError(error)) throw error;
+      return res.json({ themeColors: null, splashUrl: null });
+    }
+  } catch (e) {
+    next(e);
+  }
+});
+
 export default router;
