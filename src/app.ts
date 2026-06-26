@@ -179,6 +179,13 @@ app.use("/uploads", (_req, res, next) => {
   lastModified: true,
 }));
 
+/** Committed brand assets (e.g. the app logo shown on Razorpay checkout) — `/brand/...`. */
+app.use("/brand", express.static(path.join(process.cwd(), "brand-assets"), {
+  maxAge: "30d",
+  etag: true,
+  lastModified: true,
+}));
+
 app.get("/health", async (_req, res) => {
   try {
     await prisma.$queryRaw`SELECT 1`;
