@@ -1,7 +1,6 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
-  BillingCycleStatus,
   BillingUserPaymentStatus,
   UserRole,
 } from "@prisma/client";
@@ -9,7 +8,6 @@ import { prisma } from "../../lib/prisma";
 import { logger } from "../../lib/logger";
 import { requireAuth, requireRole, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { computeUserBillingLedger } from "./services/cycle-service";
 import {
   initiatePhonePePayment,
@@ -142,14 +140,6 @@ router.post(
       if (!cycle.publishedAt) {
         res.status(400).json({ message: "Billing cycle is not published yet", code: "CYCLE_NOT_PUBLISHED" });
         return;
-      }
-
-      if (!payAllPending) {
-        const serverStatus = deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate);
-        if (serverStatus === BillingCycleStatus.UPCOMING) {
-          res.status(400).json({ message: "Cycle is not yet open for payment", code: "CYCLE_NOT_OPEN" });
-          return;
-        }
       }
 
       const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
