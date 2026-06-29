@@ -1556,13 +1556,12 @@ router.get("/shortfall/:fyId", async (req, res, next) => {
 });
 
 // GET /api/maintenance-management/villa-history/:villaId
-// Get complete payment history for a villa
+// Get complete payment history for a villa (snapshots + legacy maintenance rows).
 router.get("/villa-history/:villaId", async (req, res, next) => {
   try {
     const { villaId } = req.params;
     const { societyId } = req.auth!;
 
-    // Verify villa exists
     const villa = await prisma.villa.findFirst({
       where: {
         id: villaId,
@@ -1580,60 +1579,129 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
       return res.status(404).json({ message: "Villa not found" });
     }
 
-    // Get all payments for this villa
-    const payments = await prisma.maintenancePayment.findMany({
-      where: {
-        villaId,
-        societyId,
-      },
-      orderBy: [{ year: "desc" }, { month: "desc" }],
-      take: 24, // Last 24 months
-    });
+    const [snapshots, maintenanceRecords, payments] = await Promise.all([
+      prisma.villaMaintenanceSnapshot.findMany({
+        where: { villaId, cycle: { societyId } },
+        include: {
+          cycle: {
+            select: {
+              periodMonth: true,
+              periodYear: true,
+              dueDate: true,
+              title: true,
+            },
+          },
+          payments: {
+            orderBy: { paymentDate: "desc" },
+            take: 1,
+            select: {
+              paymentDate: true,
+              paymentMode: true,
+              receiptNumber: true,
+              transactionId: true,
+              amount: true,
+            },
+          },
+        },
+        take: 48,
+      }),
+      prisma.maintenance.findMany({
+        where: { villaId, societyId },
+        orderBy: [{ year: "desc" }, { month: "desc" }],
+        take: 36,
+      }),
+      prisma.maintenancePayment.findMany({
+        where: { villaId, societyId },
+        orderBy: [{ year: "desc" }, { month: "desc" }],
+        take: 48,
+      }),
+    ]);
 
-    // Get maintenance records
-    const maintenanceRecords = await prisma.maintenance.findMany({
-      where: {
-        villaId,
-        societyId,
-      },
-      orderBy: [{ year: "desc" }, { month: "desc" }],
-      take: 24,
-    });
+    type HistoryRow = {
+      year: number;
+      month: number;
+      amount: number;
+      paidAmount: number;
+      remainingDue: number;
+      status: string;
+      dueDate: Date | null;
+      paymentDate: Date | null;
+      receiptNumber: string | null;
+      paymentMode: string | null;
+      transactionId: string | null;
+      cycleTitle: string | null;
+    };
 
-    // Combine data
-    const history = maintenanceRecords.map((m) => {
-      const payment = payments.find(
-        (p) => p.year === m.year && p.month === m.month
-      );
+    const byPeriod = new Map<string, HistoryRow>();
 
-      return {
+    for (const snap of snapshots) {
+      const year = snap.cycle.periodYear;
+      const month = snap.cycle.periodMonth;
+      const key = `${year}-${month}`;
+      const expected = Number(snap.expectedAmount) + Number(snap.lateFeeAmount ?? 0);
+      const paid = Number(snap.paidAmount);
+      const latestPayment = snap.payments[0] ?? null;
+
+      byPeriod.set(key, {
+        year,
+        month,
+        amount: expected,
+        paidAmount: paid,
+        remainingDue: Math.max(0, expected - paid),
+        status: snap.status,
+        dueDate: snap.cycle.dueDate,
+        paymentDate: latestPayment?.paymentDate ?? null,
+        receiptNumber: latestPayment?.receiptNumber ?? null,
+        paymentMode: latestPayment?.paymentMode ?? null,
+        transactionId: latestPayment?.transactionId ?? null,
+        cycleTitle: snap.cycle.title,
+      });
+    }
+
+    for (const m of maintenanceRecords) {
+      const key = `${m.year}-${m.month}`;
+      if (byPeriod.has(key)) continue;
+      const payment = payments.find((p) => p.year === m.year && p.month === m.month);
+      const expected = Number(m.amount);
+      const paid = payment ? Number(payment.amount) : 0;
+      byPeriod.set(key, {
         year: m.year,
         month: m.month,
-        amount: Number(m.amount),
+        amount: expected,
+        paidAmount: paid,
+        remainingDue: Math.max(0, expected - paid),
         status: m.status,
         dueDate: m.dueDate,
-        paymentDate: payment?.paymentDate || null,
-        receiptNumber: payment?.receiptNumber || null,
-        paymentMode: payment?.paymentMode || null,
-        transactionId: payment?.transactionId || null,
-      };
-    });
+        paymentDate: payment?.paymentDate ?? null,
+        receiptNumber: payment?.receiptNumber ?? null,
+        paymentMode: payment?.paymentMode ?? null,
+        transactionId: payment?.transactionId ?? null,
+        cycleTitle: null,
+      });
+    }
 
-    // Calculate statistics
+    const history = [...byPeriod.values()].sort((a, b) =>
+      b.year !== a.year ? b.year - a.year : b.month - a.month,
+    );
+
     const totalPaid = payments.reduce((sum, p) => sum + Number(p.amount), 0);
 
-    // Average payment delay: days between due date and payment date for paid bills
     const delays: number[] = [];
-    for (const m of maintenanceRecords) {
-      const payment = payments.find((p) => p.year === m.year && p.month === m.month);
-      if (payment?.paymentDate && m.dueDate) {
-        const delayMs = payment.paymentDate.getTime() - m.dueDate.getTime();
-        delays.push(Math.round(delayMs / (1000 * 60 * 60 * 24)));
+    let onTimePayments = 0;
+    let latePayments = 0;
+    for (const row of history) {
+      if (row.paymentDate && row.dueDate) {
+        const delayMs = row.paymentDate.getTime() - row.dueDate.getTime();
+        const days = Math.round(delayMs / (1000 * 60 * 60 * 24));
+        delays.push(days);
+        if (days <= 0) onTimePayments += 1;
+        else latePayments += 1;
       }
     }
-    const avgPaymentDelay = delays.length > 0
-      ? Math.round(delays.reduce((sum, d) => sum + d, 0) / delays.length)
-      : 0;
+    const avgPaymentDelay =
+      delays.length > 0
+        ? Math.round(delays.reduce((sum, d) => sum + d, 0) / delays.length)
+        : 0;
 
     return res.json({
       villa,
@@ -1642,6 +1710,8 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
         totalPayments: payments.length,
         totalPaid,
         avgPaymentDelay,
+        onTimePayments,
+        latePayments,
       },
     });
   } catch (error) {
