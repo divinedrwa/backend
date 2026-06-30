@@ -86,3 +86,55 @@ export function resolvePerCycleExpectedTotal(
   const lateFeeAmount = resolvePerCycleLateFee(cycle, snapshot, nowUtc, lateFeeWaived);
   return { baseAmount, lateFeeAmount, totalExpected: baseAmount + lateFeeAmount };
 }
+
+export type LedgerSnapshotInput = CycleSnapshotLateFeeInput & {
+  paidAmount?: unknown;
+  status?: string;
+};
+
+/**
+ * Expected due for one cycle when a maintenance snapshot exists.
+ * Does not retroactively add billing-cycle late fee after base maintenance is already paid.
+ */
+export function resolveLedgerCycleExpected(
+  cycle: BillingCycleDueFields,
+  snapshot: LedgerSnapshotInput | null | undefined,
+  nowUtc: Date,
+  lateFeeWaived: boolean,
+): { baseAmount: number; lateFeeAmount: number; totalExpected: number } {
+  if (!snapshot) {
+    return resolvePerCycleExpectedTotal(cycle, null, nowUtc, lateFeeWaived);
+  }
+
+  const snapBase = Number(snapshot.expectedAmount);
+  const snapLate = Number(snapshot.lateFeeAmount ?? 0);
+  const snapPaid = Number(snapshot.paidAmount ?? 0);
+
+  if (snapshot.status === "PAID" || snapshot.status === "WAIVED") {
+    return {
+      baseAmount: snapBase,
+      lateFeeAmount: snapLate,
+      totalExpected: snapBase + snapLate,
+    };
+  }
+
+  if (snapLate > 0 || snapshot.lateFeeAppliedAt) {
+    return {
+      baseAmount: snapBase,
+      lateFeeAmount: snapLate,
+      totalExpected: snapBase + snapLate,
+    };
+  }
+
+  // Base already settled — never add billing-cycle late fee on top retroactively.
+  if (snapPaid >= snapBase - 0.005) {
+    return { baseAmount: snapBase, lateFeeAmount: 0, totalExpected: snapBase };
+  }
+
+  const billingLate = computeAmountDueForCycle(cycle, nowUtc, lateFeeWaived).lateFeeAmount;
+  return {
+    baseAmount: snapBase,
+    lateFeeAmount: billingLate,
+    totalExpected: snapBase + billingLate,
+  };
+}

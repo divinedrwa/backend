@@ -8,7 +8,7 @@ import {
 import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc } from "../domain/cycleStatus";
-import { resolvePerCycleExpectedTotal } from "../domain/amountDue";
+import { resolvePerCycleExpectedTotal, resolveLedgerCycleExpected } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
 import { notifySocietyRoles, notifyUser } from "../../../services/notification.service";
 import { RESIDENT_LIKE_ROLES } from "../../../lib/residentLike";
@@ -406,12 +406,9 @@ export async function computeUserBillingLedger(
     const snap = billingCycleIdToSnap.get(c.id);
 
     const waived = waivedCycleIds.has(c.id);
-    const { baseAmount, lateFeeAmount, totalExpected } = resolvePerCycleExpectedTotal(
-      c,
-      snap,
-      nowUtc,
-      waived,
-    );
+    const { baseAmount, lateFeeAmount, totalExpected } = snap
+      ? resolveLedgerCycleExpected(c, snap, nowUtc, waived)
+      : resolvePerCycleExpectedTotal(c, null, nowUtc, waived);
 
     let expectedAmount: number;
     let cashPaidAmount: number;
@@ -616,33 +613,6 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
         pendingCycles.length === 1
           ? `Your ${pendingCycles[0].cycleKey} maintenance is still unpaid after grace period. Please pay soon.`
           : `You have ${pendingCycles.length} unpaid maintenance cycles (${monthsList}). Please clear dues.`;
-
-      for (const dueCycle of pendingCycles) {
-        const noticeKey = `billing:grace-notice:${societyId}:${resident.id}:${dueCycle.id}:${dateKey}`;
-        const noticeSent = await billingCacheGet(noticeKey);
-        if (noticeSent) continue;
-        try {
-          await prisma.notice.create({
-            data: {
-              societyId,
-              title: `Maintenance due: ${dueCycle.cycleKey}`,
-              content: `Maintenance for ${dueCycle.cycleKey} is unpaid after grace period. Amount due: Rs. ${Number(
-                dueCycle.amount,
-              ).toFixed(0)}.`,
-              category: "MAINTENANCE",
-              priority: "HIGH",
-              recipients: {
-                create: {
-                  userId: resident.id,
-                },
-              },
-            },
-          });
-          await billingCacheSet(noticeKey, "1", 36 * 60 * 60);
-        } catch (noticeErr) {
-          logger.error({ err: noticeErr }, "[billing-reminder] notice create failed");
-        }
-      }
 
       // Set cache key BEFORE sending push to prevent duplicates on crash/restart.
       await billingCacheSet(sentKey, "1", 16 * 60 * 60);

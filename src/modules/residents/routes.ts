@@ -949,6 +949,13 @@ router.get("/my-notices", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
           { recipients: { none: {} } },
           { recipients: { some: { userId } } },
         ],
+        // Auto-generated billing reminders must not appear in the society notices feed.
+        NOT: {
+          AND: [
+            { category: "MAINTENANCE" },
+            { title: { startsWith: "Maintenance due:" } },
+          ],
+        },
       },
       orderBy: { createdAt: "desc" },
       take: 50,

@@ -1,8 +1,8 @@
 import { MaintenanceBillingRole } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
 import {
-  CycleSnapshotLateFeeInput,
-  resolvePerCycleExpectedTotal,
+  LedgerSnapshotInput,
+  resolveLedgerCycleExpected,
 } from "../domain/amountDue";
 import { publishedBillingCycleFilter } from "./cycle-service";
 
@@ -72,7 +72,7 @@ export function resolveSnapshotCycleTotals(
     villaId: string;
     financialYearId: string;
     periodKey: string;
-    snapshot: CycleSnapshotLateFeeInput;
+    snapshot: LedgerSnapshotInput;
     nowUtc: Date;
   },
 ): { baseExpectedAmount: number; lateFeeAmount: number; totalExpected: number } {
@@ -91,7 +91,12 @@ export function resolveSnapshotCycleTotals(
   const waived = Boolean(
     userId && ctx.waivedUserCycleKeys.has(`${userId}:${billingCycle.id}`),
   );
-  const totals = resolvePerCycleExpectedTotal(billingCycle, params.snapshot, params.nowUtc, waived);
+  const totals = resolveLedgerCycleExpected(
+    billingCycle,
+    params.snapshot,
+    params.nowUtc,
+    waived,
+  );
   return {
     baseExpectedAmount: totals.baseAmount,
     lateFeeAmount: totals.lateFeeAmount,

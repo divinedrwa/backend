@@ -4,6 +4,7 @@ import {
   computeAmountDueForCycle,
   resolvePerCycleExpectedTotal,
   resolvePerCycleLateFee,
+  resolveLedgerCycleExpected,
 } from "./amountDue";
 
 const juneCycle = {
@@ -44,6 +45,34 @@ describe("resolvePerCycleLateFee", () => {
     const totals = resolvePerCycleExpectedTotal(juneCycle, null, afterGrace, true);
     assert.equal(totals.lateFeeAmount, 0);
     assert.equal(totals.totalExpected, 1100);
+  });
+});
+
+describe("resolveLedgerCycleExpected", () => {
+  it("does not add billing-cycle late fee when snapshot base is already paid", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1100,
+      paidAmount: 1100,
+      lateFeeAmount: 0,
+      status: "PENDING",
+    };
+    const totals = resolveLedgerCycleExpected(juneCycle, snap, afterGrace, false);
+    assert.equal(totals.lateFeeAmount, 0);
+    assert.equal(totals.totalExpected, 1100);
+  });
+
+  it("adds billing-cycle late fee only when base is still unpaid after grace", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1100,
+      paidAmount: 0,
+      lateFeeAmount: 0,
+      status: "OVERDUE",
+    };
+    const totals = resolveLedgerCycleExpected(juneCycle, snap, afterGrace, false);
+    assert.equal(totals.lateFeeAmount, 50);
+    assert.equal(totals.totalExpected, 1150);
   });
 });
 
