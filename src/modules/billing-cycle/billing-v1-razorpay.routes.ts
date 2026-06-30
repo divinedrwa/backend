@@ -91,7 +91,7 @@ async function buildRazorpayReuseCheckoutResponse(
 async function reconcileExistingRazorpayOrder(
   societyId: string,
   orderId: string,
-): Promise<{ autoSettled?: boolean; reuseOrderId?: string } | null> {
+): Promise<{ autoSettled?: boolean; reuseOrderId?: string; verifying?: boolean } | null> {
   const row = await prisma.userCyclePayment.findFirst({
     where: { paymentGatewayOrderId: orderId },
     select: { paymentStatus: true },
@@ -115,8 +115,20 @@ async function reconcileExistingRazorpayOrder(
 
     if (merged.outcome === "completed" || merged.outcome === "recorded") {
       // Payment captured at Razorpay but DB not yet updated — settle inline.
-      await reconcileRazorpayFromPoll(societyId, orderId);
-      return { autoSettled: true };
+      const poll = await reconcileRazorpayFromPoll(societyId, orderId);
+      if (poll.reconciled) {
+        return { autoSettled: true };
+      }
+      // Razorpay says captured but we could NOT sync the ledger. Do NOT claim
+      // autoSettled (resident would be told "paid" with dues still open) and do
+      // NOT mint a fresh order (that would double-charge the captured payment).
+      // Surface a "verifying" state so the client polls the status endpoint,
+      // which retries the reconcile.
+      logger.warn(
+        { orderId, outcome: poll.outcome },
+        "[razorpay] order captured but ledger reconcile failed — returning verifying",
+      );
+      return { verifying: true };
     }
 
     if (merged.outcome === "failed" || merged.outcome === "unknown") {
@@ -260,6 +272,22 @@ router.post(
             maintenanceAmount: breakup.maintenanceAmount,
             existingOrder: true,
             autoSettled: true,
+            ...(idempotencyKey ? { idempotent: true } : {}),
+          });
+          return;
+        }
+        if (reconciled?.verifying) {
+          // Captured at Razorpay but ledger sync failed — payment is real, finalizing.
+          // Tell the client to poll status rather than open a new checkout.
+          res.status(202).json({
+            orderId: existing.paymentGatewayOrderId,
+            paymentId: existing.id,
+            totalDue: breakup.maintenanceAmount,
+            maintenanceAmount: breakup.maintenanceAmount,
+            existingOrder: true,
+            verifying: true,
+            outcome: "reconcile_failed",
+            message: "Payment received and is being verified. Please wait a moment.",
             ...(idempotencyKey ? { idempotent: true } : {}),
           });
           return;

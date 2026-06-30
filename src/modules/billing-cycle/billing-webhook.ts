@@ -174,11 +174,20 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
       // on top of the order amount, so the payment amount will be HIGHER
       // than our expected total — that's fine.  We only reject when the
       // payment is LESS than expected (possible tampering / partial pay).
-      if (isSuccess && amountPaise > 0) {
-        const expectedPaise =
-          noteAmounts.expectedPaise > 0
-            ? noteAmounts.expectedPaise
-            : Math.round(maintenanceAmountNum * 100);
+      // Only enforce the underpaid check when the order notes actually tell us
+      // the expected total (`expectedPaise`). For legacy/reused orders without
+      // notes, deriving "expected" from `maintenanceAmountNum` can fall back to
+      // a base-only `cycle.amount` that may exceed what was legitimately charged
+      // — auto-FAILing then would capture money while blocking the ledger. In
+      // that case we log for ops review and let the payment settle.
+      if (isSuccess && amountPaise > 0 && noteAmounts.expectedPaise <= 0) {
+        logger.warn(
+          { orderId, paymentId, actualPaise: amountPaise },
+          "[billing webhook] underpaid check skipped — order notes missing expectedPaise; settling captured payment",
+        );
+      }
+      if (isSuccess && amountPaise > 0 && noteAmounts.expectedPaise > 0) {
+        const expectedPaise = noteAmounts.expectedPaise;
         // Allow amountPaise >= expectedPaise (Razorpay convenience fee on top).
         // Reject only if charged LESS than expected (tolerance 1 paisa).
         if (amountPaise < expectedPaise - 1) {

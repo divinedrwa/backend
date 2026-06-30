@@ -78,7 +78,21 @@ export async function aggregatePlatformRevenue(): Promise<PlatformRevenueResult>
   const bySocietyMap = new Map<string, { name: string; revenue: number }>();
   let totalRevenue = 0;
 
+  // A resident may create several gateway orders for the same cycle (retries
+  // after a back-press / failed attempt), producing multiple `create_order`
+  // logs but only ONE successful payment. Count each (userId:cycleId) once,
+  // keeping the latest order log (closest to the settled payment), so platform
+  // revenue isn't inflated by abandoned retry orders.
+  const latestLogByKey = new Map<string, (typeof orderLogs)[number]>();
   for (const log of orderLogs) {
+    const key = `${log.userId}:${log.cycleId}`;
+    const existing = latestLogByKey.get(key);
+    if (!existing || log.createdAt > existing.createdAt) {
+      latestLogByKey.set(key, log);
+    }
+  }
+
+  for (const log of latestLogByKey.values()) {
     const key = `${log.userId}:${log.cycleId}`;
     if (!successKeys.has(key)) continue;
 

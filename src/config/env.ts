@@ -4,7 +4,11 @@ import { logger } from "../lib/logger";
 
 dotenv.config();
 // Optional local overrides (gitignored). Keeps production Supabase URLs in `.env` intact.
-dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
+// Never load in production: a stray `.env.local` in a deploy artifact must not be
+// able to silently override real secrets.
+if (process.env.NODE_ENV !== "production") {
+  dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
+}
 
 function mustGet(name: string): string {
   const value = process.env[name];
