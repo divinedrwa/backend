@@ -8,7 +8,7 @@ import {
 import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc } from "../domain/cycleStatus";
-import { computeAmountDueForCycle } from "../domain/amountDue";
+import { resolvePerCycleExpectedTotal } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
 import { notifySocietyRoles, notifyUser } from "../../../services/notification.service";
 import { RESIDENT_LIKE_ROLES } from "../../../lib/residentLike";
@@ -26,6 +26,10 @@ export type BillingLedgerCycleRow = {
   cycleId: string;
   cycleKey: string;
   title: string;
+  /** Base maintenance for this cycle (before late fee). */
+  baseExpectedAmount: number;
+  /** Late fee applied for this cycle only. */
+  lateFeeAmount: number;
   expectedAmount: number;
   cashPaidAmount: number;
   paidAmount: number;
@@ -201,15 +205,6 @@ export async function buildCurrentCycleResponse(input: {
     };
   }
 
-  const waiver = await prisma.billingLateFeeWaiver.findUnique({
-    where: {
-      cycleId_userId: { cycleId: cycle.id, userId: input.userId },
-    },
-  });
-  const waived = Boolean(waiver);
-
-  const due = computeAmountDueForCycle(cycle, nowUtc, waived);
-
   const payment = await prisma.userCyclePayment.findUnique({
     where: {
       userId_cycleId: { userId: input.userId, cycleId: cycle.id },
@@ -222,6 +217,8 @@ export async function buildCurrentCycleResponse(input: {
       cycleId: cycle.id,
       cycleKey: cycle.cycleKey,
       title: cycle.title,
+      baseExpectedAmount: Number(cycle.amount),
+      lateFeeAmount: 0,
       expectedAmount: Number(cycle.amount),
       cashPaidAmount:
         payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0,
@@ -270,8 +267,11 @@ export async function buildCurrentCycleResponse(input: {
     dueDate: cycle.paymentEndDate.toISOString(),
     isPaid: maintenanceBillingExcluded ? true : isPaid,
     lateFee: Number(cycle.lateFee),
-    totalDue: maintenanceBillingExcluded ? 0 : due.totalDue,
-    effectiveLateFeeComponent: maintenanceBillingExcluded ? 0 : due.lateFeeAmount,
+    /** Cash still due for this cycle — same as hub pay bar and gateway checkout. */
+    totalDue: maintenanceBillingExcluded ? 0 : remainingDue,
+    effectiveLateFeeComponent: maintenanceBillingExcluded ? 0 : currentLedger.lateFeeAmount,
+    baseExpectedAmount: currentLedger.baseExpectedAmount,
+    lateFeeAmount: currentLedger.lateFeeAmount,
     cycleKey: cycle.cycleKey,
     expectedAmount: currentLedger.expectedAmount,
     cashPaidAmount: currentLedger.cashPaidAmount,
@@ -299,7 +299,16 @@ export async function computeUserBillingLedger(
   const cycles = await prisma.billingCycle.findMany({
     where: { societyId, ...publishedBillingCycleFilter },
     orderBy: [{ cycleKey: "asc" }],
-    select: { id: true, cycleKey: true, title: true, amount: true, financialYearId: true },
+    select: {
+      id: true,
+      cycleKey: true,
+      title: true,
+      amount: true,
+      lateFee: true,
+      paymentEndDate: true,
+      gracePeriodDays: true,
+      financialYearId: true,
+    },
   });
   if (cycles.length === 0) {
     return { cycles: [], currentBalance: 0 };
@@ -310,6 +319,8 @@ export async function computeUserBillingLedger(
       cycleId: c.id,
       cycleKey: c.cycleKey,
       title: c.title,
+      baseExpectedAmount: 0,
+      lateFeeAmount: 0,
       expectedAmount: 0,
       cashPaidAmount: 0,
       paidAmount: 0,
@@ -336,8 +347,21 @@ export async function computeUserBillingLedger(
   /** When society maintenance collection snapshots exist for this villa, they are the source of truth for expected/paid (Maintenance Payment Management UI). */
   const billingCycleIdToSnap = new Map<
     string,
-    { expectedAmount: unknown; paidAmount: unknown; status: string; lateFeeAmount: unknown }
+    {
+      expectedAmount: unknown;
+      paidAmount: unknown;
+      status: string;
+      lateFeeAmount: unknown;
+      lateFeeAppliedAt: Date | null;
+    }
   >();
+
+  const waivers = await prisma.billingLateFeeWaiver.findMany({
+    where: { userId, cycleId: { in: cycles.map((c) => c.id) } },
+    select: { cycleId: true },
+  });
+  const waivedCycleIds = new Set(waivers.map((w) => w.cycleId));
+  const nowUtc = new Date();
 
   const fyPairs = cycles
     .filter((c): c is (typeof c) & { financialYearId: string } => Boolean(c.financialYearId))
@@ -361,6 +385,7 @@ export async function computeUserBillingLedger(
           paidAmount: true,
           status: true,
           lateFeeAmount: true,
+          lateFeeAppliedAt: true,
         },
       });
       const snapByMcId = new Map(snaps.map((s) => [s.cycleId, s]));
@@ -380,14 +405,21 @@ export async function computeUserBillingLedger(
     const p = payMap.get(c.id);
     const snap = billingCycleIdToSnap.get(c.id);
 
+    const waived = waivedCycleIds.has(c.id);
+    const { baseAmount, lateFeeAmount, totalExpected } = resolvePerCycleExpectedTotal(
+      c,
+      snap,
+      nowUtc,
+      waived,
+    );
+
     let expectedAmount: number;
     let cashPaidAmount: number;
     let paymentStatus: BillingUserPaymentStatus | "NONE";
     let paidAt: string | null;
 
     if (snap) {
-      expectedAmount =
-        Number(snap.expectedAmount) + Number(snap.lateFeeAmount ?? 0);
+      expectedAmount = totalExpected;
       let snapPaid = Number(snap.paidAmount);
       if (snap.status === "WAIVED") {
         snapPaid = expectedAmount;
@@ -411,7 +443,7 @@ export async function computeUserBillingLedger(
       }
       paidAt = p?.paidAt?.toISOString() ?? null;
     } else {
-      expectedAmount = Number(c.amount);
+      expectedAmount = totalExpected;
       cashPaidAmount =
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
       paymentStatus = p?.paymentStatus ?? "NONE";
@@ -428,6 +460,8 @@ export async function computeUserBillingLedger(
       cycleId: c.id,
       cycleKey: c.cycleKey,
       title: c.title,
+      baseExpectedAmount: baseAmount,
+      lateFeeAmount,
       expectedAmount,
       cashPaidAmount,
       paidAmount,

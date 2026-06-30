@@ -8,6 +8,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { notifyUser } from "../../services/notification.service";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
+import { invalidateReconcileCache } from "./services/resident-pending-dues";
 import {
   checkPhonePeStatus,
   isPhonePePaymentSuccessful,
@@ -275,11 +276,13 @@ export async function isGatewayLedgerSynced(
 
   const snap = await prisma.villaMaintenanceSnapshot.findUnique({
     where: { cycleId_villaId: { cycleId: maintenanceCycle.id, villaId: user.villaId } },
-    select: { status: true, expectedAmount: true, paidAmount: true },
+    select: { status: true, expectedAmount: true, paidAmount: true, lateFeeAmount: true },
   });
   if (!snap) return false;
   if (snap.status === "PAID" || snap.status === "WAIVED") return true;
-  return Number(snap.paidAmount) >= Number(snap.expectedAmount) - 0.005;
+  const totalExpected =
+    Number(snap.expectedAmount) + Number(snap.lateFeeAmount ?? 0);
+  return Number(snap.paidAmount) >= totalExpected - 0.005;
 }
 
 async function hasGatewayMaintenancePayment(
@@ -531,6 +534,11 @@ async function settleGatewayPayment(
 
     if (newlySettled && row.userId) {
       await notifyGatewayBillingPayment(row.userId, row.cycle.id, "success");
+      const villa = await prisma.user.findUnique({
+        where: { id: row.userId },
+        select: { villaId: true },
+      });
+      if (villa?.villaId) invalidateReconcileCache(villa.villaId);
     }
   } catch (err) {
     const detail = formatGatewayReconcileError(err);

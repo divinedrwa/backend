@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { ensureVillaLedgersAligned } from "../billing-cycle/billing-collection-link";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 
 type Tx = Prisma.TransactionClient;
@@ -229,6 +230,18 @@ export async function recordPaymentAndSyncLedgers(
           },
         });
       }
+    }
+
+    const paymentMonthBillingCycle = await tx.billingCycle.findFirst({
+      where: { societyId, financialYearId: mcc.financialYearId, cycleKey: mcc.periodKey },
+      select: { id: true },
+    });
+    if (paymentMonthBillingCycle) {
+      await ensureVillaLedgersAligned(tx, {
+        societyId,
+        villaId,
+        billingCycleId: paymentMonthBillingCycle.id,
+      });
     }
   }
 

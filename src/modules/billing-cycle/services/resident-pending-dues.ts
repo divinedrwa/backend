@@ -10,6 +10,8 @@ export type UserPendingDueRow = {
   title: string;
   /** Remaining cash due for this cycle (snapshot/ledger truth). */
   amount: number;
+  baseExpectedAmount: number;
+  lateFeeAmount: number;
   expectedAmount: number;
   remainingDue: number;
   paymentEndDate: string;
@@ -130,6 +132,8 @@ export async function buildPendingDuesFromLedger(
       cycleKey: row.cycleKey,
       title: row.title ?? cycle.title,
       amount: remainingDue,
+      baseExpectedAmount: row.baseExpectedAmount,
+      lateFeeAmount: row.lateFeeAmount,
       expectedAmount: row.expectedAmount,
       remainingDue,
       paymentEndDate: cycle.paymentEndDate.toISOString(),

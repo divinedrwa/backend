@@ -6,6 +6,8 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { notifyUser } from "../../services/notification.service";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
+import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
+import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 
 const router = Router();
 
@@ -98,6 +100,9 @@ router.post("/:id/verify", async (req, res, next) => {
         isolationLevel: "Serializable",
       },
     );
+
+    invalidateReconcileCache(submission.villaId);
+    invalidateMoneySnapshotCache(societyId);
 
     // Notify the submitting resident
     const verifyRemarkSuffix = submission.remark

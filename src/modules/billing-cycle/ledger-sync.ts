@@ -4,6 +4,7 @@ import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credi
 import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
 import {
   ensureMaintenanceCollectionForBillingCycle,
+  ensureVillaLedgersAligned,
   ensureVillaSnapshotForMaintenanceCycle,
   syncBillingUserCyclePaymentsFromSnapshot,
 } from "./billing-collection-link";
@@ -125,9 +126,9 @@ export async function syncLedgerForPayment(
   }
 
   const [snapshot] = await tx.$queryRawUnsafe<
-    { id: string; expectedAmount: string; paidAmount: string }[]
+    { id: string; expectedAmount: string; paidAmount: string; lateFeeAmount: string }[]
   >(
-    `SELECT id, "expectedAmount"::text, "paidAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
+    `SELECT id, "expectedAmount"::text, "paidAmount"::text, "lateFeeAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
     maintenanceCycle.id,
     user.villaId,
   );
@@ -139,7 +140,8 @@ export async function syncLedgerForPayment(
     );
   }
 
-  const expected = Number(snapshot.expectedAmount);
+  const expected =
+    Number(snapshot.expectedAmount) + Number(snapshot.lateFeeAmount ?? 0);
   const paidSoFar = Number(snapshot.paidAmount);
   const appliedToCycle = Math.max(0, Math.min(amountPaidNum, expected - paidSoFar));
   const newPaid = paidSoFar + appliedToCycle;
@@ -213,6 +215,12 @@ export async function syncLedgerForPayment(
     paidAmount: newPaid,
     snapStatus,
     source: BillingPaymentSource.GATEWAY,
+  });
+
+  await ensureVillaLedgersAligned(tx, {
+    societyId: billingCycle.societyId,
+    villaId: user.villaId,
+    billingCycleId: row.cycleId,
   });
 
   return { maintenanceCycleId, snapshotStatus: snapStatus, paidAmount: newPaid };

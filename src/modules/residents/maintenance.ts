@@ -6,6 +6,10 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { MaintenanceBillingRole, UserRole } from "@prisma/client";
 import { computeUserBillingLedger, publishedBillingCycleFilter } from "../billing-cycle/services/cycle-service";
 import { reconcileVillaLedgersForRecentCycles } from "../billing-cycle/services/resident-pending-dues";
+import {
+  loadPerCycleLateFeeContext,
+  resolveSnapshotCycleTotals,
+} from "../billing-cycle/services/per-cycle-late-fee-context";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 
 const router = Router();
@@ -24,6 +28,18 @@ function parseMonthYear(query: Record<string, unknown>) {
     month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : now.getMonth() + 1,
     year: Number.isFinite(year) && year >= 2000 ? year : now.getFullYear(),
   };
+}
+
+function snapshotTotalExpected(expectedAmount: unknown, lateFeeAmount: unknown): number {
+  return Number(expectedAmount) + Number(lateFeeAmount ?? 0);
+}
+
+function snapshotRemainingDue(
+  expectedAmount: unknown,
+  lateFeeAmount: unknown,
+  paidAmount: unknown,
+): number {
+  return Math.max(0, snapshotTotalExpected(expectedAmount, lateFeeAmount) - Number(paidAmount));
 }
 
 async function resolveMaintenanceCollectionCycleId(
@@ -665,7 +681,16 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       return res.status(404).json({ message: "Villa not assigned" });
     }
 
-    const [ledgerRows, collectionCycleId, currentRecords, payments, globalPending, monthlyExpenseSummary, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceAll, yearPaymentsAll, yearExpenseSummaries] =
+    try {
+      await reconcileVillaLedgersForRecentCycles(societyId, user.villaId);
+    } catch (reconcileErr) {
+      logger.warn(
+        { err: reconcileErr, userId, villaId: user.villaId },
+        "Villa ledger reconciliation failed — serving potentially stale dashboard",
+      );
+    }
+
+    const [ledgerRows, collectionCycleId, currentRecords, payments, globalPending, monthlyExpenseSummary, periodLiveExpenses, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceAll, yearPaymentsAll, yearExpenseSummaries] =
       await Promise.all([
         buildResidentLedgerRows(societyId, userId),
         resolveMaintenanceCollectionCycleId(societyId, month, year),
@@ -688,15 +713,32 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
             id: true,
             villaId: true,
             expectedAmount: true,
+            lateFeeAmount: true,
+            lateFeeAppliedAt: true,
             paidAmount: true,
             status: true,
             villa: { select: { villaNumber: true, ownerName: true } },
-            cycle: { select: { periodMonth: true, periodYear: true, dueDate: true } },
+            cycle: {
+              select: {
+                periodMonth: true,
+                periodYear: true,
+                dueDate: true,
+                financialYearId: true,
+                periodKey: true,
+              },
+            },
           },
         }),
         prisma.monthlyExpenseSummary.findUnique({
           where: {
             societyId_month_year: { societyId, month, year },
+          },
+        }),
+        prisma.expense.findMany({
+          where: { societyId, month, year, status: "APPROVED", deletedAt: null },
+          select: {
+            amount: true,
+            category: { select: { name: true } },
           },
         }),
         prisma.villa.findMany({
@@ -726,6 +768,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
           where: { societyId, year },
         }),
       ]);
+
+    const lateFeeCtx = await loadPerCycleLateFeeContext(societyId);
+    const nowForLateFee = new Date();
 
     const cycleCore =
       collectionCycleId == null
@@ -814,6 +859,10 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     const totalPendingCollection = useCycleResidents
       ? cycleCore.summary.pendingAmount
       : Math.max(0, totalExpectedCollection - totalCollectedCollection);
+    const billedHomesCount = Math.max(
+      0,
+      residents.filter((r) => Number(r.amount) > 0).length,
+    );
     const paidResidentsCount = useCycleResidents
       ? cycleCore.summary.paidCount
       : residents.filter((r) => r.status === "PAID").length;
@@ -933,6 +982,23 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       }
     }
 
+    const liveCategoryBreakdown: Record<string, number> = {};
+    let liveExpenseTotal = 0;
+    for (const expense of periodLiveExpenses) {
+      const key = expense.category?.name ?? "Other";
+      const amt = Number(expense.amount);
+      if (amt <= 0) continue;
+      liveExpenseTotal += amt;
+      liveCategoryBreakdown[key] = (liveCategoryBreakdown[key] ?? 0) + amt;
+    }
+    const hasLiveExpenses = liveExpenseTotal > 0;
+    const residentExpenseTotal = hasLiveExpenses
+      ? liveExpenseTotal
+      : Number(monthlyExpenseSummary?.totalExpenses ?? 0);
+    const residentCategoryBreakdown = hasLiveExpenses
+      ? liveCategoryBreakdown
+      : ((monthlyExpenseSummary?.categoryBreakdown ?? {}) as Record<string, unknown>);
+
     return res.json({
       filter: { month, year },
       userSummary: {
@@ -1017,12 +1083,13 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       monthlyExpenseBreakdown: {
         month,
         year,
-        totalExpenses: Number(monthlyExpenseSummary?.totalExpenses ?? 0),
-        netAmount: Number(monthlyExpenseSummary?.netAmount ?? 0),
-        categoryBreakdown: monthlyExpenseSummary?.categoryBreakdown ?? {},
+        totalExpenses: residentExpenseTotal,
+        netAmount: Number(monthlyExpenseSummary?.netAmount ?? residentExpenseTotal),
+        categoryBreakdown: residentCategoryBreakdown,
       },
       residentsSummary: {
         totalResidents: residents.length,
+        billedHomesCount: billedHomesCount > 0 ? billedHomesCount : residents.length,
         paidCount: paidResidentsCount,
         unpaidCount: unpaidResidentsCount,
         partialCount: partialResidentsCount,
@@ -1040,16 +1107,28 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
         status: r.status,
       })),
       yearlyBreakdown,
-      globalPendingDues: globalPending.map((s) => ({
-        id: s.id,
-        villaNumber: s.villa?.villaNumber ?? null,
-        ownerName: s.villa?.ownerName ?? null,
-        month: s.cycle.periodMonth,
-        year: s.cycle.periodYear,
-        amount: Math.max(0, Number(s.expectedAmount) - Number(s.paidAmount)),
-        dueDate: s.cycle.dueDate,
-        status: s.status,
-      })),
+      globalPendingDues: globalPending.map((s) => {
+        const totals = resolveSnapshotCycleTotals(lateFeeCtx, {
+          villaId: s.villaId,
+          financialYearId: s.cycle.financialYearId,
+          periodKey: s.cycle.periodKey,
+          snapshot: s,
+          nowUtc: nowForLateFee,
+        });
+        const remaining = Math.max(0, totals.totalExpected - Number(s.paidAmount));
+        return {
+          id: s.id,
+          villaNumber: s.villa?.villaNumber ?? null,
+          ownerName: s.villa?.ownerName ?? null,
+          month: s.cycle.periodMonth,
+          year: s.cycle.periodYear,
+          amount: remaining,
+          baseExpectedAmount: totals.baseExpectedAmount,
+          lateFeeAmount: totals.lateFeeAmount,
+          dueDate: s.cycle.dueDate,
+          status: s.status,
+        };
+      }),
     });
   } catch (error) {
     next(error);
@@ -1160,6 +1239,8 @@ router.get(
               periodMonth: true,
               periodYear: true,
               dueDate: true,
+              financialYearId: true,
+              periodKey: true,
             },
           },
           villa: {
@@ -1173,6 +1254,7 @@ router.get(
         orderBy: { cycle: { dueDate: "asc" } },
       });
 
+      const lateFeeCtx = await loadPerCycleLateFeeContext(societyId);
       const villaMap = new Map<
         string,
         {
@@ -1186,6 +1268,8 @@ router.get(
             month: number;
             year: number;
             expectedAmount: number;
+            baseExpectedAmount?: number;
+            lateFeeAmount?: number;
             paidAmount: number;
             remainingDue: number;
             dueDate: string;
@@ -1200,9 +1284,18 @@ router.get(
       let totalPendingCycles = 0;
 
       for (const snap of snapshots) {
-        const expected = Number(snap.expectedAmount);
+        const totals = resolveSnapshotCycleTotals(lateFeeCtx, {
+          villaId: snap.villa.id,
+          financialYearId: snap.cycle.financialYearId,
+          periodKey: snap.cycle.periodKey,
+          snapshot: snap,
+          nowUtc: now,
+        });
+        const baseExpected = totals.baseExpectedAmount;
+        const lateFee = totals.lateFeeAmount;
+        const expected = totals.totalExpected;
         const paid = Number(snap.paidAmount);
-        const remaining = expected - paid;
+        const remaining = Math.max(0, expected - paid);
         if (remaining <= 0) continue;
 
         totalOutstanding += remaining;
@@ -1231,6 +1324,8 @@ router.get(
           month: snap.cycle.periodMonth,
           year: snap.cycle.periodYear,
           expectedAmount: expected,
+          baseExpectedAmount: baseExpected,
+          lateFeeAmount: lateFee,
           paidAmount: paid,
           remainingDue: remaining,
           dueDate: snap.cycle.dueDate.toISOString(),

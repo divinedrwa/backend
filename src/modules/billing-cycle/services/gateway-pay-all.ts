@@ -24,14 +24,19 @@ function parseCycleMonthYear(cycleKey: string): { month: number; year: number } 
 }
 
 /**
- * Per-cycle maintenance due (same formula as POST /payments/create-order).
+ * Per-cycle maintenance due — matches hub `remainingDue` and maintenance-pending.
+ * Uses ledger snapshot truth (expected incl. late fee − cash paid); no double-counting.
  */
 export async function computeCycleAdjustedDue(
   societyId: string,
   userId: string,
-  cycle: Pick<BillingCycle, "id" | "amount" | "cycleKey">,
-  ledgerRow?: { expectedAmount: number; paidAmount: number; balanceBefore: number },
+  cycle: Pick<BillingCycle, "id" | "amount" | "cycleKey" | "lateFee" | "paymentEndDate" | "gracePeriodDays">,
+  ledgerRow?: { expectedAmount: number; cashPaidAmount: number; balanceBefore: number },
 ): Promise<number> {
+  if (ledgerRow) {
+    return Math.max(0, ledgerRow.expectedAmount - ledgerRow.cashPaidAmount);
+  }
+
   const waiver = await prisma.billingLateFeeWaiver.findUnique({
     where: { cycleId_userId: { cycleId: cycle.id, userId } },
   });
@@ -40,12 +45,7 @@ export async function computeCycleAdjustedDue(
     new Date(),
     Boolean(waiver),
   );
-  const balanceBefore = ledgerRow?.balanceBefore ?? 0;
-  const cycleOutstanding = ledgerRow
-    ? Math.max(0, ledgerRow.expectedAmount - ledgerRow.paidAmount)
-    : Math.max(0, Number(cycle.amount) - balanceBefore);
-  const lateComponent = Math.max(0, due.totalDue - Number(cycle.amount));
-  return Math.max(0, cycleOutstanding + lateComponent);
+  return Math.max(0, due.totalDue);
 }
 
 /**
@@ -64,7 +64,14 @@ export async function computePayAllQuote(
 
   const cycles = await prisma.billingCycle.findMany({
     where: { societyId, id: { in: pendingRows.map((r) => r.cycleId) } },
-    select: { id: true, amount: true, cycleKey: true },
+    select: {
+      id: true,
+      amount: true,
+      cycleKey: true,
+      lateFee: true,
+      paymentEndDate: true,
+      gracePeriodDays: true,
+    },
   });
   const cycleById = new Map(cycles.map((c) => [c.id, c]));
 

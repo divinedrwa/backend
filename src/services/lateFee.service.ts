@@ -69,9 +69,16 @@ export async function applyLateFees(): Promise<void> {
         // hasn't been paid (or had late fee applied) by a concurrent webhook.
         const applied = await prisma.$transaction(async (tx) => {
           const [locked] = await tx.$queryRawUnsafe<
-            { id: string; status: string; paidAmount: string; expectedAmount: string; lateFeeAppliedAt: Date | null }[]
+            {
+              id: string;
+              status: string;
+              paidAmount: string;
+              expectedAmount: string;
+              lateFeeAmount: string;
+              lateFeeAppliedAt: Date | null;
+            }[]
           >(
-            `SELECT id, status, "paidAmount"::text, "expectedAmount"::text, "lateFeeAppliedAt"
+            `SELECT id, status, "paidAmount"::text, "expectedAmount"::text, "lateFeeAmount"::text, "lateFeeAppliedAt"
              FROM "villa_maintenance_snapshots"
              WHERE id = $1
              FOR UPDATE`,
@@ -80,7 +87,9 @@ export async function applyLateFees(): Promise<void> {
           if (!locked) return false;
           if (locked.lateFeeAppliedAt) return false; // already applied
           if (locked.status === "PAID" || locked.status === "WAIVED") return false;
-          if (Number(locked.paidAmount) >= Number(locked.expectedAmount)) return false;
+          const totalDue =
+            Number(locked.expectedAmount) + Number(locked.lateFeeAmount ?? 0);
+          if (Number(locked.paidAmount) >= totalDue) return false;
 
           await tx.villaMaintenanceSnapshot.update({
             where: { id: snap.id },
