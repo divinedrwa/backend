@@ -6,6 +6,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { cacheMiddleware } from "../../middlewares/cache";
 import { notifySociety } from "../../services/notification.service";
+import { resolveUpiPayUriFromPayload } from "../../lib/buildUpiPaymentIntent";
 
 const router = Router();
 
@@ -49,6 +50,11 @@ router.get(
 
       let upiVpa: string | null = null;
       let upiQrCodeUrl: string | null = null;
+      // Signed merchant intent URI + payee name from the UPI_QR row, so the
+      // direct/fallback payment path can launch a P2M intent (with mc/sign) —
+      // not just a bare P2P intent that hits NPCI's per-payee 24h cap.
+      let upiPayUri: string | null = null;
+      let payeeName: string | null = null;
 
       for (const m of methods) {
         const config = m.config as Record<string, unknown>;
@@ -62,6 +68,14 @@ router.get(
           if (typeof config.qrCodeUrl === "string") {
             upiQrCodeUrl = config.qrCodeUrl;
           }
+          if (typeof config.upiPayUri === "string" && config.upiPayUri) {
+            upiPayUri = config.upiPayUri;
+          } else if (typeof config.upiPayload === "string" && config.upiPayload) {
+            upiPayUri = resolveUpiPayUriFromPayload(config.upiPayload);
+          }
+          if (typeof config.payeeName === "string" && config.payeeName) {
+            payeeName = config.payeeName;
+          }
         }
       }
 
@@ -72,10 +86,11 @@ router.get(
       return res.json({
         upiVpa,
         upiQrCodeUrl,
+        upiPayUri,
         letterheadUrl: society.letterheadUrl,
         signatureUrl: society.signatureUrl,
         stampUrl: society.stampUrl,
-        payeeName: society.name,
+        payeeName: payeeName ?? society.name,
         societyAddress: society.address,
       });
     } catch (error) {

@@ -50,6 +50,28 @@ describe("buildUpiPaymentIntentUri", () => {
     assert.equal(url.searchParams.get("tn"), "Maintenance 6-2026");
   });
 
+  it("preserves a real merchant QR (mc, encoded @, no sign) and adds amount", () => {
+    // Exact shape of the society's Bank of Maharashtra merchant QR: pa has an
+    // encoded @ (%40), mc marks it as a merchant, no signature (directory
+    // lookup), variable amount. Must stay P2M so it dodges the P2P 24h cap.
+    const qr =
+      "upi://pay?pa=bom260601340945%40mahb&pn=DIVINE+RESIDENCY+WEL&cu=INR&mc=2741&mode=01&purpose=00";
+    const intent = buildUpiPaymentIntentUri({
+      upiPayUri: qr,
+      vpa: "bom260601340945@mahb",
+      payeeName: "DIVINE RESIDENCY WEL",
+      amount: 1500,
+      remark: "Maintenance 6/2026",
+    });
+    // pa kept byte-for-byte (encoded @ preserved), mc/mode present → P2M.
+    assert.match(intent, /pa=bom260601340945%40mahb(?:&|$)/);
+    assert.match(intent, /(?:\?|&)mc=2741(?:&|$)/);
+    assert.match(intent, /(?:\?|&)mode=01(?:&|$)/);
+    assert.match(intent, /(?:\?|&)am=1500\.00(?:&|$)/);
+    // exactly one cu param (the stale one is replaced, not duplicated)
+    assert.equal((intent.match(/(?:\?|&)cu=/g) ?? []).length, 1);
+  });
+
   it("falls back to a plain P2P intent when there is no signed payload", () => {
     const intent = buildUpiPaymentIntentUri({
       vpa: "someone@okhdfcbank",
