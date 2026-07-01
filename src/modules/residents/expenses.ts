@@ -57,8 +57,30 @@ router.get("/society-expenses", async (req, res, next) => {
     if (typeof categoryId === "string" && categoryId) {
       where.categoryId = categoryId;
     }
-    if (month) where.month = parseInt(month as string);
-    if (year) where.year = parseInt(year as string);
+
+    const monthNum =
+      typeof month === "string" && month ? parseInt(month, 10) : NaN;
+    const yearNum = typeof year === "string" && year ? parseInt(year, 10) : NaN;
+    if (!Number.isNaN(monthNum) && !Number.isNaN(yearNum)) {
+      const periodStart = new Date(Date.UTC(yearNum, monthNum - 1, 1, 0, 0, 0, 0));
+      const periodEnd = new Date(Date.UTC(yearNum, monthNum, 0, 23, 59, 59, 999));
+      where.AND = [
+        {
+          OR: [
+            { month: monthNum, year: yearNum },
+            {
+              AND: [
+                { month: null },
+                { paymentDate: { gte: periodStart, lte: periodEnd } },
+              ],
+            },
+          ],
+        },
+      ];
+    } else {
+      if (!Number.isNaN(monthNum)) where.month = monthNum;
+      if (!Number.isNaN(yearNum)) where.year = yearNum;
+    }
 
     if (typeof search === "string" && search.trim()) {
       where.OR = [
