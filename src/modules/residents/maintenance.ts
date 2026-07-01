@@ -690,7 +690,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       );
     }
 
-    const [ledgerRows, collectionCycleId, currentRecords, payments, globalPending, monthlyExpenseSummary, periodLiveExpenses, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceAll, yearPaymentsAll, yearExpenseSummaries] =
+    const [ledgerRows, collectionCycleId, currentRecords, payments, globalPending, monthlyExpenseSummary, periodLiveExpenses, villas, monthMaintenanceAll, monthPaymentsAll, yearMaintenanceGrouped, yearPaymentsGrouped, yearExpenseSummaries] =
       await Promise.all([
         buildResidentLedgerRows(societyId, userId),
         resolveMaintenanceCollectionCycleId(societyId, month, year),
@@ -758,11 +758,19 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
           where: { societyId, month, year },
           orderBy: { paymentDate: "desc" },
         }),
-        prisma.maintenance.findMany({
+        // Yearly chart totals: aggregate in the DB (sum + counts per month)
+        // instead of loading every row for the year across all villas and
+        // reducing in JS. Output of `yearlyBreakdown` is unchanged.
+        prisma.maintenance.groupBy({
+          by: ["month", "status"],
           where: { societyId, year },
+          _sum: { amount: true },
+          _count: { _all: true },
         }),
-        prisma.maintenancePayment.findMany({
+        prisma.maintenancePayment.groupBy({
+          by: ["month"],
           where: { societyId, year },
+          _sum: { amount: true },
         }),
         prisma.monthlyExpenseSummary.findMany({
           where: { societyId, year },
@@ -873,16 +881,18 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       : residents.length - paidResidentsCount;
     const pendingResidents = residents.filter((r) => (r.status ?? "").toUpperCase() !== "PAID");
     const expectedByMonth = new Map<number, number>();
-    for (const m of yearMaintenanceAll) {
-      expectedByMonth.set(m.month, (expectedByMonth.get(m.month) ?? 0) + Number(m.amount));
-    }
-    const maintenanceByMonth = new Map<number, typeof yearMaintenanceAll>();
-    for (const m of yearMaintenanceAll) {
-      maintenanceByMonth.set(m.month, [...(maintenanceByMonth.get(m.month) ?? []), m]);
+    const monthTotalCount = new Map<number, number>();
+    const monthPaidCount = new Map<number, number>();
+    for (const g of yearMaintenanceGrouped) {
+      expectedByMonth.set(g.month, (expectedByMonth.get(g.month) ?? 0) + Number(g._sum.amount ?? 0));
+      monthTotalCount.set(g.month, (monthTotalCount.get(g.month) ?? 0) + g._count._all);
+      if (g.status === "PAID") {
+        monthPaidCount.set(g.month, (monthPaidCount.get(g.month) ?? 0) + g._count._all);
+      }
     }
     const collectedByMonth = new Map<number, number>();
-    for (const p of yearPaymentsAll) {
-      collectedByMonth.set(p.month, (collectedByMonth.get(p.month) ?? 0) + Number(p.amount));
+    for (const g of yearPaymentsGrouped) {
+      collectedByMonth.set(g.month, Number(g._sum.amount ?? 0));
     }
     const expenseByMonth = new Map<number, number>();
     const expenseBreakdownByMonth = new Map<number, Record<string, number>>();
@@ -899,9 +909,8 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
       }
     }
     const yearlyBreakdown = Array.from({ length: 12 }, (_, i) => i + 1).map((monthNo) => {
-      const monthRows = maintenanceByMonth.get(monthNo) ?? [];
-      const paidCount = monthRows.filter((r) => r.status === "PAID").length;
-      const unpaidCount = Math.max(0, monthRows.length - paidCount);
+      const paidCount = monthPaidCount.get(monthNo) ?? 0;
+      const unpaidCount = Math.max(0, (monthTotalCount.get(monthNo) ?? 0) - paidCount);
       return {
         month: monthNo,
         year,

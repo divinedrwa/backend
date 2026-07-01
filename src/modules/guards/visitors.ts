@@ -732,20 +732,13 @@ router.post(
               villaId: resolvedVillaId,
             };
 
-            const notifyResults = await Promise.allSettled(
-              residents.map((u) =>
-                NotificationService.sendToUser(
-                  u.id,
-                  { title, body, data },
-                  { category: NotificationCategory.VISITOR },
-                ),
-              ),
+            // Bulk send (2 queries + createMany) instead of N × per-user
+            // (3 queries each) — the guard waits on this before the response.
+            await NotificationService.sendToUsers(
+              residents.map((u) => u.id),
+              { title, body, data },
+              { category: NotificationCategory.VISITOR },
             );
-            for (const r of notifyResults) {
-              if (r.status === "rejected") {
-                logger.error({ err: r.reason }, "[visitor-approve-entry] resident arrival notify failed");
-              }
-            }
           }
         } catch (notifyErr) {
           logger.error({ err: notifyErr }, "[visitor-approve-entry] resident arrival notify error");
@@ -855,20 +848,11 @@ router.post(
               preApprovedId,
             };
 
-            const notifyResults = await Promise.allSettled(
-              residents.map((u) =>
-                NotificationService.sendToUser(
-                  u.id,
-                  { title, body, data },
-                  { category: NotificationCategory.VISITOR },
-                ),
-              ),
+            await NotificationService.sendToUsers(
+              residents.map((u) => u.id),
+              { title, body, data },
+              { category: NotificationCategory.VISITOR },
             );
-            for (const r of notifyResults) {
-              if (r.status === "rejected") {
-                logger.error({ err: r.reason }, "[pre-approved-admit] resident arrival notify failed");
-              }
-            }
           }
         } catch (notifyErr) {
           logger.error({ err: notifyErr }, "[pre-approved-admit] resident arrival notify error");
@@ -919,20 +903,11 @@ router.post("/visitor-entry-notify", requireRole(UserRole.GUARD), validateBody(v
     };
 
     if (residents.length > 0) {
-      const results = await Promise.allSettled(
-        residents.map((u) =>
-          NotificationService.sendToUser(
-            u.id,
-            { title, body, data },
-            { category: NotificationCategory.VISITOR },
-          ),
-        ),
+      await NotificationService.sendToUsers(
+        residents.map((u) => u.id),
+        { title, body, data },
+        { category: NotificationCategory.VISITOR },
       );
-      for (const r of results) {
-        if (r.status === "rejected") {
-          logger.error({ err: r.reason }, "[visitor-entry-notify] send failed");
-        }
-      }
     }
 
     return res.json({
