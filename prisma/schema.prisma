@@ -931,7 +931,8 @@ model Visitor {
   /// Guard who checked out the visitor
   checkedOutByGuardId String?
   /// Link back to the pre-approval that was consumed to admit this visitor (audit trail).
-  preApprovedId   String?   @unique
+  /// NOT unique: a recurring pre-approval pass legitimately admits many visitors.
+  preApprovedId   String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -953,6 +954,7 @@ model Visitor {
   @@index([societyId, checkInAt])
   @@index([checkedInByGuardId])
   @@index([checkedOutByGuardId])
+  @@index([preApprovedId])
 }
 
 model VisitorVilla {
@@ -1369,8 +1371,9 @@ model PreApprovedVisitor {
   society      Society   @relation(fields: [societyId], references: [id], onDelete: Cascade)
   villa        Villa     @relation(fields: [villaId], references: [id], onDelete: Cascade)
   approvedBy   User?     @relation("ApprovedVisitors", fields: [approvedById], references: [id], onDelete: SetNull)
-  /// Visitor row created when this pre-approval was consumed (reverse of Visitor.preApprovedId).
-  admittedVisitor Visitor?
+  /// Visitor rows created when this pre-approval was consumed (reverse of
+  /// Visitor.preApprovedId). A recurring pass can admit many visitors.
+  admittedVisitors Visitor[]
 
   @@index([societyId])
   @@index([villaId])

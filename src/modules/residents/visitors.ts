@@ -19,6 +19,7 @@ import {
   recomputeVisitorAggregateApproval,
   notifyCreatingGuardVisitorVillaProgress,
   notifyGuardsVisitorApprovalOutcome,
+  notifyResidentsVisitorApprovalResolved,
 } from "../guards/visitorResidentApproval.service";
 import {
   createPreApprovedVisitor,
@@ -684,6 +685,20 @@ async function applyResidentVisitorDecision(params: {
       outcome:
         hydrated.status === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
       createdByGuardId: hydrated.createdBy,
+    });
+
+    // Multi-flat closure: tell the visitor's OTHER villa residents the request
+    // is resolved (so their pending card doesn't silently vanish). Excludes the
+    // resident who just acted. No-ops for a single-flat visitor with no others.
+    void notifyResidentsVisitorApprovalResolved({
+      prisma,
+      societyId: params.societyId,
+      visitorId: params.visitorId,
+      visitorName: hydrated.name,
+      villaIds: hydrated.villaVisits.map((vv) => vv.villaId),
+      outcome:
+        hydrated.status === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
+      excludeUserId: params.userId,
     });
   }
 

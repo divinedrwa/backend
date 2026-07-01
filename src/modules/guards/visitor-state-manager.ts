@@ -331,9 +331,17 @@ export async function transitionVisitorState(
   // 1. Validate transition is legal
   validateTransition(transition);
 
-  // 2. Update Visitor status atomically
-  const visitor = await tx.visitor.update({
-    where: { id: transition.visitorId },
+  // 2. Update Visitor status atomically, guarded on the expected fromStatus.
+  // Callers read the visitor OUTSIDE this transaction, so fromStatus can be
+  // stale; without the guard a concurrent transition (e.g. a resident rejecting
+  // while the guard confirms entry, or two checkouts) would silently clobber
+  // each other. If the row already moved off fromStatus, count === 0.
+  const guardedWhere: Prisma.VisitorWhereInput = { id: transition.visitorId };
+  if (transition.fromStatus !== null) {
+    guardedWhere.status = transition.fromStatus;
+  }
+  const updateResult = await tx.visitor.updateMany({
+    where: guardedWhere,
     data: {
       status: transition.toStatus,
       updatedAt: transition.timestamp,
@@ -341,6 +349,12 @@ export async function transitionVisitorState(
       ...(transition.toStatus === VisitorStatus.CHECKED_IN && { checkInAt: transition.timestamp }),
       ...(transition.toStatus === VisitorStatus.CHECKED_OUT && { checkOutAt: transition.timestamp }),
     },
+  });
+  if (updateResult.count === 0) {
+    throw new Error("VISITOR_STATE_CHANGED");
+  }
+  const visitor = await tx.visitor.findUniqueOrThrow({
+    where: { id: transition.visitorId },
     include: {
       villaVisits: {
         include: {
@@ -529,24 +543,37 @@ export async function admitPreApprovedVisitor(
     throw new Error("PRE_APPROVED_EXPIRED");
   }
 
-  // 2. Mark pre-approval as used
+  // 2. Mark pre-approval as used — atomically. Two guards scanning the same
+  // OTP/pass simultaneously must not both consume it (the earlier check-then-act
+  // was a TOCTOU gap). The conditional updateMany only matches while the pass is
+  // still consumable; count === 0 means another request already used it up.
   if (preApproved.isRecurring) {
-    await tx.preApprovedVisitor.update({
-      where: { id: preApproved.id },
+    const consumed = await tx.preApprovedVisitor.updateMany({
+      where: {
+        id: preApproved.id,
+        isActive: true,
+        ...(preApproved.maxUses != null ? { usedCount: { lt: preApproved.maxUses } } : {}),
+      },
       data: {
         usedAt: now,
         usedCount: { increment: 1 },
       },
     });
+    if (consumed.count === 0) {
+      throw new Error("PRE_APPROVED_EXHAUSTED");
+    }
   } else {
-    await tx.preApprovedVisitor.update({
-      where: { id: preApproved.id },
+    const consumed = await tx.preApprovedVisitor.updateMany({
+      where: { id: preApproved.id, isUsed: false },
       data: {
         isUsed: true,
         usedAt: now,
         usedCount: { increment: 1 },
       },
     });
+    if (consumed.count === 0) {
+      throw new Error("PRE_APPROVED_EXHAUSTED");
+    }
   }
 
   // 3. Create Visitor (auto-admitted, no approval phase)

@@ -11,7 +11,8 @@ export type VisitorApproveEntryParams = {
   userId: string;
   societyId: string;
   otp: string;
-  villaId: string;
+  /** Optional — admission resolves the flat from the OTP; kept for compatibility. */
+  villaId?: string;
   visitorName?: string;
   visitorPhone?: string;
   purpose?: string;

@@ -222,6 +222,58 @@ export async function notifyGuardsVisitorApprovalOutcome(params: {
 }
 
 /**
+ * Multi-flat closure: once a resident's decision FINALIZES the aggregate
+ * (APPROVED via approve-wins, or DENIED), tell the visitor's OTHER villa
+ * residents the request is resolved so their pending card doesn't silently
+ * vanish on the next poll. The resident who just acted is excluded (they got
+ * the immediate API response). No-ops when there are no other recipients.
+ */
+export async function notifyResidentsVisitorApprovalResolved(params: {
+  prisma: PrismaClient;
+  societyId: string;
+  visitorId: string;
+  visitorName: string;
+  villaIds: string[];
+  outcome: "APPROVED" | "REJECTED";
+  excludeUserId?: string;
+}): Promise<void> {
+  if (params.villaIds.length === 0) return;
+
+  const recipientIds = (
+    await resolveVisitorApprovalRecipientIds({
+      prisma: params.prisma,
+      societyId: params.societyId,
+      villaIds: params.villaIds,
+    })
+  ).filter((id) => id !== params.excludeUserId);
+
+  if (recipientIds.length === 0) return;
+
+  const title = params.outcome === "APPROVED" ? "Visitor admitted" : "Visitor declined";
+  const body =
+    params.outcome === "APPROVED"
+      ? `${params.visitorName}'s entry was approved. No action needed from you.`
+      : `${params.visitorName}'s entry was declined. No action needed from you.`;
+  const data: Record<string, string> = {
+    type: "VISITOR_APPROVAL_RESOLVED",
+    visitorId: params.visitorId,
+    outcome: params.outcome,
+    societyId: params.societyId,
+  };
+
+  logger.info(
+    { visitorId: params.visitorId, outcome: params.outcome, recipientCount: recipientIds.length },
+    "notifyResidentsVisitorApprovalResolved",
+  );
+
+  await NotificationService.sendToUsers(
+    recipientIds,
+    { title, body, data },
+    { category: NotificationCategory.VISITOR },
+  );
+}
+
+/**
  * Multi-flat visitor still pending overall — one flat already approved/rejected.
  * Notifies only the guard who checked the visitor in.
  */

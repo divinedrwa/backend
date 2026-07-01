@@ -23,6 +23,9 @@ function mockDb(overrides: {
         preApprovedVisitor: {
           findFirst: async () => preApproved,
           update: async () => ({}),
+          // Atomic consume: updateMany with a status precondition; count > 0
+          // means this request successfully consumed the pass.
+          updateMany: async () => ({ count: 1 }),
         },
         visitor: {
           create: async () => ({

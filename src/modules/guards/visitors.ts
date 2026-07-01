@@ -18,6 +18,7 @@ import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
+import { isPreApprovalGateEligible } from "../../services/preApprovedVisitor.service";
 import {
   resolveVisitorApprovalRecipientIds,
   type VisitorApprovalTarget,
@@ -80,7 +81,9 @@ const verifyPreApprovedSchema = z.object({
 
 const otpVerifySchema = z.object({
   otp: z.string().min(4),
-  villaId: z.string(),
+  // Optional: an OTP uniquely identifies its pre-approval (and flat) within a
+  // society, so a guard can verify an OTP-only arrival without knowing the flat.
+  villaId: z.string().optional(),
 });
 
 const visitorNotifySchema = z.object({
@@ -92,7 +95,9 @@ const visitorNotifySchema = z.object({
 
 const approveEntrySchema = z.object({
   otp: z.string().min(4),
-  villaId: z.string(),
+  // Optional: admission resolves the flat from the OTP itself, so a guard can
+  // admit an OTP-only arrival without selecting a flat.
+  villaId: z.string().optional(),
   visitorName: z.string().trim().optional(),
   visitorPhone: z.string().trim().optional(),
   purpose: z.string().trim().optional(),
@@ -397,6 +402,11 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
       visitor: updated,
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "VISITOR_STATE_CHANGED") {
+      return res
+        .status(409)
+        .json({ message: "This visitor's status just changed. Please refresh and try again." });
+    }
     next(error);
   }
 });
@@ -425,6 +435,7 @@ router.get(["/visitors-today", "/my-visitors"], requireRole(UserRole.GUARD), asy
             villa: {
               select: {
                 villaNumber: true,
+                block: true,
               },
             },
           },
@@ -436,6 +447,9 @@ router.get(["/visitors-today", "/my-visitors"], requireRole(UserRole.GUARD), asy
         },
       },
       orderBy: { checkInTime: "desc" },
+      // Defensive cap: the range is client-supplied, so bound the result. The
+      // day view is well under this; the summary is computed from what's returned.
+      take: 1000,
     });
 
     const checkedIn = visitors.filter((v) => !v.checkOutTime);
@@ -530,6 +544,13 @@ router.post(
         visitor: updated,
       });
     } catch (error) {
+      // A resident may have rejected (or another guard acted) between our read
+      // and the guarded transition — surface a clean conflict, not a 500.
+      if (error instanceof Error && error.message === "VISITOR_STATE_CHANGED") {
+        return res
+          .status(409)
+          .json({ message: "This visitor's status just changed. Please refresh and try again." });
+      }
       next(error);
     }
   },
@@ -540,6 +561,10 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
   try {
     const { societyId } = req.auth!;
 
+    // This is a "show all currently on-site" list (not client-paginated), so
+    // use a generous defensive cap rather than a small page size — big enough
+    // for any realistic gate, bounded so a runaway can't return unbounded rows.
+    const ON_SITE_CAP = 300;
     const pending = await prisma.visitor.findMany({
       where: {
         societyId,
@@ -552,13 +577,18 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
             villa: {
               select: {
                 villaNumber: true,
+                block: true,
               },
             },
           },
         },
       },
       orderBy: { checkInTime: "asc" },
+      take: ON_SITE_CAP,
     });
+    if (pending.length === ON_SITE_CAP) {
+      logger.warn({ societyId, cap: ON_SITE_CAP }, "[guards] pending-visitors hit cap");
+    }
 
     return res.json({ visitors: pending, count: pending.length });
   } catch (error) {
@@ -619,15 +649,16 @@ router.post("/verify-pre-approved", requireRole(UserRole.GUARD), validateBody(ve
 router.post("/visitor-otp-verify", otpRateLimiter, requireRole(UserRole.GUARD), validateBody(otpVerifySchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { otp, villaId } = req.body;
+    const { otp, villaId } = req.body as { otp: string; villaId?: string };
 
+    // OTP alone identifies the pre-approval within a society, so villaId is
+    // optional — a guard can verify an OTP-only arrival without knowing the flat.
     const preApproved = await prisma.preApprovedVisitor.findFirst({
       where: {
         societyId,
-        villaId,
         otp,
         isActive: true,
-        isUsed: false,
+        ...(villaId ? { villaId } : {}),
       },
       include: {
         villa: { select: { villaNumber: true, block: true } },
@@ -641,10 +672,23 @@ router.post("/visitor-otp-verify", otpRateLimiter, requireRole(UserRole.GUARD), 
       });
     }
 
-    if (preApproved.validUntil && new Date(preApproved.validUntil) < new Date()) {
+    // Match the admit path's validity rules (not-yet-valid / expired / used up),
+    // so a green "verified" can never be followed by a failed admit.
+    const now = new Date();
+    if (preApproved.validFrom && new Date(preApproved.validFrom) > now) {
       return res.status(400).json({
         verified: false,
-        message: "OTP expired",
+        message: "This pass is not valid yet.",
+        preApproved,
+      });
+    }
+    if (!isPreApprovalGateEligible(preApproved, now)) {
+      return res.status(400).json({
+        verified: false,
+        message:
+          preApproved.validUntil && new Date(preApproved.validUntil) <= now
+            ? "OTP expired"
+            : "OTP has already been used",
         preApproved,
       });
     }
@@ -681,70 +725,10 @@ router.post(
         vehicleNumber,
       });
 
-      // Notify residents when pre-approved visitor is admitted via QR/OTP
-      if (result.status === 201 && result.body.admitted === true) {
-        try {
-          const visitor = result.body.visitor as
-            | {
-                id?: string;
-                name?: string;
-                villaVisits?: Array<{
-                  villaId?: string;
-                  villa?: { block?: string | null; villaNumber?: string | null } | null;
-                }>;
-              }
-            | undefined;
-          const villaVisit = visitor?.villaVisits?.[0];
-          const resolvedVillaId = villaVisit?.villaId ?? villaId;
-
-          const [residents, guard] = await Promise.all([
-            prisma.user.findMany({
-              where: {
-                societyId,
-                villaId: resolvedVillaId,
-                // Include admins who occupy this villa (role ADMIN) — same occupant
-                // role set as the visitor-approval resolver, so an admin-resident
-                // is notified about their own visitors.
-                ...residentLikeRoleFilter,
-                isActive: true,
-              },
-              select: { id: true },
-            }),
-            prisma.user.findUnique({
-              where: { id: userId },
-              select: { name: true },
-            }),
-          ]);
-
-          if (residents.length > 0) {
-            const flatParts = [villaVisit?.villa?.block, villaVisit?.villa?.villaNumber].filter(
-              (x): x is string => typeof x === "string" && x.trim().length > 0,
-            );
-            const flatLabel = flatParts.length > 0 ? ` (${flatParts.join(" · ")})` : "";
-            const guardName = guard?.name?.trim() || "Security";
-            const vName = visitor?.name?.trim() || "Your pre-approved visitor";
-            const title = "Visitor arrived";
-            const body = `${vName}${flatLabel} has arrived at the gate. Checked in by ${guardName}.`;
-            const data: Record<string, string> = {
-              type: "VISITOR_PRE_APPROVED_ARRIVED",
-              visitorId: visitor?.id?.toString() ?? "",
-              visitorName: vName,
-              villaId: resolvedVillaId,
-            };
-
-            // Bulk send (2 queries + createMany) instead of N × per-user
-            // (3 queries each) — the guard waits on this before the response.
-            await NotificationService.sendToUsers(
-              residents.map((u) => u.id),
-              { title, body, data },
-              { category: NotificationCategory.VISITOR },
-            );
-          }
-        } catch (notifyErr) {
-          logger.error({ err: notifyErr }, "[visitor-approve-entry] resident arrival notify error");
-        }
-      }
-
+      // The resident arrival push (VISITOR_PRE_APPROVED_ARRIVED) is sent inside
+      // admitPreApprovedVisitor (visitor-state-manager). This route-level block
+      // was dead code (the flow returns 200, never 201) and, if re-enabled,
+      // would double-notify — so it's intentionally removed.
       return res.status(result.status).json(result.body);
     } catch (error) {
       next(error);
@@ -777,8 +761,19 @@ router.get("/pre-approved-entries", requireRole(UserRole.GUARD), async (req, res
       }),
       prisma.preApprovedVisitor.count({ where }),
     ]);
-    logger.info({ societyId, count: rows.length }, "[guards] pre-approved-entries");
-    return res.json({ preApproved: rows, count: total, ...paginationMeta(total, rows.length, pagination) });
+    // Drop passes that would be rejected on admit — notably RECURRING passes
+    // that have hit maxUses (their `isUsed` stays false, so the `where` above
+    // can't exclude them). Prevents the guard tapping an entry that then fails.
+    const eligible = rows.filter((r) => isPreApprovalGateEligible(r, now));
+    logger.info(
+      { societyId, count: eligible.length },
+      "[guards] pre-approved-entries",
+    );
+    return res.json({
+      preApproved: eligible,
+      count: total,
+      ...paginationMeta(total, eligible.length, pagination),
+    });
   } catch (error) {
     next(error);
   }
@@ -799,66 +794,9 @@ router.post(
         preApprovedId,
       });
 
-      if (result.status === 201 && result.body.admitted === true) {
-        try {
-          const visitor = result.body.visitor as
-            | {
-                id?: string;
-                name?: string;
-                villaVisits?: Array<{
-                  villaId?: string;
-                  villa?: { block?: string | null; villaNumber?: string | null } | null;
-                }>;
-              }
-            | undefined;
-          const villaVisit = visitor?.villaVisits?.[0];
-          const villaId = villaVisit?.villaId;
-
-          if (villaId) {
-            const [residents, guard] = await Promise.all([
-              prisma.user.findMany({
-                where: {
-                  societyId,
-                  villaId,
-                  // Include admins who occupy this villa (role ADMIN).
-                  ...residentLikeRoleFilter,
-                  isActive: true,
-                },
-                select: { id: true },
-              }),
-              prisma.user.findUnique({
-                where: { id: userId },
-                select: { name: true },
-              }),
-            ]);
-
-            const flatParts = [villaVisit?.villa?.block, villaVisit?.villa?.villaNumber].filter(
-              (x): x is string => typeof x === "string" && x.trim().length > 0,
-            );
-            const flatLabel = flatParts.length > 0 ? ` (${flatParts.join(" · ")})` : "";
-            const guardName = guard?.name?.trim() || "Security";
-            const visitorName = visitor?.name?.trim() || "Your pre-approved visitor";
-            const title = "Visitor arrived";
-            const body = `${visitorName}${flatLabel} has arrived at the gate. Checked in by ${guardName}.`;
-            const data: Record<string, string> = {
-              type: "VISITOR_PRE_APPROVED_ARRIVED",
-              visitorId: visitor?.id?.toString() ?? "",
-              visitorName,
-              villaId,
-              preApprovedId,
-            };
-
-            await NotificationService.sendToUsers(
-              residents.map((u) => u.id),
-              { title, body, data },
-              { category: NotificationCategory.VISITOR },
-            );
-          }
-        } catch (notifyErr) {
-          logger.error({ err: notifyErr }, "[pre-approved-admit] resident arrival notify error");
-        }
-      }
-
+      // Resident arrival push is sent inside admitPreApprovedVisitor; the
+      // former route-level block here was dead (flow returns 200) and would
+      // double-notify if re-enabled — removed intentionally.
       return res.status(result.status).json(result.body);
     } catch (error) {
       next(error);

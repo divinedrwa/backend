@@ -33,7 +33,7 @@ export type PreApprovedListFilters = {
 export async function generateUniquePreApprovalOtp(
   db: PrismaClient | Prisma.TransactionClient,
   societyId: string,
-  maxAttempts = 10,
+  maxAttempts = 25,
 ): Promise<string> {
   for (let i = 0; i < maxAttempts; i++) {
     const otp = randomInt(100000, 999999).toString();
@@ -43,11 +43,18 @@ export async function generateUniquePreApprovalOtp(
     });
     if (!exists) return otp;
   }
-  return randomInt(100000, 999999).toString();
+  // Never return an unchecked (possibly duplicate) OTP: admission resolves a
+  // pass by OTP alone, so a collision could admit the wrong visitor/flat.
+  const err = new Error(
+    "Could not generate a unique visitor code right now. Please try again.",
+  );
+  (err as Error & { statusCode: number }).statusCode = 503;
+  throw err;
 }
 
-function isPreApprovalGateEligible(
+export function isPreApprovalGateEligible(
   row: {
+    validFrom?: Date | null;
     validUntil: Date | null;
     isRecurring: boolean;
     maxUses: number | null;
@@ -58,6 +65,7 @@ function isPreApprovalGateEligible(
   now = new Date(),
 ): boolean {
   if (!row.isActive) return false;
+  if (row.validFrom && new Date(row.validFrom) > now) return false;
   if (row.validUntil && new Date(row.validUntil) <= now) return false;
   if (row.isRecurring) {
     if (row.maxUses && row.usedCount >= row.maxUses) return false;
