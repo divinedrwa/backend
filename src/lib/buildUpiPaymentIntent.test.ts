@@ -25,24 +25,41 @@ describe("resolveUpiPayUriFromPayload", () => {
 });
 
 describe("buildUpiPaymentIntentUri", () => {
-  it("builds a plain P2P intent (drops merchant fields) and sets amount", () => {
+  it("replays a signed merchant QR verbatim, setting only am/cu/tn", () => {
+    // A real bank QR carries mc/mode and a base64 sign (contains +, /, =).
+    const sign = "abc+def/ghi==";
     const intent = buildUpiPaymentIntentUri({
-      upiPayUri: "upi://pay?pa=divine@mahb&pn=DIVINE&mc=5411&tid=TXN1&mode=02",
+      upiPayUri: `upi://pay?pa=divine@mahb&pn=DIVINE&mc=5411&mode=01&orgid=159761&sign=${sign}`,
       vpa: "divine@mahb",
       payeeName: "DIVINE",
       amount: 1500,
       remark: "Maintenance 6/2026",
     });
+
+    // Merchant identity + signature preserved so the payment stays P2M.
+    assert.match(intent, /(?:\?|&)mc=5411(?:&|$)/);
+    assert.match(intent, /(?:\?|&)mode=01(?:&|$)/);
+    assert.match(intent, /(?:\?|&)orgid=159761(?:&|$)/);
+    // sign must be byte-identical — never decoded/re-encoded.
+    assert.match(intent, new RegExp(`sign=${sign.replace(/[+/]/g, "\\$&")}(?:&|$)`));
+
     const url = new URL(intent);
     assert.equal(url.searchParams.get("pa"), "divine@mahb");
-    assert.equal(url.searchParams.get("pn"), "DIVINE");
     assert.equal(url.searchParams.get("am"), "1500.00");
-    assert.equal(url.searchParams.get("tn"), "Maintenance 6-2026");
     assert.equal(url.searchParams.get("cu"), "INR");
-    // Merchant / signed-intent fields must NOT survive — they break third-party
-    // UPI apps when the reconstructed URI has no valid signature.
+    assert.equal(url.searchParams.get("tn"), "Maintenance 6-2026");
+  });
+
+  it("falls back to a plain P2P intent when there is no signed payload", () => {
+    const intent = buildUpiPaymentIntentUri({
+      vpa: "someone@okhdfcbank",
+      payeeName: "Someone",
+      amount: 250,
+      remark: "Maintenance 6/2026",
+    });
+    const url = new URL(intent);
+    assert.equal(url.searchParams.get("pa"), "someone@okhdfcbank");
+    assert.equal(url.searchParams.get("am"), "250.00");
     assert.equal(url.searchParams.get("mc"), null);
-    assert.equal(url.searchParams.get("tid"), null);
-    assert.equal(url.searchParams.get("mode"), null);
   });
 });

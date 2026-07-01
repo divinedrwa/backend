@@ -149,16 +149,37 @@ function sanitizeTransactionNote(remark: string): string {
     .slice(0, MAX_TN_LENGTH);
 }
 
+/** Replace only am/cu/tn on a URI, keeping every other param byte-for-byte. */
+function replaceTransactionFields(uri: string, amount: string, tn: string): string {
+  const noFragment = uri.split("#")[0];
+  const qIndex = noFragment.indexOf("?");
+  const path = noFragment.slice(0, qIndex);
+  const query = noFragment.slice(qIndex + 1);
+
+  const kept = query
+    .split("&")
+    .filter(Boolean)
+    .filter((p) => {
+      const key = p.split("=")[0].toLowerCase();
+      return key !== "am" && key !== "cu" && key !== "tn";
+    });
+
+  kept.push(`am=${amount}`, "cu=INR");
+  if (tn) kept.push(`tn=${encodeURIComponent(tn)}`);
+
+  return `${path}?${kept.join("&")}`;
+}
+
 /**
- * Build a UPI app intent URI as a plain P2P request (pa/pn/am/cu/tn only).
+ * Build a UPI app intent URI.
  *
- * Merchant fields from the bank QR (mc, tid, mode, sign, orgid…) are dropped on
- * purpose: an intent carrying `mc` is treated as a verified-merchant (P2M)
- * payment by GPay/PhonePe/Paytm and is refused unless it also carries the
- * original merchant signature (`sign`), which a reconstructed URI cannot
- * reproduce. The exact `pa`/`pn` are still taken from the decoded QR when
- * available, since the separately-parsed `vpa` can be truncated for unusual
- * merchant VPAs.
+ * For a bank/merchant QR the original signed payload is replayed *verbatim* —
+ * every field (pa, pn, mc, mode, sign, orgid, tid…) is kept byte-for-byte and
+ * only am/cu/tn are set. This keeps the transaction person-to-merchant (P2M):
+ * dropping mc/sign would downgrade it to P2P and hit NPCI's per-payee "max
+ * payments in 24 hours" inbound cap, and re-encoding the base64 `sign` would
+ * break merchant verification. A manual VPA (no signed payload) falls back to a
+ * plain P2P intent, which is correct for a personal address.
  */
 export function buildUpiPaymentIntentUri(input: {
   upiPayUri?: string | null;
@@ -169,27 +190,20 @@ export function buildUpiPaymentIntentUri(input: {
   remark: string;
 }): string {
   const remark = sanitizeTransactionNote(input.remark);
+  const amount = input.amount.toFixed(2);
   const resolved =
     (input.upiPayUri?.trim() && resolveUpiPayUriFromPayload(input.upiPayUri)) ||
     (input.upiPayload?.trim() && resolveUpiPayUriFromPayload(input.upiPayload)) ||
     null;
 
-  let pa = input.vpa.trim();
-  let pn = input.payeeName?.trim() ?? "";
-  if (resolved) {
-    const src = new URL(resolved);
-    const srcPa = src.searchParams.get("pa")?.trim();
-    if (srcPa) pa = srcPa;
-    const srcPn = src.searchParams.get("pn")?.trim();
-    if (!pn && srcPn) pn = srcPn;
+  if (resolved && /^upi:\/\/pay\?/i.test(resolved)) {
+    return replaceTransactionFields(resolved, amount, remark);
   }
 
-  const url = new URL("upi://pay");
-  url.searchParams.set("pa", pa);
-  if (pn) url.searchParams.set("pn", pn);
-  url.searchParams.set("am", input.amount.toFixed(2));
-  url.searchParams.set("tn", remark);
-  url.searchParams.set("cu", "INR");
-
-  return url.toString();
+  // No signed merchant payload → plain P2P intent.
+  const parts = [`pa=${input.vpa.trim()}`];
+  if (input.payeeName?.trim()) parts.push(`pn=${encodeURIComponent(input.payeeName.trim())}`);
+  parts.push(`am=${amount}`, "cu=INR");
+  if (remark) parts.push(`tn=${encodeURIComponent(remark)}`);
+  return `upi://pay?${parts.join("&")}`;
 }
