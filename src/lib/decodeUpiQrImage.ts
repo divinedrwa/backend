@@ -1,6 +1,7 @@
 import jsQR from "jsqr";
 import sharp from "sharp";
 import { UPI_VPA_REGEX } from "./validateUpiVpa";
+import { resolveUpiPayUriFromPayload } from "./buildUpiPaymentIntent";
 
 const VPA_REGEX = UPI_VPA_REGEX;
 
@@ -163,16 +164,19 @@ function parseNestedTlv(value: string): Record<string, string> {
 }
 
 function extractPaFromString(value: string): string | undefined {
-  const match = value.match(/(?:^|[?&])pa=([^&\s]+)/i);
+  const match = value.match(/pa=([a-zA-Z0-9.\-_]{2,256}@[a-zA-Z0-9.\-_]{2,64})/i);
   if (!match?.[1]) return undefined;
   const vpa = decodeURIComponent(match[1].trim());
   return VPA_REGEX.test(vpa) ? vpa : undefined;
 }
 
 function extractParamFromString(value: string, key: string): string | undefined {
-  const re = new RegExp(`(?:^|[?&])${key}=([^&\\s]+)`, "i");
+  const re = new RegExp(`${key}=([^&\\s#]+)`, "i");
   const match = value.match(re);
-  return match?.[1]?.trim();
+  if (!match?.[1]) return undefined;
+  const raw = match[1].trim();
+  const tlvNoise = raw.match(/^(.+?)(?=\d{4}[a-z]{2,}|\d{4}52|\d{4}53)/i);
+  return (tlvNoise?.[1] ?? raw).trim();
 }
 
 /** Build PaymentMethod UPI_QR config fields after a successful decode + upload. */
@@ -180,11 +184,13 @@ export function buildUpiQrConfigFields(
   qrCodeUrl: string,
   parsed: ParsedUpiQr,
 ): Record<string, unknown> {
+  const upiPayUri = resolveUpiPayUriFromPayload(parsed.upiPayload);
   return {
     qrCodeUrl,
     vpa: parsed.vpa,
     payeeName: parsed.payeeName ?? null,
     upiPayload: parsed.upiPayload,
+    upiPayUri: upiPayUri ?? null,
     hasFixedAmount: parsed.hasFixedAmount,
     fixedAmount: parsed.fixedAmount ?? null,
     qrValidatedAt: new Date().toISOString(),

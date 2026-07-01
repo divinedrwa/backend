@@ -1,5 +1,6 @@
 import type { PaymentMethodType } from "@prisma/client";
 import { encryptSecret, decryptSecret, isEncrypted } from "../../lib/paymentSecrets";
+import { resolveUpiPayUriFromPayload } from "../../lib/buildUpiPaymentIntent";
 
 /** Fields that contain secrets and should be encrypted at rest / masked for display. */
 const SECRET_FIELDS: Record<string, string[]> = {
@@ -27,6 +28,12 @@ export function sanitizeConfigForAdmin(
       out[field] = MASKED;
     }
   }
+
+  if (type === "UPI_QR" && !out.upiPayUri && typeof config.upiPayload === "string") {
+    const resolved = resolveUpiPayUriFromPayload(config.upiPayload);
+    if (resolved) out.upiPayUri = resolved;
+  }
+
   return out;
 }
 
@@ -55,6 +62,14 @@ export function sanitizeConfigForResident(
   }
 
   // Bank account number is shown in full so residents can use it for payment
+
+  if (type === "UPI_QR") {
+    delete out.upiPayload;
+    if (!out.upiPayUri && typeof config.upiPayload === "string" && config.upiPayload.trim()) {
+      const resolved = resolveUpiPayUriFromPayload(config.upiPayload);
+      if (resolved) out.upiPayUri = resolved;
+    }
+  }
 
   return out;
 }

@@ -25,6 +25,7 @@ const upiQrConfigSchema = z.object({
   vpa: z.string().min(3).regex(/@/, "VPA must contain @").optional(),
   payeeName: z.string().trim().min(1).optional().nullable(),
   upiPayload: z.string().optional(),
+  upiPayUri: z.string().optional().nullable(),
   hasFixedAmount: z.boolean().optional(),
   fixedAmount: z.string().optional().nullable(),
   qrValidatedAt: z.string().datetime().optional(),
