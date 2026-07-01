@@ -5,7 +5,11 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { upiQrImageMemory } from "../../lib/upiQrUpload";
-import { uploadUpiQrImageBuffer } from "../../services/cloudinaryUpiQr";
+import { processUpiQrImageUpload } from "../payment-methods/upiQrUpload.service";
+import {
+  enrichUpiVpaConfig,
+  validateUpiVpa,
+} from "../../lib/validateUpiVpa";
 import { letterheadImageMemory } from "../../lib/letterheadUpload";
 import { uploadLetterheadImageBuffer } from "../../services/cloudinaryLetterhead";
 import { brandingImageMemory } from "../../lib/brandingImageUpload";
@@ -105,7 +109,13 @@ const patchSocietySchema = z
     visitorMultiVillaApprovalMode: z.nativeEnum(VisitorMultiVillaApprovalMode).optional(),
     visitorApprovalRequired: z.boolean().optional(),
     guardCanApproveVisitors: z.boolean().optional(),
-    upiVpa: z.string().trim().min(3).regex(/@/, "Must contain @").nullable().optional(),
+    upiVpa: z
+      .string()
+      .trim()
+      .min(3)
+      .regex(/@/, "Must contain @")
+      .nullable()
+      .optional(),
     upiQrCodeUrl: z.string().url().nullable().optional(),
     themeColors: themeColorsSchema.nullable().optional(),
   })
@@ -167,7 +177,17 @@ router.patch(
         data.guardCanApproveVisitors = body.guardCanApproveVisitors;
       }
       if (body.upiVpa !== undefined) {
-        data.upiVpa = body.upiVpa;
+        if (body.upiVpa) {
+          try {
+            const validated = validateUpiVpa(body.upiVpa);
+            data.upiVpa = validated.vpa;
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Invalid UPI VPA";
+            return res.status(400).json({ message });
+          }
+        } else {
+          data.upiVpa = null;
+        }
       }
       if (body.upiQrCodeUrl !== undefined) {
         data.upiQrCodeUrl = body.upiQrCodeUrl;
@@ -198,10 +218,14 @@ router.patch(
           where: { societyId, type: PaymentMethodType.UPI_VPA },
         });
         if (body.upiVpa) {
+          const vpaConfig = enrichUpiVpaConfig(
+            { vpa: data.upiVpa as string },
+            existingVpa?.config as Record<string, unknown> | undefined,
+          );
           if (existingVpa) {
             await prisma.paymentMethod.update({
               where: { id: existingVpa.id },
-              data: { config: { vpa: body.upiVpa }, isEnabled: true },
+              data: { config: vpaConfig as Prisma.InputJsonValue, isEnabled: true },
             });
           } else {
             await prisma.paymentMethod.create({
@@ -209,8 +233,9 @@ router.patch(
                 societyId,
                 type: PaymentMethodType.UPI_VPA,
                 displayName: "UPI",
-                config: { vpa: body.upiVpa },
+                config: vpaConfig as Prisma.InputJsonValue,
                 sortOrder: 10,
+                isEnabled: true,
               },
             });
           }
@@ -218,7 +243,7 @@ router.patch(
           // VPA cleared — disable PaymentMethod
           await prisma.paymentMethod.update({
             where: { id: existingVpa.id },
-            data: { isEnabled: false, config: { vpa: null } },
+            data: { isEnabled: false, config: { vpa: null, vpaValidatedAt: null } },
           });
         }
       }
@@ -300,11 +325,20 @@ router.post(
         return res.status(400).json({ message: "No image file provided" });
       }
 
-      const url = await uploadUpiQrImageBuffer(req.file.buffer, societyId);
+      let uploadResult;
+      try {
+        uploadResult = await processUpiQrImageUpload(req.file.buffer, societyId);
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to read UPI QR code from image";
+        return res.status(400).json({ message });
+      }
+
+      const { url, config: qrConfig } = uploadResult;
 
       await prisma.society.updateMany({
         where: { id: societyId },
-        data: { upiQrCodeUrl: url },
+        data: { upiQrCodeUrl: url, upiVpa: (qrConfig.vpa as string) ?? undefined },
       });
 
       // Dual-write: sync to PaymentMethod table
@@ -314,7 +348,13 @@ router.post(
       if (existingQr) {
         await prisma.paymentMethod.update({
           where: { id: existingQr.id },
-          data: { config: { qrCodeUrl: url }, isEnabled: true },
+          data: {
+            config: {
+              ...(existingQr.config as Record<string, unknown>),
+              ...qrConfig,
+            } as Prisma.InputJsonValue,
+            isEnabled: true,
+          },
         });
       } else {
         await prisma.paymentMethod.create({
@@ -322,15 +362,16 @@ router.post(
             societyId,
             type: PaymentMethodType.UPI_QR,
             displayName: "UPI QR Code",
-            config: { qrCodeUrl: url },
+            config: qrConfig as Prisma.InputJsonValue,
             sortOrder: 11,
+            isEnabled: true,
           },
         });
       }
 
       await bustSocietySettingsCache(societyId);
 
-      return res.json({ url });
+      return res.json({ url, validation: uploadResult.validation });
     } catch (error) {
       next(error);
     }

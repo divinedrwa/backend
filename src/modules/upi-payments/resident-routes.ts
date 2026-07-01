@@ -55,8 +55,13 @@ router.get(
         if (m.type === PaymentMethodType.UPI_VPA && typeof config.vpa === "string") {
           upiVpa = config.vpa;
         }
-        if (m.type === PaymentMethodType.UPI_QR && typeof config.qrCodeUrl === "string") {
-          upiQrCodeUrl = config.qrCodeUrl;
+        if (m.type === PaymentMethodType.UPI_QR) {
+          if (typeof config.vpa === "string" && config.vpa) {
+            upiVpa = config.vpa;
+          }
+          if (typeof config.qrCodeUrl === "string") {
+            upiQrCodeUrl = config.qrCodeUrl;
+          }
         }
       }
 

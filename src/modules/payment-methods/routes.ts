@@ -5,7 +5,6 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { upiQrImageMemory } from "../../lib/upiQrUpload";
-import { uploadUpiQrImageBuffer } from "../../services/cloudinaryUpiQr";
 import {
   createPaymentMethodSchema,
   updatePaymentMethodSchema,
@@ -22,6 +21,13 @@ import {
   getEnvPhonePeDisplayName,
   isPhonePeConfigured,
 } from "../../services/phonepe-billing";
+import { isUpiQrConfigReady } from "../../lib/decodeUpiQrImage";
+import {
+  enrichUpiVpaConfig,
+  isUpiVpaConfigReady,
+  upiVpaValidationMessage,
+} from "../../lib/validateUpiVpa";
+import { processUpiQrImageUpload } from "./upiQrUpload.service";
 
 const router = Router();
 
@@ -63,14 +69,38 @@ router.post(
       const { societyId } = req.auth!;
       const { type, config, displayName, isEnabled, sortOrder } = req.body;
 
-      const encryptedConfig = encryptConfigSecrets(type, config);
+      let finalConfig = config as Record<string, unknown>;
+      let validation: { message: string; vpa?: string } | undefined;
+
+      if (type === PaymentMethodType.UPI_VPA) {
+        try {
+          finalConfig = enrichUpiVpaConfig(finalConfig);
+          validation = {
+            vpa: finalConfig.vpa as string,
+            message: upiVpaValidationMessage(finalConfig.vpa as string),
+          };
+        } catch (err) {
+          const message = err instanceof Error ? err.message : "Invalid UPI VPA";
+          return res.status(400).json({ message });
+        }
+      }
+
+      let enabled = isEnabled ?? true;
+      if (type === PaymentMethodType.UPI_QR && !isUpiQrConfigReady(finalConfig)) {
+        enabled = false;
+      }
+      if (type === PaymentMethodType.UPI_VPA && !isUpiVpaConfigReady(finalConfig)) {
+        enabled = false;
+      }
+
+      const encryptedConfig = encryptConfigSecrets(type, finalConfig);
 
       const method = await prisma.paymentMethod.create({
         data: {
           societyId,
           type,
           displayName,
-          isEnabled,
+          isEnabled: enabled,
           sortOrder,
           config: encryptedConfig as Prisma.InputJsonValue,
         },
@@ -81,6 +111,7 @@ router.post(
           ...method,
           config: sanitizeConfigForAdmin(method.type, method.config as Record<string, unknown>),
         },
+        ...(validation ? { validation } : {}),
       });
     } catch (error) {
       next(error);
@@ -110,29 +141,72 @@ router.patch(
 
       const data: Record<string, unknown> = {};
       if (displayName !== undefined) data.displayName = displayName;
-      if (isEnabled !== undefined) data.isEnabled = isEnabled;
-      if (sortOrder !== undefined) data.sortOrder = sortOrder;
 
+      let mergedConfig: Record<string, unknown> | undefined;
       if (config) {
-        const merged = mergeConfigUpdate(
+        mergedConfig = mergeConfigUpdate(
           existing.type,
           existing.config as Record<string, unknown>,
           config,
         );
-        data.config = encryptConfigSecrets(existing.type, merged) as Prisma.InputJsonValue;
+        if (existing.type === PaymentMethodType.UPI_VPA) {
+          try {
+            mergedConfig = enrichUpiVpaConfig(
+              mergedConfig,
+              existing.config as Record<string, unknown>,
+            );
+          } catch (err) {
+            const message = err instanceof Error ? err.message : "Invalid UPI VPA";
+            return res.status(400).json({ message });
+          }
+        }
+        data.config = encryptConfigSecrets(existing.type, mergedConfig) as Prisma.InputJsonValue;
       }
+
+      if (isEnabled !== undefined) {
+        const cfg =
+          mergedConfig ?? (existing.config as Record<string, unknown>);
+        if (isEnabled && existing.type === PaymentMethodType.UPI_QR && !isUpiQrConfigReady(cfg)) {
+          return res.status(400).json({
+            message:
+              "Upload a valid bank UPI QR code before enabling. The QR is decoded automatically on upload.",
+          });
+        }
+        if (isEnabled && existing.type === PaymentMethodType.UPI_VPA && !isUpiVpaConfigReady(cfg)) {
+          return res.status(400).json({
+            message:
+              "Enter a valid UPI VPA before enabling. VPA format is verified when you save.",
+          });
+        }
+        data.isEnabled = isEnabled;
+      }
+      if (sortOrder !== undefined) data.sortOrder = sortOrder;
 
       const method = await prisma.paymentMethod.update({
         where: { id },
         data,
       });
 
-      return res.json({
+      const response: Record<string, unknown> = {
         method: {
           ...method,
           config: sanitizeConfigForAdmin(method.type, method.config as Record<string, unknown>),
         },
-      });
+      };
+      if (
+        existing.type === PaymentMethodType.UPI_VPA &&
+        config &&
+        isUpiVpaConfigReady(method.config as Record<string, unknown>)
+      ) {
+        response.validation = {
+          vpa: (method.config as Record<string, unknown>).vpa,
+          message: upiVpaValidationMessage(
+            String((method.config as Record<string, unknown>).vpa),
+          ),
+        };
+      }
+
+      return res.json(response);
     } catch (error) {
       next(error);
     }
@@ -223,12 +297,23 @@ router.post(
         return res.status(400).json({ message: "No image file provided" });
       }
 
-      const url = await uploadUpiQrImageBuffer(req.file.buffer, societyId);
+      let uploadResult;
+      try {
+        uploadResult = await processUpiQrImageUpload(
+          req.file.buffer,
+          societyId,
+          existing.config as Record<string, unknown>,
+        );
+      } catch (err) {
+        const message =
+          err instanceof Error ? err.message : "Failed to read UPI QR code from image";
+        return res.status(400).json({ message });
+      }
 
       const method = await prisma.paymentMethod.update({
         where: { id },
         data: {
-          config: { ...(existing.config as Record<string, unknown>), qrCodeUrl: url } as Prisma.InputJsonValue,
+          config: uploadResult.config as Prisma.InputJsonValue,
         },
       });
 
@@ -237,12 +322,65 @@ router.post(
           ...method,
           config: sanitizeConfigForAdmin(method.type, method.config as Record<string, unknown>),
         },
+        validation: uploadResult.validation,
       });
     } catch (error) {
       next(error);
     }
   },
 );
+
+/**
+ * POST /api/payment-methods/:id/verify-vpa — validate UPI VPA for UPI_VPA type.
+ */
+router.post("/:id/verify-vpa", requireRole(UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const { id } = req.params;
+
+    const existing = await prisma.paymentMethod.findFirst({
+      where: { id, societyId, type: PaymentMethodType.UPI_VPA },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: "UPI VPA payment method not found" });
+    }
+
+    const vpaRaw = (existing.config as Record<string, unknown>).vpa;
+    if (typeof vpaRaw !== "string" || !vpaRaw.trim()) {
+      return res.status(400).json({ message: "Enter a UPI VPA before verifying" });
+    }
+
+    let enriched: Record<string, unknown>;
+    try {
+      enriched = enrichUpiVpaConfig(
+        { vpa: vpaRaw },
+        existing.config as Record<string, unknown>,
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Invalid UPI VPA";
+      return res.status(400).json({ message });
+    }
+
+    const method = await prisma.paymentMethod.update({
+      where: { id },
+      data: { config: enriched as Prisma.InputJsonValue },
+    });
+
+    return res.json({
+      method: {
+        ...method,
+        config: sanitizeConfigForAdmin(method.type, method.config as Record<string, unknown>),
+      },
+      validation: {
+        valid: true,
+        vpa: enriched.vpa,
+        message: upiVpaValidationMessage(String(enriched.vpa)),
+      },
+    });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * POST /api/payment-methods/:id/test-connection — test Razorpay/PhonePe credentials.
@@ -322,13 +460,20 @@ residentPaymentMethodsRouter.get(
         orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
       });
 
-      const sanitized = methods.map((m) => ({
-        id: m.id,
-        type: m.type,
-        displayName: m.displayName,
-        sortOrder: m.sortOrder,
-        config: sanitizeConfigForResident(m.type, m.config as Record<string, unknown>),
-      }));
+      const sanitized = methods
+        .filter((m) => {
+          const cfg = m.config as Record<string, unknown>;
+          if (m.type === PaymentMethodType.UPI_QR) return isUpiQrConfigReady(cfg);
+          if (m.type === PaymentMethodType.UPI_VPA) return isUpiVpaConfigReady(cfg);
+          return true;
+        })
+        .map((m) => ({
+          id: m.id,
+          type: m.type,
+          displayName: m.displayName,
+          sortOrder: m.sortOrder,
+          config: sanitizeConfigForResident(m.type, m.config as Record<string, unknown>),
+        }));
 
       // Env-only PhonePe — only inject if no PhonePe row exists at all in the DB
       // (neither enabled nor disabled). If admin created one and disabled it, respect that.

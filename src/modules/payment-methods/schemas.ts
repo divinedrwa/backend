@@ -1,6 +1,5 @@
 import { z } from "zod";
-
-// ── Config schemas per type ──────────────────────────────────────────
+import { UPI_VPA_REGEX } from "../../lib/validateUpiVpa";
 
 const bankTransferConfigSchema = z.object({
   bankName: z.string().trim().min(1),
@@ -13,11 +12,22 @@ const bankTransferConfigSchema = z.object({
 });
 
 const upiVpaConfigSchema = z.object({
-  vpa: z.string().min(3).regex(/@/, "VPA must contain @"),
+  vpa: z
+    .string()
+    .trim()
+    .min(3)
+    .regex(UPI_VPA_REGEX, "Invalid UPI VPA format (use name@bank, e.g. society@okhdfc)"),
+  vpaValidatedAt: z.string().datetime().optional(),
 });
 
 const upiQrConfigSchema = z.object({
   qrCodeUrl: z.string().url().optional(),
+  vpa: z.string().min(3).regex(/@/, "VPA must contain @").optional(),
+  payeeName: z.string().trim().min(1).optional().nullable(),
+  upiPayload: z.string().optional(),
+  hasFixedAmount: z.boolean().optional(),
+  fixedAmount: z.string().optional().nullable(),
+  qrValidatedAt: z.string().datetime().optional(),
 });
 
 const razorpayConfigSchema = z.object({
