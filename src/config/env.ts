@@ -60,6 +60,14 @@ export function validateProductionEnv(): void {
     logger.warn("API_BASE_URL not set — payment gateway callback URLs may be misconfigured.");
   }
 
+  if (!process.env.RAZORPAY_WEBHOOK_SECRET?.trim()) {
+    logger.warn(
+      "RAZORPAY_WEBHOOK_SECRET not set — Razorpay webhooks will fail signature verification "
+        + "unless a per-society webhook secret is configured. Gateway payments would then only "
+        + "settle via client-side polling.",
+    );
+  }
+
   if (errors.length > 0) {
     for (const msg of errors) {
       logger.error({ msg }, "Production env validation failed");

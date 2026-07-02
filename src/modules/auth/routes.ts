@@ -168,7 +168,9 @@ async function createRefreshTokenForUser(userId: string): Promise<string> {
     data: {
       token: hashed,
       userId,
-      expiresAt: new Date(Date.now() + 10 * 365 * 24 * 60 * 60 * 1000), // 10 years — effectively never; revoked on logout
+      // Bounded lifetime; rotation on /refresh keeps active sessions alive, so
+      // a stolen-but-unused token can't stay valid indefinitely.
+      expiresAt: new Date(Date.now() + 90 * 24 * 60 * 60 * 1000), // 90 days
     },
   });
   return raw;

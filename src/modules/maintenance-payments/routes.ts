@@ -85,8 +85,8 @@ router.post(
 
     // 🔥 CRITICAL FIX: Check idempotency key to prevent duplicates
     if (idempotencyKey) {
-      const existing = await prisma.maintenancePayment.findUnique({
-        where: { idempotencyKey },
+      const existing = await prisma.maintenancePayment.findFirst({
+        where: { idempotencyKey, societyId },
         include: {
           villa: { select: { villaNumber: true, ownerName: true } },
           bankAccount: { select: { bankName: true, accountNumber: true } },
@@ -150,6 +150,37 @@ router.post(
   } catch (error: unknown) {
     logger.error({ err: error }, '[Payment] Recording failed');
     
+    // Concurrent retry with the same idempotencyKey lost the race on the
+    // unique constraint — return the winner's payment idempotently.
+    const retryKey = (req.body as { idempotencyKey?: string } | undefined)?.idempotencyKey;
+    const retrySocietyId = req.auth?.societyId;
+    if (
+      retryKey &&
+      retrySocietyId &&
+      error instanceof Prisma.PrismaClientKnownRequestError &&
+      error.code === 'P2002'
+    ) {
+      const target = (error.meta as { target?: string | string[] } | undefined)?.target ?? '';
+      const isKeyConflict = Array.isArray(target)
+        ? target.includes('idempotencyKey')
+        : String(target).includes('idempotencyKey');
+      if (isKeyConflict) {
+        const existing = await prisma.maintenancePayment.findFirst({
+          where: { idempotencyKey: retryKey, societyId: retrySocietyId },
+          include: {
+            villa: { select: { villaNumber: true, ownerName: true } },
+            bankAccount: { select: { bankName: true, accountNumber: true } },
+          },
+        });
+        if (existing) {
+          return res.status(200).json({
+            payment: maskPaymentBankAccount(existing),
+            note: 'Payment already recorded (idempotent)',
+          });
+        }
+      }
+    }
+
     // Sanitize errors for client
     if (error instanceof Error) {
       if (error.message.includes('Unique constraint') || error.message.includes('unique')) {

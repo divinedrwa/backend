@@ -166,6 +166,11 @@ router.post(
       const { societyId } = req.auth!;
       const body = req.body as z.infer<typeof broadcastSchema>;
 
+      // One inbox row is created per targeted active user.
+      const rowsCreated = await prisma.user.count({
+        where: { societyId, isActive: true, role: { in: body.targetRoles } },
+      });
+
       await notifySocietyRoles({
         societyId,
         roles: body.targetRoles,
@@ -176,6 +181,7 @@ router.post(
 
       return res.status(201).json({
         ok: true,
+        rowsCreated,
         firebaseConfigured: isFirebaseConfigured(),
       });
     } catch (error) {
@@ -226,7 +232,12 @@ router.post("/send-test", requireRole(UserRole.ADMIN), async (req, res, next) =>
       body: "If you see this on your phone, push delivery is working.",
       data: { source: "send-test" },
     });
-    return res.json({ ok: true, firebaseConfigured: isFirebaseConfigured() });
+    return res.json({
+      ok: true,
+      rowsCreated: 1,
+      pushAttempted: isFirebaseConfigured(),
+      firebaseConfigured: isFirebaseConfigured(),
+    });
   } catch (error) {
     next(error);
   }

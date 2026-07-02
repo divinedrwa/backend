@@ -50,10 +50,12 @@ describe("buildUpiPaymentIntentUri", () => {
     assert.equal(url.searchParams.get("tn"), "Maintenance 6-2026");
   });
 
-  it("preserves a real merchant QR (mc, encoded @, no sign) and adds amount", () => {
+  it("rebuilds a real merchant QR (mc, encoded @, no sign) as a spec-correct intent", () => {
     // Exact shape of the society's Bank of Maharashtra merchant QR: pa has an
     // encoded @ (%40), mc marks it as a merchant, no signature (directory
-    // lookup), variable amount. Must stay P2M so it dodges the P2P 24h cap.
+    // lookup), variable amount. Must stay P2M so it dodges the P2P 24h cap —
+    // but replayed verbatim, payment apps DECLINE it (missing tr, mode=01
+    // scan-channel claim inside a deep link, %40 pa some apps reject).
     const qr =
       "upi://pay?pa=bom260601340945%40mahb&pn=DIVINE+RESIDENCY+WEL&cu=INR&mc=2741&mode=01&purpose=00";
     const intent = buildUpiPaymentIntentUri({
@@ -63,10 +65,15 @@ describe("buildUpiPaymentIntentUri", () => {
       amount: 1500,
       remark: "Maintenance 6/2026",
     });
-    // pa kept byte-for-byte (encoded @ preserved), mc/mode present → P2M.
-    assert.match(intent, /pa=bom260601340945%40mahb(?:&|$)/);
+    // pa decoded to a literal @; pn re-encoded from '+' form-encoding.
+    assert.match(intent, /pa=bom260601340945@mahb(?:&|$)/);
+    assert.match(intent, /(?:\?|&)pn=DIVINE%20RESIDENCY%20WEL(?:&|$)/);
+    // mc/purpose kept → P2M.
     assert.match(intent, /(?:\?|&)mc=2741(?:&|$)/);
-    assert.match(intent, /(?:\?|&)mode=01(?:&|$)/);
+    assert.match(intent, /(?:\?|&)purpose=00(?:&|$)/);
+    // Intent channel + unique transaction reference.
+    assert.match(intent, /(?:\?|&)mode=04(?:&|$)/);
+    assert.match(intent, /(?:\?|&)tr=MNT[A-Z0-9]+(?:&|$)/);
     assert.match(intent, /(?:\?|&)am=1500\.00(?:&|$)/);
     // exactly one cu param (the stale one is replaced, not duplicated)
     assert.equal((intent.match(/(?:\?|&)cu=/g) ?? []).length, 1);

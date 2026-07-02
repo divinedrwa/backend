@@ -170,16 +170,66 @@ function replaceTransactionFields(uri: string, amount: string, tn: string): stri
   return `${path}?${kept.join("&")}`;
 }
 
+function hasQueryParam(uri: string, name: string): boolean {
+  const query = uri.split("#")[0].split("?").slice(1).join("?");
+  return query.split("&").some((p) => p.split("=")[0].trim().toLowerCase() === name);
+}
+
+/**
+ * Rebuild an unsigned merchant QR into a spec-correct P2M *intent*: decoded
+ * `pa` (literal `@`), `mode=04` (intent channel), a unique `tr` (required by
+ * payment apps for mc-present transactions), keeping `mc`/`purpose`/other
+ * merchant params. Replaying the QR verbatim gets declined at pay time:
+ * `mode=01` claims "scanned QR" while arriving via deep link, `tr` is missing,
+ * and a percent-encoded `pa` reads as an invalid VPA in some apps.
+ */
+function rebuildUnsignedMerchantIntent(uri: string, amount: string, tn: string): string {
+  const noFragment = uri.split("#")[0];
+  const qIndex = noFragment.indexOf("?");
+  const path = noFragment.slice(0, qIndex);
+  const query = noFragment.slice(qIndex + 1);
+
+  const kept: string[] = [];
+  for (const pair of query.split("&")) {
+    if (!pair) continue;
+    const eq = pair.indexOf("=");
+    const key = (eq < 0 ? pair : pair.slice(0, eq)).trim().toLowerCase();
+    // Transaction-specific fields are regenerated below; `mode` is replaced
+    // because the QR's scan-channel value is wrong for a deep link.
+    if (key === "am" || key === "cu" || key === "tn" || key === "tr" || key === "mode") continue;
+    const rawValue = eq < 0 ? "" : pair.slice(eq + 1);
+    const decoded = decodeURIComponent(rawValue.replace(/\+/g, " "));
+    if (key === "pa") {
+      // VPA characters are URI-safe; keep '@' literal — some apps reject a
+      // percent-encoded payee address as invalid.
+      kept.push(`pa=${decoded}`);
+    } else {
+      kept.push(`${key}=${encodeURIComponent(decoded)}`);
+    }
+  }
+
+  kept.push("mode=04");
+  kept.push(`tr=MNT${Date.now().toString(36).toUpperCase()}`);
+  kept.push(`am=${amount}`, "cu=INR");
+  if (tn) kept.push(`tn=${encodeURIComponent(tn)}`);
+
+  return `${path}?${kept.join("&")}`;
+}
+
 /**
  * Build a UPI app intent URI.
  *
- * For a bank/merchant QR the original signed payload is replayed *verbatim* —
- * every field (pa, pn, mc, mode, sign, orgid, tid…) is kept byte-for-byte and
- * only am/cu/tn are set. This keeps the transaction person-to-merchant (P2M):
- * dropping mc/sign would downgrade it to P2P and hit NPCI's per-payee "max
- * payments in 24 hours" inbound cap, and re-encoding the base64 `sign` would
- * break merchant verification. A manual VPA (no signed payload) falls back to a
- * plain P2P intent, which is correct for a personal address.
+ * Signed bank QR (`sign=` present): replayed *verbatim* — every field (pa, pn,
+ * mc, mode, sign, orgid, tid…) kept byte-for-byte and only am/cu/tn set, since
+ * re-encoding the base64 `sign` would break merchant verification.
+ *
+ * Unsigned merchant QR (mc, no sign): rebuilt spec-correct for the intent
+ * channel (see rebuildUnsignedMerchantIntent) while keeping mc so the
+ * transaction stays person-to-merchant (P2M) — dropping mc would downgrade it
+ * to P2P and hit NPCI's per-payee "max payments in 24 hours" inbound cap.
+ *
+ * A manual VPA (no payload) falls back to a plain P2P intent, which is correct
+ * for a personal address.
  */
 export function buildUpiPaymentIntentUri(input: {
   upiPayUri?: string | null;
@@ -197,7 +247,9 @@ export function buildUpiPaymentIntentUri(input: {
     null;
 
   if (resolved && /^upi:\/\/pay\?/i.test(resolved)) {
-    return replaceTransactionFields(resolved, amount, remark);
+    return hasQueryParam(resolved, "sign")
+      ? replaceTransactionFields(resolved, amount, remark)
+      : rebuildUnsignedMerchantIntent(resolved, amount, remark);
   }
 
   // No signed merchant payload → plain P2P intent.

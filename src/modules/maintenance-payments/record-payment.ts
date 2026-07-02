@@ -120,8 +120,8 @@ export async function recordPaymentAndSyncLedgers(
   } as const;
 
   const existingByKey = idempotencyKey
-    ? await tx.maintenancePayment.findUnique({
-        where: { idempotencyKey },
+    ? await tx.maintenancePayment.findFirst({
+        where: { idempotencyKey, societyId },
         include: paymentInclude,
       })
     : null;

@@ -293,8 +293,8 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
     // Idempotency: if the client sent an idempotencyKey, return the existing
     // payment instead of creating a duplicate.
     if (body.idempotencyKey) {
-      const existing = await prisma.maintenancePayment.findUnique({
-        where: { idempotencyKey: body.idempotencyKey },
+      const existing = await prisma.maintenancePayment.findFirst({
+        where: { idempotencyKey: body.idempotencyKey, societyId },
         include: { villa: { select: { villaNumber: true, ownerName: true } } },
       });
       if (existing) {
@@ -561,6 +561,31 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
       if (txErr && typeof txErr === "object" && "statusCode" in txErr) {
         const e = txErr as { statusCode: number; message: string };
         return res.status(e.statusCode).json({ message: e.message });
+      }
+      // Concurrent retry with the same idempotencyKey lost the race on the
+      // unique constraint — return the winner's payment idempotently.
+      if (
+        body.idempotencyKey &&
+        txErr instanceof Prisma.PrismaClientKnownRequestError &&
+        txErr.code === "P2002"
+      ) {
+        const target = (txErr.meta as { target?: string | string[] } | undefined)?.target ?? "";
+        const isKeyConflict = Array.isArray(target)
+          ? target.includes("idempotencyKey")
+          : String(target).includes("idempotencyKey");
+        if (isKeyConflict) {
+          const existing = await prisma.maintenancePayment.findFirst({
+            where: { idempotencyKey: body.idempotencyKey, societyId },
+            include: { villa: { select: { villaNumber: true, ownerName: true } } },
+          });
+          if (existing) {
+            return res.status(200).json({
+              message: "Payment already recorded",
+              payment: existing,
+              deduplicated: true,
+            });
+          }
+        }
       }
       throw txErr;
     }

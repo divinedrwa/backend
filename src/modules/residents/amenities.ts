@@ -3,7 +3,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { BookingStatus, UserRole } from "@prisma/client";
+import { BookingStatus, Prisma, UserRole } from "@prisma/client";
 
 const router = Router();
 
@@ -117,48 +117,68 @@ router.post("/book-amenity", requireRole(UserRole.RESIDENT, UserRole.ADMIN), val
     // partial, fully-contained, AND fully-enveloping overlaps (the previous
     // OR missed the enveloping case). Strict comparisons allow back-to-back
     // slots (an existing booking ending exactly when the new one starts).
-    const conflicts = await prisma.amenityBooking.findMany({
-      where: {
-        amenityId,
-        societyId,
-        status: { in: ["PENDING", "CONFIRMED"] },
-        startTime: { lt: new Date(endTime) },
-        endTime: { gt: new Date(startTime) },
-      },
-    });
-
-    if (conflicts.length > 0) {
-      return res.status(400).json({ message: "Time slot not available" });
-    }
-
-    // Calculate price
-    const hours = (new Date(endTime).getTime() - new Date(startTime).getTime()) / (1000 * 60 * 60);
+    const startDate = new Date(startTime);
+    const endDate = new Date(endTime);
+    const hours = (endDate.getTime() - startDate.getTime()) / (1000 * 60 * 60);
     const totalPrice = hours * Number(amenity.pricePerHour || 0);
 
-    const booking = await prisma.amenityBooking.create({
-      data: {
-        societyId,
-        amenityId,
-        residentId: userId,
-        startTime: new Date(startTime),
-        endTime: new Date(endTime),
-        totalPrice,
-        notes,
-        status: "PENDING", // Requires admin approval
-      },
-      include: {
-        amenity: {
-          select: {
-            name: true,
-            type: true,
-          },
+    // Atomically re-check for an overlapping booking and create, so two
+    // residents booking the same slot concurrently can't both succeed (the
+    // former check-then-create had a TOCTOU gap). Serializable makes the
+    // read+insert conflict-safe; retry once on a serialization failure.
+    const runBooking = () =>
+      prisma.$transaction(
+        async (tx) => {
+          const conflict = await tx.amenityBooking.findFirst({
+            where: {
+              amenityId,
+              societyId,
+              status: { in: ["PENDING", "CONFIRMED"] },
+              startTime: { lt: endDate },
+              endTime: { gt: startDate },
+            },
+            select: { id: true },
+          });
+          if (conflict) return { conflict: true as const, booking: null };
+          const created = await tx.amenityBooking.create({
+            data: {
+              societyId,
+              amenityId,
+              residentId: userId,
+              startTime: startDate,
+              endTime: endDate,
+              totalPrice,
+              notes,
+              status: "PENDING", // Requires admin approval
+            },
+            include: { amenity: { select: { name: true, type: true } } },
+          });
+          return { conflict: false as const, booking: created };
         },
-      },
-    });
+        { isolationLevel: "Serializable" },
+      );
+
+    let result: Awaited<ReturnType<typeof runBooking>>;
+    try {
+      result = await runBooking();
+    } catch (e) {
+      if (
+        e instanceof Prisma.PrismaClientKnownRequestError &&
+        e.code === "P2034"
+      ) {
+        result = await runBooking();
+      } else {
+        throw e;
+      }
+    }
+
+    if (result.conflict) {
+      return res.status(409).json({ message: "Time slot not available" });
+    }
 
     return res.status(201).json({
       message: "Booking request submitted. Awaiting approval.",
-      booking,
+      booking: result.booking,
     });
   } catch (error) {
     next(error);

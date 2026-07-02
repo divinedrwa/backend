@@ -69,6 +69,16 @@ router.post("/:id/verify", async (req, res, next) => {
     // Run payment recording inside transaction, then mark submission verified
     const result = await prisma.$transaction(
       async (tx) => {
+        // Re-check inside the transaction: a concurrent verify that committed
+        // between the pre-check and here must not credit the ledger twice.
+        const fresh = await tx.upiPaymentSubmission.findFirst({
+          where: { id, societyId, status: UpiPaymentStatus.PENDING },
+          select: { id: true },
+        });
+        if (!fresh) {
+          throw Object.assign(new Error("Submission not found or already processed"), { statusCode: 409 });
+        }
+
         const payResult = await recordPaymentAndSyncLedgers(tx, {
           societyId,
           villaId: submission.villaId,
@@ -123,6 +133,10 @@ router.post("/:id/verify", async (req, res, next) => {
 
     return res.json({ payment: result.payment, submission: result.submission });
   } catch (error) {
+    if (error && typeof error === "object" && "statusCode" in error) {
+      const e = error as { statusCode: number; message: string };
+      return res.status(e.statusCode).json({ message: e.message });
+    }
     next(error);
   }
 });
@@ -150,8 +164,11 @@ router.post(
         return res.status(404).json({ message: "Submission not found or already processed" });
       }
 
-      const updated = await prisma.upiPaymentSubmission.update({
-        where: { id },
+      // Guard the status transition: a concurrent verify that committed after
+      // the pre-check must not be overwritten to REJECTED (the ledger would
+      // keep the credit while the submission reads as rejected).
+      const rejected = await prisma.upiPaymentSubmission.updateMany({
+        where: { id, societyId, status: UpiPaymentStatus.PENDING },
         data: {
           status: UpiPaymentStatus.REJECTED,
           rejectionReason,
@@ -159,6 +176,10 @@ router.post(
           verifiedByAdminId: adminId,
         },
       });
+      if (rejected.count === 0) {
+        return res.status(409).json({ message: "Submission was already processed" });
+      }
+      const updated = await prisma.upiPaymentSubmission.findUnique({ where: { id } });
 
       // Notify the submitting resident
       await notifyUser(

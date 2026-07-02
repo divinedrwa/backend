@@ -354,6 +354,7 @@ model UserNotification {
   createdAt DateTime             @default(now())
 
   @@index([userId, createdAt])
+  @@index([userId, readAt])
   @@index([societyId, createdAt])
 }
 
@@ -668,6 +669,7 @@ model VillaMaintenanceSnapshot {
 
   @@unique([cycleId, villaId])
   @@index([villaId])
+  @@index([cycleId, status])
 }
 
 model CycleVillaExclusion {
