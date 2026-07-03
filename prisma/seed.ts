@@ -5,10 +5,56 @@
  *   npm run prisma:seed-demo
  */
 import "dotenv/config";
-import { PrismaClient, UserRole } from "@prisma/client";
+import { PrismaClient, PushPlatform, UserRole } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
+
+/**
+ * Baseline in-app-update version config, read by the mobile app via
+ * `GET /api/public/app-version`. Seeded **create-only** (empty `update`) so
+ * running the seed never clobbers a value a super-admin set from the dashboard.
+ *
+ * Defaults track the current shipping app version — bump these (or override via
+ * env) whenever a new build goes to the store so a fresh DB prompts correctly.
+ * Super-admins can also edit live values at `/super-admin` (PUT /api/super/app-version).
+ */
+async function seedAppVersionConfig() {
+  const androidStoreUrl =
+    process.env.APP_ANDROID_STORE_URL?.trim() ||
+    "https://play.google.com/store/apps/details?id=com.app.gatepass";
+  const iosStoreUrl = process.env.APP_IOS_STORE_URL?.trim() || null;
+
+  const platforms = [
+    {
+      platform: PushPlatform.ANDROID,
+      latestVersion: process.env.APP_ANDROID_LATEST_VERSION?.trim() || "1.1.16",
+      minVersion: process.env.APP_ANDROID_MIN_VERSION?.trim() || "1.1.0",
+      storeUrl: androidStoreUrl,
+    },
+    {
+      platform: PushPlatform.IOS,
+      latestVersion: process.env.APP_IOS_LATEST_VERSION?.trim() || "1.1.16",
+      minVersion: process.env.APP_IOS_MIN_VERSION?.trim() || "1.1.0",
+      storeUrl: iosStoreUrl,
+    },
+  ];
+
+  for (const p of platforms) {
+    await prisma.appVersionConfig.upsert({
+      where: { platform: p.platform },
+      update: {}, // create-only — never overwrite a live super-admin value
+      create: {
+        platform: p.platform,
+        latestVersion: p.latestVersion,
+        minVersion: p.minVersion,
+        storeUrl: p.storeUrl,
+        releaseNotes: "Bug fixes and performance improvements",
+      },
+    });
+    console.log(`   App version (${p.platform}): latest ${p.latestVersion}, min ${p.minVersion}`);
+  }
+}
 
 const adminEmail = (process.env.ADMIN_EMAIL ?? "admin@society.local").trim();
 const adminPassword = (process.env.ADMIN_PASSWORD ?? "ChangeMe123!").trim();
@@ -61,6 +107,8 @@ async function main() {
       isActive: true,
     },
   });
+
+  await seedAppVersionConfig();
 
   console.log("✅ Done.");
   console.log(`   Society: ${society.name}`);

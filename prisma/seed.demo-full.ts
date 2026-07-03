@@ -1,7 +1,47 @@
-import { PrismaClient } from "@prisma/client";
+import { PrismaClient, PushPlatform } from "@prisma/client";
 import bcrypt from "bcryptjs";
 
 const prisma = new PrismaClient();
+
+/**
+ * Baseline in-app-update version config (read by the mobile app via
+ * `GET /api/public/app-version`). Create-only so it never overwrites a value a
+ * super-admin set from `/super-admin`. Defaults track the current shipping app
+ * version — bump these (or override via env) as new builds ship.
+ */
+async function seedAppVersionConfig() {
+  const platforms = [
+    {
+      platform: PushPlatform.ANDROID,
+      latestVersion: process.env.APP_ANDROID_LATEST_VERSION?.trim() || "1.1.16",
+      minVersion: process.env.APP_ANDROID_MIN_VERSION?.trim() || "1.1.0",
+      storeUrl:
+        process.env.APP_ANDROID_STORE_URL?.trim() ||
+        "https://play.google.com/store/apps/details?id=com.app.gatepass",
+    },
+    {
+      platform: PushPlatform.IOS,
+      latestVersion: process.env.APP_IOS_LATEST_VERSION?.trim() || "1.1.16",
+      minVersion: process.env.APP_IOS_MIN_VERSION?.trim() || "1.1.0",
+      storeUrl: process.env.APP_IOS_STORE_URL?.trim() || null,
+    },
+  ];
+
+  for (const p of platforms) {
+    await prisma.appVersionConfig.upsert({
+      where: { platform: p.platform },
+      update: {},
+      create: {
+        platform: p.platform,
+        latestVersion: p.latestVersion,
+        minVersion: p.minVersion,
+        storeUrl: p.storeUrl,
+        releaseNotes: "Bug fixes and performance improvements",
+      },
+    });
+    console.log(`✅ App version config (${p.platform}): latest ${p.latestVersion}, min ${p.minVersion}`);
+  }
+}
 
 async function main() {
   console.log("🌱 Starting seed...");
@@ -242,6 +282,8 @@ async function main() {
   });
 
   console.log("✅ Sample payment created for V-001");
+
+  await seedAppVersionConfig();
 
   console.log("\n🎉 Seed completed successfully!");
   console.log("\n📊 Summary:");
