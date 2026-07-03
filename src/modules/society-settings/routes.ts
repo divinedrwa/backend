@@ -17,7 +17,6 @@ import { uploadBrandingImageBuffer } from "../../services/cloudinaryBranding";
 import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
 import {
   isMissingColumnError,
-  isMissingThemeColorsColumn,
   societyThemeColorsColumnExists,
 } from "../../lib/schemaChecks";
 

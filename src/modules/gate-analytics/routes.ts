@@ -86,7 +86,7 @@ router.get("/visitor-statistics", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "30" } = req.query;
 
-    const daysAgo = parseInt(days as string) || 30;
+    const daysAgo = Math.min(Math.max(parseInt(days as string) || 30, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     // Get all visitors in period
@@ -181,7 +181,7 @@ router.get("/peak-hours", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "30" } = req.query;
 
-    const daysAgo = parseInt(days as string) || 30;
+    const daysAgo = Math.min(Math.max(parseInt(days as string) || 30, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const visitors = await prisma.visitor.findMany({
@@ -252,7 +252,7 @@ router.get("/daily-trend", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "7" } = req.query;
 
-    const daysCount = parseInt(days as string) || 7;
+    const daysCount = Math.min(Math.max(parseInt(days as string) || 7, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysCount);
 
     const visitors = await prisma.visitor.findMany({

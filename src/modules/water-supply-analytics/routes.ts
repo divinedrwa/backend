@@ -22,7 +22,7 @@ router.get("/overview", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "7" } = req.query;
 
-    const daysAgo = parseInt(days as string) || 7;
+    const daysAgo = Math.min(Math.max(parseInt(days as string) || 7, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     // Get all water supply events in period
@@ -157,7 +157,7 @@ router.get("/daily-usage", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "7" } = req.query;
 
-    const daysCount = parseInt(days as string) || 7;
+    const daysCount = Math.min(Math.max(parseInt(days as string) || 7, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysCount);
 
     const events = await prisma.waterSupplyEvent.findMany({
@@ -215,7 +215,7 @@ router.get("/hourly-pattern", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "30" } = req.query;
 
-    const daysAgo = parseInt(days as string) || 30;
+    const daysAgo = Math.min(Math.max(parseInt(days as string) || 30, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const events = await prisma.waterSupplyEvent.findMany({
@@ -328,7 +328,7 @@ router.get("/gate-performance", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { days = "30" } = req.query;
 
-    const daysAgo = parseInt(days as string) || 30;
+    const daysAgo = Math.min(Math.max(parseInt(days as string) || 30, 1), 365);
     const startDate = startOfLocalDayDaysAgo(daysAgo);
 
     const gates = await prisma.gate.findMany({

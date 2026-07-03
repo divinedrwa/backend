@@ -120,6 +120,35 @@ router.post(
 );
 
 /**
+ * PATCH /api/payment-methods/reorder — bulk update sortOrder.
+ * Must be registered before PATCH /:id so "reorder" isn't captured as an id.
+ */
+router.patch(
+  "/reorder",
+  requireRole(UserRole.ADMIN),
+  validateBody(reorderPaymentMethodsSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const { order } = req.body;
+
+      await prisma.$transaction(
+        order.map((item: { id: string; sortOrder: number }) =>
+          prisma.paymentMethod.updateMany({
+            where: { id: item.id, societyId },
+            data: { sortOrder: item.sortOrder },
+          }),
+        ),
+      );
+
+      return res.json({ message: "Reordered" });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
  * PATCH /api/payment-methods/:id — update a payment method.
  */
 router.patch(
@@ -246,34 +275,6 @@ router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
     next(error);
   }
 });
-
-/**
- * PATCH /api/payment-methods/reorder — bulk update sortOrder.
- */
-router.patch(
-  "/reorder",
-  requireRole(UserRole.ADMIN),
-  validateBody(reorderPaymentMethodsSchema),
-  async (req, res, next) => {
-    try {
-      const { societyId } = req.auth!;
-      const { order } = req.body;
-
-      await prisma.$transaction(
-        order.map((item: { id: string; sortOrder: number }) =>
-          prisma.paymentMethod.updateMany({
-            where: { id: item.id, societyId },
-            data: { sortOrder: item.sortOrder },
-          }),
-        ),
-      );
-
-      return res.json({ message: "Reordered" });
-    } catch (error) {
-      next(error);
-    }
-  },
-);
 
 /**
  * POST /api/payment-methods/:id/upload-qr — upload QR image for UPI_QR type.

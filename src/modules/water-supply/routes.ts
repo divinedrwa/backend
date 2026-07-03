@@ -1,10 +1,9 @@
 import { Router } from "express";
 import { z } from "zod";
 import { NotificationCategory, Prisma } from "@prisma/client";
-import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
-import { isWaterTurnedOn } from "../../lib/waterEventAction";
+import { buildWaterToggleNotification, isWaterTurnedOff, isWaterTurnedOn } from "../../lib/waterEventAction";
 import { notifySocietyRoles, notifyUser } from "../../services/notification.service";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -15,7 +14,7 @@ const router = Router();
 const toggleWaterSupplySchema = z.object({
   gateId: z.string(),
   turnedOn: z.boolean(),
-  reason: z.string().trim().optional(),
+  reason: z.string().trim().max(500).optional(),
 });
 
 // POST /api/water-supply/toggle - Turn water ON/OFF (guards only)
@@ -31,6 +30,29 @@ router.post("/toggle", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(
 
     if (!gate) {
       return res.status(404).json({ message: "Gate not found" });
+    }
+
+    // No-op if the gate is already in the requested state
+    const latestEvent = await prisma.waterSupplyEvent.findFirst({
+      where: { societyId, gateId },
+      orderBy: { createdAt: "desc" },
+      include: {
+        gate: {
+          select: {
+            name: true,
+            location: true,
+          },
+        },
+      },
+    });
+    if (
+      latestEvent &&
+      (turnedOn ? isWaterTurnedOn(latestEvent) : isWaterTurnedOff(latestEvent))
+    ) {
+      return res.status(200).json({
+        event: latestEvent,
+        message: `Water supply is already ${turnedOn ? "ON" : "OFF"} at ${gate.name}`,
+      });
     }
 
     // Create water supply event
@@ -53,22 +75,25 @@ router.post("/toggle", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(
       },
     });
 
+    const notification = buildWaterToggleNotification({
+      turnedOn,
+      gateName: event.gate?.name,
+      reason,
+    });
     void notifySocietyRoles({
       societyId,
-      roles: RESIDENT_LIKE_ROLES,
+      roles: notification.roles,
+      title: notification.title,
+      body: notification.body,
       category: NotificationCategory.WATER_SUPPLY,
-      title: turnedOn ? "Water supply ON" : "Water supply OFF",
-      body:
-        reason ??
-        (turnedOn
-          ? `Water supply is ON at ${event.gate?.name ?? "the gate"}.`
-          : `Water supply is OFF at ${event.gate?.name ?? "the gate"}.`),
-      data: { eventId: event.id, gateId, turnedOn: String(turnedOn) },
+      data: { type: notification.type, eventId: event.id, gateId, turnedOn: String(turnedOn) },
     }).catch((err) => logger.error({ err }, "[notifications] water supply push failed"));
 
     return res.status(201).json({
       event,
-      message: `Water supply ${turnedOn ? "turned ON" : "turned OFF"}. Residents have been notified.`,
+      message: turnedOn
+        ? "Water supply turned ON. Residents have been notified."
+        : "Water supply turned OFF. Admins have been notified.",
     });
   } catch (error) {
     next(error);
@@ -120,24 +145,26 @@ router.get("/status", requireAuth, async (req, res, next) => {
       },
     });
 
-    const statusByGate = await Promise.all(
-      gates.map(async (gate) => {
-        const latestEvent = await prisma.waterSupplyEvent.findFirst({
-          where: { gateId: gate.id },
-          orderBy: { createdAt: "desc" },
-        });
+    const latestEvents = await prisma.waterSupplyEvent.findMany({
+      where: { societyId, gateId: { in: gates.map((gate) => gate.id) } },
+      orderBy: { createdAt: "desc" },
+      distinct: ["gateId"],
+    });
+    const latestEventByGateId = new Map(latestEvents.map((event) => [event.gateId, event]));
 
-        return {
-          gateId: gate.id,
-          gate: gate.name,
-          gateName: gate.name,
-          location: gate.location,
-          status: latestEvent && isWaterTurnedOn(latestEvent) ? "ON" : "OFF",
-          lastChanged: latestEvent?.createdAt,
-          reason: latestEvent?.reason,
-        };
-      })
-    );
+    const statusByGate = gates.map((gate) => {
+      const latestEvent = latestEventByGateId.get(gate.id);
+
+      return {
+        gateId: gate.id,
+        gate: gate.name,
+        gateName: gate.name,
+        location: gate.location,
+        status: latestEvent && isWaterTurnedOn(latestEvent) ? "ON" : "OFF",
+        lastChanged: latestEvent?.createdAt,
+        reason: latestEvent?.reason,
+      };
+    });
 
     return res.json({ status: statusByGate });
   } catch (error) {
@@ -155,12 +182,13 @@ router.get("/history", requireAuth, async (req, res, next) => {
     const where: Prisma.WaterSupplyEventWhereInput = { societyId };
     if (gateIdParam) where.gateId = gateIdParam;
 
-    if (startDate || endDate) {
-      const createdAt: Prisma.DateTimeFilter = {};
-      if (startDate) createdAt.gte = new Date(startDate as string);
-      if (endDate) createdAt.lte = new Date(endDate as string);
-      where.createdAt = createdAt;
-    }
+    const createdAt: Prisma.DateTimeFilter = {};
+    // Default to the last 90 days when no start date is supplied
+    createdAt.gte = startDate
+      ? new Date(startDate as string)
+      : new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+    if (endDate) createdAt.lte = new Date(endDate as string);
+    where.createdAt = createdAt;
 
     const events = await prisma.waterSupplyEvent.findMany({
       where,
@@ -172,6 +200,7 @@ router.get("/history", requireAuth, async (req, res, next) => {
         },
       },
       orderBy: { createdAt: "desc" },
+      take: 1000,
     });
 
     // Group by date
