@@ -94,6 +94,7 @@ router.get("/society-theme", requireAuth, async (req, res, next) => {
         where: { id: societyId },
         select: { themeColors: true, splashUrl: true },
       });
+      res.setHeader("Cache-Control", "public, max-age=300");
       return res.json({
         themeColors: society?.themeColors ?? null,
         splashUrl: society?.splashUrl ?? null,
@@ -122,6 +123,7 @@ router.get("/society-appearance/:societyId", async (req, res, next) => {
         where: { id: societyId },
         select: { themeColors: true, splashUrl: true },
       });
+      res.setHeader("Cache-Control", "public, max-age=300");
       return res.json({
         themeColors: society?.themeColors ?? null,
         splashUrl: society?.splashUrl ?? null,

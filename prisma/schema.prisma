@@ -954,6 +954,8 @@ model Visitor {
   @@index([societyId, checkOutAt])
   @@index([societyId, status])
   @@index([societyId, checkInAt])
+  @@index([societyId, checkInTime])
+  @@index([societyId, checkOutTime])
   @@index([checkedInByGuardId])
   @@index([checkedOutByGuardId])
   @@index([preApprovedId])
@@ -1464,6 +1466,7 @@ model Document {
   society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
 
   @@index([societyId])
+  @@index([societyId, createdAt])
 }
 
 // Family Members
@@ -1746,6 +1749,7 @@ model WaterSupplyEvent {
   @@index([societyId])
   @@index([gateId])
   @@index([createdAt])
+  @@index([societyId, gateId, createdAt])
 }
 
 model WaterSupplyRequest {
@@ -1791,6 +1795,7 @@ model GarbageCollectionEvent {
   @@index([societyId])
   @@index([gateId])
   @@index([entryTime])
+  @@index([societyId, exitTime, entryTime])
 }
 
 // Banners & Events (for mobile app carousel)

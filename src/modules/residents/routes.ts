@@ -993,6 +993,7 @@ router.get("/my-documents", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asyn
         societyId,
       },
       orderBy: { createdAt: "desc" },
+      take: 50,
     });
 
     return res.json({ documents, count: documents.length });
@@ -1027,6 +1028,7 @@ router.get("/my-polls", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (r
         },
       },
       orderBy: { createdAt: "desc" },
+      take: 30,
     });
 
     const votesByPollId = new Map<string, string>();

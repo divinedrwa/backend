@@ -418,7 +418,9 @@ function pickMyVisit(v: { villaVisits: unknown[] }) {
 router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
-    const filterRaw = String(req.query.filter ?? "all");
+    // Mobile clients send `?status=pending`; older clients send `?filter=...`.
+    // Prefer `status` when present, fall back to `filter` for back-compat.
+    const filterRaw = String(req.query.status ?? req.query.filter ?? "all");
     const filterParsed = z.enum(["pending", "approved", "rejected", "all"]).safeParse(filterRaw);
     const filter = filterParsed.success ? filterParsed.data : "all";
 
@@ -442,6 +444,14 @@ router.get("/visitor-approval-requests", requireRole(UserRole.RESIDENT, UserRole
       societyId,
       villaVisits: { some: visitSome },
     };
+
+    // For the "pending" tab, push the visitor-level status filter into the query
+    // so we don't fetch 80 rows of every status and drop most of them in JS.
+    // The villa-row approvalStatus === PENDING check still runs below (it targets
+    // this resident's specific villa row, which the aggregate logic needs intact).
+    if (filter === "pending") {
+      baseWhere.status = VISITOR_PENDING_APPROVAL;
+    }
 
     const visitors = await prisma.visitor.findMany({
       where: baseWhere,
