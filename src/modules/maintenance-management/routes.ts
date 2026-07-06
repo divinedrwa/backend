@@ -22,6 +22,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { getCachedMoneySnapshot, invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import collectionRoutes from "./collection-routes";
+import { resolveSnapshotExpectedTotal } from "./snapshot-helpers";
 import { applyVillaCreditAcrossSnapshots, getVillaCreditBalance } from "./credit-walker";
 import {
   buildCycleFinancialDashboardCore,
@@ -972,7 +973,10 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
     }
 
-    const expectedAmt = Number(snapshot.expectedAmount);
+    const expectedAmt = resolveSnapshotExpectedTotal(
+      snapshot.expectedAmount,
+      snapshot.lateFeeAmount,
+    );
     const paidSoFar = Number(snapshot.paidAmount);
     const remaining = Math.round((expectedAmt - paidSoFar) * 100) / 100;
     if (remaining <= 0) {

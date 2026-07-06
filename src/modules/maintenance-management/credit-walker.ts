@@ -1,5 +1,5 @@
 import { Prisma, PrismaClient } from "@prisma/client";
-import { refreshSnapshotStatus } from "./snapshot-helpers";
+import { refreshSnapshotStatus, resolveSnapshotExpectedTotal } from "./snapshot-helpers";
 
 type Tx = Prisma.TransactionClient;
 type ReadDb = PrismaClient | Tx;
@@ -102,7 +102,7 @@ export async function applyVillaCreditAcrossSnapshots(
     if (!snap) continue;
     if (snap.status === "WAIVED") continue;
 
-    const expected = Number(snap.expectedAmount);
+    const expected = resolveSnapshotExpectedTotal(snap.expectedAmount, snap.lateFeeAmount);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
     const availableForCycle = cashThis + creditPool;
     const applied = Math.min(expected, Math.max(0, availableForCycle));
@@ -153,7 +153,7 @@ export async function getVillaCreditBalance(
   const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
       where: { villaId, cycleId: { in: cycleIds } },
-      select: { cycleId: true, expectedAmount: true, status: true },
+      select: { cycleId: true, expectedAmount: true, lateFeeAmount: true, status: true },
     }),
     db.maintenancePayment.groupBy({
       by: ["maintenanceCollectionCycleId"],
@@ -186,7 +186,7 @@ export async function getVillaCreditBalance(
     const snap = snapByCycle.get(cycle.id);
     if (!snap) continue;
     if (snap.status === "WAIVED") continue;
-    const expected = Number(snap.expectedAmount);
+    const expected = resolveSnapshotExpectedTotal(snap.expectedAmount, snap.lateFeeAmount);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
     creditPool = Math.max(0, cashThis + creditPool - expected);
   }
@@ -217,7 +217,7 @@ export async function getVillaCreditBalancesBulk(
   const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
       where: { cycleId: { in: cycleIds } },
-      select: { villaId: true, cycleId: true, expectedAmount: true, status: true },
+      select: { villaId: true, cycleId: true, expectedAmount: true, lateFeeAmount: true, status: true },
     }),
     db.maintenancePayment.groupBy({
       by: ["villaId", "maintenanceCollectionCycleId"],
@@ -236,7 +236,10 @@ export async function getVillaCreditBalancesBulk(
   for (const s of snapshots) {
     let m = villaSnaps.get(s.villaId);
     if (!m) { m = new Map(); villaSnaps.set(s.villaId, m); }
-    m.set(s.cycleId, { expected: Number(s.expectedAmount), status: s.status });
+    m.set(s.cycleId, {
+      expected: resolveSnapshotExpectedTotal(s.expectedAmount, s.lateFeeAmount),
+      status: s.status,
+    });
   }
 
   // Cash per (villa, cycle)

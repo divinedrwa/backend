@@ -1,7 +1,7 @@
 import crypto from "crypto";
 import { BillingPaymentSource, PaymentMode, Prisma } from "@prisma/client";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
-import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
+import { refreshSnapshotStatus, resolveSnapshotExpectedTotal } from "../maintenance-management/snapshot-helpers";
 import {
   ensureMaintenanceCollectionForBillingCycle,
   ensureVillaLedgersAligned,
@@ -141,7 +141,7 @@ export async function syncLedgerForPayment(
   }
 
   const expected =
-    Number(snapshot.expectedAmount) + Number(snapshot.lateFeeAmount ?? 0);
+    resolveSnapshotExpectedTotal(snapshot.expectedAmount, snapshot.lateFeeAmount);
   const paidSoFar = Number(snapshot.paidAmount);
   const appliedToCycle = Math.max(0, Math.min(amountPaidNum, expected - paidSoFar));
   const newPaid = paidSoFar + appliedToCycle;

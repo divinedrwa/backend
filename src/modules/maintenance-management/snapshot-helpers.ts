@@ -1,3 +1,11 @@
+/** Total amount due on a villa snapshot (base maintenance + late fee). */
+export function resolveSnapshotExpectedTotal(
+  expectedAmount: unknown,
+  lateFeeAmount?: unknown | null,
+): number {
+  return Number(expectedAmount) + Number(lateFeeAmount ?? 0);
+}
+
 export function refreshSnapshotStatus(
   expected: number,
   paid: number,
