@@ -320,21 +320,13 @@ export async function computeSocietyMoneySnapshot(
 
   // Advance credit pool — use the shared credit walker (includes billing late
   // fees and unlinked manual adjustments) so society fund UI matches per-villa
-  // admin/resident credit balances.
-  const activeFy = await db.financialYear.findFirst({
-    where: { societyId, status: "ACTIVE" },
-    select: { id: true },
-    orderBy: { startDate: "desc" },
-  });
+  // admin/resident credit balances. The walk is global across ALL financial
+  // years, so it must not be gated on an ACTIVE FY existing — a society
+  // between FYs still holds villa credit.
   let totalAdvanceCredit = 0;
-  if (activeFy) {
-    const creditBalances = await getVillaCreditBalancesBulk(db, {
-      societyId,
-      financialYearId: activeFy.id,
-    });
-    for (const pool of creditBalances.values()) {
-      totalAdvanceCredit += pool;
-    }
+  const creditBalances = await getVillaCreditBalancesBulk(db, { societyId });
+  for (const pool of creditBalances.values()) {
+    totalAdvanceCredit += pool;
   }
 
   // Additional funds + expenses.

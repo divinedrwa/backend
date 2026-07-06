@@ -239,7 +239,6 @@ export async function buildCurrentCycleResponse(input: {
       paymentStatus: payment?.paymentStatus ?? "NONE",
       paidAt: payment?.paidAt?.toISOString() ?? null,
     } as BillingLedgerCycleRow);
-  const ledgerCredit = Math.max(0, currentLedger.balanceBefore);
   const previousDue = Math.max(0, -currentLedger.balanceBefore);
   const remainingDue = Math.max(
     0,
@@ -258,10 +257,14 @@ export async function buildCurrentCycleResponse(input: {
     });
     walkerCredit = result.creditPool;
   }
-  const availableCredit =
-    maintenanceBillingExcluded || isPaid || remainingDue <= 0.005
-      ? 0
-      : Math.max(ledgerCredit, walkerCredit);
+  // Surplus credit remaining AFTER all obligations (same basis as the
+  // no-active-cycle branch). remainingDue above already nets creditApplied,
+  // so showing pre-cycle balance here would double-display the same credit;
+  // and a genuine leftover surplus stays visible even when the cycle is paid.
+  const ledgerSurplus = Math.max(0, ledger.currentBalance);
+  const availableCredit = maintenanceBillingExcluded
+    ? 0
+    : Math.max(ledgerSurplus, walkerCredit);
 
   const serverStatus = deriveCycleStatusUtc(nowUtc, cycle.paymentStartDate, cycle.paymentEndDate);
 
@@ -442,7 +445,6 @@ export async function computeUserBillingLedger(
     let creditApplied: number;
     let paymentStatus: BillingUserPaymentStatus | "NONE";
     let paidAt: string | null;
-    let actualCash = 0;
 
     if (snap) {
       expectedAmount = totalExpected;
@@ -480,24 +482,20 @@ export async function computeUserBillingLedger(
       expectedAmount = totalExpected;
       cashPaidAmount =
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
-      actualCash = cashPaidAmount;
       creditApplied = Math.max(0, Math.min(expectedAmount, rollingBalance));
       paymentStatus = p?.paymentStatus ?? "NONE";
       paidAt = p?.paidAt?.toISOString() ?? null;
     }
 
     const balanceBefore = rollingBalance;
-    let paidAmount: number;
-    if (snap && cashPaidAmount >= expectedAmount - 0.005) {
-      paidAmount = Math.min(expectedAmount, cashPaidAmount);
-      rollingBalance = Math.max(0, cashPaidAmount - expectedAmount);
-    } else if (!snap && cashPaidAmount >= expectedAmount - 0.005) {
-      paidAmount = Math.min(expectedAmount, cashPaidAmount);
-      rollingBalance = Math.max(0, cashPaidAmount - expectedAmount);
-    } else {
-      paidAmount = Math.min(expectedAmount, cashPaidAmount + creditApplied);
-      rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
-    }
+    // paidAmount is capped at expected — cycle overpayment lives in the
+    // rolling balance, not the row.
+    const paidAmount = Math.min(expectedAmount, Math.max(0, cashPaidAmount + creditApplied));
+    // Conservation: balance += cash − expected, ALWAYS. Prior credit is
+    // consumed (or arrears deepened) implicitly through the running balance.
+    // Never reset the balance when a cycle is covered by its own cash — that
+    // silently destroys both carried-forward credit AND unpaid arrears.
+    rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
     const deltaAmount = paidAmount - expectedAmount;
     rows.push({
       cycleId: c.id,
@@ -638,22 +636,19 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
       const ledger = await computeUserBillingLedger(societyId, resident.id);
       const ledgerByCycleId = new Map(ledger.cycles.map((row) => [row.cycleId, row]));
       const paidSet = paidByUser.get(resident.id) ?? new Set<string>();
-      const pendingCycles = overdueCycles.filter((c) => {
+      // Remaining due must net BOTH cash and applied advance credit — a cycle
+      // fully settled from credit shows PAID in the app and must not be nagged.
+      const cycleRemaining = (c: (typeof overdueCycles)[number]): number => {
         const row = ledgerByCycleId.get(c.id);
         if (row) {
-          return Math.max(0, row.expectedAmount - row.cashPaidAmount) > 0.005;
+          return Math.max(0, row.expectedAmount - row.cashPaidAmount - row.creditApplied);
         }
-        return !paidSet.has(c.id);
-      });
+        return paidSet.has(c.id) ? 0 : Number(c.amount);
+      };
+      const pendingCycles = overdueCycles.filter((c) => cycleRemaining(c) > 0.005);
       if (pendingCycles.length === 0) continue;
 
-      const totalDue = pendingCycles.reduce((sum, c) => {
-        const row = ledgerByCycleId.get(c.id);
-        const remaining = row
-          ? Math.max(0, row.expectedAmount - row.cashPaidAmount)
-          : Number(c.amount);
-        return sum + remaining;
-      }, 0);
+      const totalDue = pendingCycles.reduce((sum, c) => sum + cycleRemaining(c), 0);
       const monthsList = pendingCycles.map((c) => c.cycleKey).join(", ");
       const title = "Maintenance dues pending";
       const body =

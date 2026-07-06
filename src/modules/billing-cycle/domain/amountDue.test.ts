@@ -57,16 +57,54 @@ const basePlusLateCycle = {
 };
 
 describe("resolveCreditWalkCycleExpected", () => {
-  it("keeps full cycle obligation for credit walk after base cash is recorded", () => {
+  it("REGRESSION: never synthesizes a billing late fee once the base is settled — walker matches ledger", () => {
+    // A cycle paid on time must not grow a retroactive fee when a later walk
+    // runs after the grace window: that flipped PAID snapshots to PARTIAL and
+    // silently drained the villa's advance-credit pool.
     const afterGrace = new Date("2026-06-20T00:00:00.000Z");
     const snap = {
       expectedAmount: 1000,
       paidAmount: 1000,
       lateFeeAmount: 0,
-      status: "PARTIAL",
+      status: "PAID",
     };
     assert.equal(resolveLedgerCycleExpected(basePlusLateCycle, snap, afterGrace, false).totalExpected, 1000);
+    assert.equal(resolveCreditWalkCycleExpected(snap, basePlusLateCycle, afterGrace, false), 1000);
+  });
+
+  it("charges the billing late fee while the base is still unpaid after grace", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1000,
+      paidAmount: 0,
+      lateFeeAmount: 0,
+      status: "OVERDUE",
+    };
     assert.equal(resolveCreditWalkCycleExpected(snap, basePlusLateCycle, afterGrace, false), 1100);
+    assert.equal(resolveLedgerCycleExpected(basePlusLateCycle, snap, afterGrace, false).totalExpected, 1100);
+  });
+
+  it("always honors a cron-recorded snapshot late fee, even after payment", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1000,
+      paidAmount: 1000,
+      lateFeeAmount: 75,
+      lateFeeAppliedAt: new Date("2026-06-16T00:00:00.000Z"),
+      status: "PARTIAL",
+    };
+    assert.equal(resolveCreditWalkCycleExpected(snap, basePlusLateCycle, afterGrace, false), 1075);
+  });
+
+  it("respects a late-fee waiver for an unpaid cycle", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1000,
+      paidAmount: 0,
+      lateFeeAmount: 0,
+      status: "OVERDUE",
+    };
+    assert.equal(resolveCreditWalkCycleExpected(snap, basePlusLateCycle, afterGrace, true), 1000);
   });
 });
 

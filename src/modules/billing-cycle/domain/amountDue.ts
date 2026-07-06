@@ -141,9 +141,15 @@ export function resolveLedgerCycleExpected(
 
 /**
  * Total obligation for a cycle when walking advance credit.
- * Unlike [resolveLedgerCycleExpected], this keeps the full cycle charge
- * (including billing late fee) even after the base snapshot amount is paid,
- * so cash + advance credit can settle late fees and the pool zeroes correctly.
+ *
+ * Mirrors [resolveLedgerCycleExpected]'s rules so the walker and the resident
+ * ledger always agree on what a cycle owes:
+ * - A cron/admin-recorded snapshot late fee is always part of the obligation
+ *   (cash + advance credit can settle it and the pool zeroes correctly).
+ * - A billing-cycle late fee is only *synthesized* (purely time-based) for
+ *   cycles whose base is still unpaid. A cycle already settled on time must
+ *   never grow a retroactive fee — that would flip PAID snapshots back to
+ *   PARTIAL and silently drain the villa's credit pool.
  */
 export function resolveCreditWalkCycleExpected(
   snap: LedgerSnapshotInput,
@@ -151,12 +157,19 @@ export function resolveCreditWalkCycleExpected(
   nowUtc: Date,
   lateFeeWaived = false,
 ): number {
+  const snapBase = Number(snap.expectedAmount);
   const snapLate = Number(snap.lateFeeAmount ?? 0);
   if (snapLate > 0.005 || snap.lateFeeAppliedAt) {
-    return Number(snap.expectedAmount) + snapLate;
+    return snapBase + snapLate;
+  }
+  // Base already settled — never add a billing-cycle late fee retroactively
+  // (same guard as resolveLedgerCycleExpected).
+  const snapPaid = Number(snap.paidAmount ?? 0);
+  if (snapPaid >= snapBase - 0.005) {
+    return snapBase;
   }
   if (billingCycle) {
     return resolvePerCycleExpectedTotal(billingCycle, snap, nowUtc, lateFeeWaived).totalExpected;
   }
-  return Number(snap.expectedAmount);
+  return snapBase;
 }

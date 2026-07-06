@@ -162,14 +162,38 @@ router.post(
         return;
       }
 
+      const existing = await prisma.userCyclePayment.findUnique({
+        where: { userId_cycleId: { userId: auth.userId, cycleId } },
+      });
+      // Guard BEFORE the credit auto-settle so retries on an already-settled
+      // cycle short-circuit instead of re-running the walker (matches the
+      // cash path, which has always 409'd here).
+      if (existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
+        res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
+        return;
+      }
+
       if (maintenanceAmount <= 0.005) {
-        await prisma.$transaction(async (tx) =>
-          settleBillingCycleFromAdvanceCredit(tx, {
-            societyId: auth.societyId,
-            userId: auth.userId,
-            billingCycleId: cycleId,
-            source: BillingPaymentSource.GATEWAY,
-          }),
+        // Advance credit covers everything. For pay-all this must settle EVERY
+        // pending cycle (oldest → newest so credit flows down the chain) —
+        // settling only the anchor would report N cycles paid while N−1 stay
+        // open in the ledger.
+        const cycleIdsToSettle =
+          payAllQuote && payAllQuote.pendingCycleIds.length > 0
+            ? payAllQuote.pendingCycleIds
+            : [cycleId];
+        await prisma.$transaction(
+          async (tx) => {
+            for (const settleCycleId of cycleIdsToSettle) {
+              await settleBillingCycleFromAdvanceCredit(tx, {
+                societyId: auth.societyId,
+                userId: auth.userId,
+                billingCycleId: settleCycleId,
+                source: BillingPaymentSource.GATEWAY,
+              });
+            }
+          },
+          { timeout: 30000 },
         );
         const paymentRow = await prisma.userCyclePayment.findUnique({
           where: { userId_cycleId: { userId: auth.userId, cycleId } },
@@ -195,14 +219,6 @@ router.post(
       }
 
       const adjustedDue = maintenanceAmount;
-
-      const existing = await prisma.userCyclePayment.findUnique({
-        where: { userId_cycleId: { userId: auth.userId, cycleId } },
-      });
-      if (existing?.paymentStatus === BillingUserPaymentStatus.SUCCESS) {
-        res.status(409).json({ message: "Already paid for this cycle", code: "ALREADY_PAID" });
-        return;
-      }
 
       // Prevent orphaned orders: if a PENDING payment already has a gateway
       // transaction, reconcile with PhonePe first. If still PENDING, return

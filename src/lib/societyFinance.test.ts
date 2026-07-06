@@ -56,13 +56,47 @@ function fakePrisma(opts: {
     additionalFunds = [],
     expenses = [],
   } = opts;
+  // Minimal groupBy fake for the credit walker's two aggregate shapes:
+  // by villa+cycle (linked cash) and by villa+month+year (unlinked rows).
+  const groupBy = async (args: { by: string[]; where?: Record<string, unknown> }) => {
+    const where = args.where ?? {};
+    const mcFilter = Object.prototype.hasOwnProperty.call(where, "maintenanceCollectionCycleId")
+      ? (where.maintenanceCollectionCycleId as { in?: string[] } | null)
+      : undefined;
+    const rows = maintenancePayments.filter((mp) => {
+      if (mcFilter === undefined) return true;
+      if (mcFilter === null) return mp.maintenanceCollectionCycleId === null;
+      if (Array.isArray(mcFilter.in)) {
+        return (
+          mp.maintenanceCollectionCycleId !== null &&
+          mcFilter.in.includes(mp.maintenanceCollectionCycleId)
+        );
+      }
+      return true;
+    });
+    const groups = new Map<string, { key: Record<string, unknown>; sum: number }>();
+    for (const mp of rows) {
+      const rec = mp as unknown as Record<string, unknown>;
+      const key = args.by.map((f) => String(rec[f])).join("|");
+      const g = groups.get(key) ?? {
+        key: Object.fromEntries(args.by.map((f) => [f, rec[f]])),
+        sum: 0,
+      };
+      g.sum += mp.amount;
+      groups.set(key, g);
+    }
+    return [...groups.values()].map((g) => ({ ...g.key, _sum: { amount: g.sum } }));
+  };
+
   return {
     villaMaintenanceSnapshot: { findMany: async () => snapshots },
-    maintenancePayment: { findMany: async () => maintenancePayments },
+    maintenancePayment: { findMany: async () => maintenancePayments, groupBy },
     userCyclePayment: { findMany: async () => userCyclePayments },
     maintenanceCollectionCycle: { findMany: async () => maintenanceCycles },
     additionalFund: { findMany: async () => additionalFunds },
     expense: { findMany: async () => expenses },
+    // Credit walker's billing context — no billing cycles in these scenarios.
+    billingCycle: { findMany: async () => [] },
   } as unknown as PrismaClient;
 }
 

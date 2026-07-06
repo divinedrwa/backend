@@ -35,6 +35,12 @@ function parseCycleMonthYear(cycleKey: string): { month: number; year: number } 
   return { month: now.getMonth() + 1, year: now.getFullYear() };
 }
 
+/** Strict variant — undefined (not "now") when the key is unparsable. */
+function parseCyclePeriodStrict(cycleKey: string): { month: number; year: number } | undefined {
+  const m = /^(\d{4})-(\d{2})$/.exec(cycleKey);
+  return m ? { year: Number(m[1]), month: Number(m[2]) } : undefined;
+}
+
 /**
  * Per-cycle maintenance due — matches hub `remainingDue` and maintenance-pending.
  * Uses ledger snapshot truth (expected incl. late fee − cash paid); no double-counting.
@@ -61,12 +67,22 @@ export async function computeCycleAdjustedDue(
 }
 
 /**
- * Advance credit visible to a resident — max(billing ledger balance, walker pool).
+ * Advance credit usable at checkout for a target cycle.
+ *
+ * The settle path applies credit via the credit walker, so the quote must use
+ * the walker's pool **as it stands entering the target cycle**
+ * (`beforePeriod`) — not the post-everything final pool (which the walk has
+ * already spent on pending cycles) and not the billing-ledger balance (which
+ * can overstate what settlement can actually apply, marking bills paid while
+ * cash is short). Quoting less than settlement can apply merely overpays into
+ * next cycle's credit; quoting more would under-collect — so the walker is
+ * the only safe source. The ledger balance is used solely as a fallback when
+ * the resident has no villa (no snapshots — the walker cannot run).
  */
 export async function resolveAvailableAdvanceCredit(
   societyId: string,
   userId: string,
-  options?: { balanceBefore?: number; financialYearId?: string | null },
+  options?: { balanceBefore?: number; beforePeriod?: { year: number; month: number } },
 ): Promise<number> {
   const ledgerCredit = Math.max(0, options?.balanceBefore ?? 0);
 
@@ -76,25 +92,18 @@ export async function resolveAvailableAdvanceCredit(
   });
   if (!user?.villaId) return ledgerCredit;
 
-  let financialYearId = options?.financialYearId ?? null;
-  if (!financialYearId) {
-    const activeFy = await prisma.financialYear.findFirst({
-      where: { societyId, status: "ACTIVE" },
-      select: { id: true },
-    });
-    financialYearId = activeFy?.id ?? null;
-  }
-  if (!financialYearId) return ledgerCredit;
-
   const { creditPool } = await getVillaCreditBalance(prisma, {
     societyId,
     villaId: user.villaId,
-    financialYearId,
+    beforePeriod: options?.beforePeriod,
   });
-  return Math.max(ledgerCredit, creditPool);
+  return creditPool;
 }
 
-function buildGatewayCheckoutQuote(grossDue: number, availableCredit: number): GatewayCheckoutQuote {
+export function buildGatewayCheckoutQuote(
+  grossDue: number,
+  availableCredit: number,
+): GatewayCheckoutQuote {
   const creditApplied = Math.min(Math.max(0, availableCredit), Math.max(0, grossDue));
   const maintenanceAmount = Math.max(0, grossDue - creditApplied);
   return { grossDue, availableCredit, creditApplied, maintenanceAmount };
@@ -110,7 +119,7 @@ export async function computeGatewayCheckoutQuoteForCycle(
   const grossDue = await computeCycleAdjustedDue(societyId, userId, cycle, ledgerRow);
   const availableCredit = await resolveAvailableAdvanceCredit(societyId, userId, {
     balanceBefore: ledgerRow?.balanceBefore,
-    financialYearId: cycle.financialYearId,
+    beforePeriod: parseCyclePeriodStrict(cycle.cycleKey),
   });
   return buildGatewayCheckoutQuote(grossDue, availableCredit);
 }
@@ -180,13 +189,11 @@ export async function computeGatewayPayAllCheckoutQuote(
   if (!payAll) return null;
 
   const ledger = await computeUserBillingLedger(societyId, userId);
-  const anchorCycle = await prisma.billingCycle.findUnique({
-    where: { id: payAll.anchorCycleId },
-    select: { financialYearId: true },
-  });
+  // Credit entering the oldest pending cycle — it then flows through the
+  // settle chain across every later pending cycle.
   const availableCredit = await resolveAvailableAdvanceCredit(societyId, userId, {
     balanceBefore: ledger.currentBalance,
-    financialYearId: anchorCycle?.financialYearId,
+    beforePeriod: { year: payAll.anchorYear, month: payAll.anchorMonth },
   });
   const checkout = buildGatewayCheckoutQuote(payAll.maintenanceTotal, availableCredit);
 

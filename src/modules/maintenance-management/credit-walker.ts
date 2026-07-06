@@ -1,5 +1,5 @@
 import { Prisma, PrismaClient } from "@prisma/client";
-import { refreshSnapshotStatus } from "./snapshot-helpers";
+import { advanceCreditWalkStep, refreshSnapshotStatus } from "./snapshot-helpers";
 import {
   loadCreditWalkBillingContext,
   resolveWalkExpectedForCycle,
@@ -127,17 +127,11 @@ export async function applyVillaCreditAcrossSnapshots(
 
     const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
-    let applied: number;
-    if (cashThis >= expected - 0.005) {
-      // Cycle fully covered by cash — only cash overpayment carries forward.
-      // Prior credit pool must not persist when it was not needed to settle this cycle.
-      applied = expected;
-      creditPool = Math.max(0, cashThis - expected);
-    } else {
-      const availableForCycle = cashThis + creditPool;
-      applied = Math.min(expected, Math.max(0, availableForCycle));
-      creditPool = Math.max(0, availableForCycle - expected);
-    }
+    // The pool is the villa's money and always carries forward — a cycle
+    // covered by its own cash passes the prior pool through untouched.
+    const step = advanceCreditWalkStep(expected, cashThis, creditPool);
+    const applied = step.applied;
+    creditPool = step.creditPool;
 
     if (!targetFyCycleIds.has(cycle.id)) continue;
 
@@ -164,20 +158,39 @@ export async function applyVillaCreditAcrossSnapshots(
  * villa by walking ALL cycles globally (credit carries across FY boundaries).
  * The `financialYearId` parameter is kept for API compatibility but the walk
  * is not limited to it.
+ *
+ * `beforePeriod`: stop the walk BEFORE cycles at/after this (year, month) and
+ * return the pool available entering that period — exactly the credit the
+ * settle walker would apply to that cycle. Unlinked adjustments dated in the
+ * target period itself are still injected (the settle walk injects them before
+ * consuming). Use for checkout quotes so quoted credit always matches what
+ * settlement can actually apply.
  */
 export async function getVillaCreditBalance(
   db: ReadDb,
-  params: { societyId: string; villaId: string; financialYearId: string },
+  params: {
+    societyId: string;
+    villaId: string;
+    financialYearId?: string;
+    beforePeriod?: { year: number; month: number };
+  },
 ): Promise<{ creditPool: number }> {
-  const { societyId, villaId } = params;
+  const { societyId, villaId, beforePeriod } = params;
   const nowUtc = new Date();
 
-  const cycles = await db.maintenanceCollectionCycle.findMany({
+  let cycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
     select: mcCycleSelect,
   });
-  if (cycles.length === 0) return { creditPool: 0 };
+  if (beforePeriod) {
+    cycles = cycles.filter(
+      (c) =>
+        c.periodYear < beforePeriod.year ||
+        (c.periodYear === beforePeriod.year && c.periodMonth < beforePeriod.month),
+    );
+  }
+  if (cycles.length === 0 && !beforePeriod) return { creditPool: 0 };
 
   const billingCtx = await loadCreditWalkBillingContext(db, societyId, [villaId]);
   const cycleIds = cycles.map((c) => c.id);
@@ -220,11 +233,14 @@ export async function getVillaCreditBalance(
     if (snap.status === "WAIVED") continue;
     const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
-    if (cashThis >= expected - 0.005) {
-      creditPool = Math.max(0, cashThis - expected);
-    } else {
-      creditPool = Math.max(0, cashThis + creditPool - expected);
-    }
+    creditPool = advanceCreditWalkStep(expected, cashThis, creditPool).creditPool;
+  }
+
+  if (beforePeriod) {
+    // The settle walk injects the target period's unlinked adjustments before
+    // consuming credit for it — mirror that so the quote matches settlement.
+    creditPool += unlinkedByPeriod.get(`${beforePeriod.month}:${beforePeriod.year}`) ?? 0;
+    creditPool = Math.max(0, creditPool);
   }
 
   return { creditPool };
@@ -237,7 +253,7 @@ export async function getVillaCreditBalance(
  */
 export async function getVillaCreditBalancesBulk(
   db: ReadDb,
-  params: { societyId: string; financialYearId: string },
+  params: { societyId: string; financialYearId?: string },
 ): Promise<Map<string, number>> {
   const { societyId } = params;
   const nowUtc = new Date();
@@ -305,11 +321,7 @@ export async function getVillaCreditBalancesBulk(
       if (snap.status === "WAIVED") continue;
       const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
       const cash = cashMap.get(cashKey(villaId, cycle.id)) ?? 0;
-      if (cash >= expected - 0.005) {
-        creditPool = Math.max(0, cash - expected);
-      } else {
-        creditPool = Math.max(0, cash + creditPool - expected);
-      }
+      creditPool = advanceCreditWalkStep(expected, cash, creditPool).creditPool;
     }
     result.set(villaId, creditPool);
   }

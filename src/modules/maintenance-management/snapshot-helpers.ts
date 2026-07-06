@@ -6,6 +6,35 @@ export function resolveSnapshotExpectedTotal(
   return Number(expectedAmount) + Number(lateFeeAmount ?? 0);
 }
 
+/**
+ * One step of the advance-credit walk — the single source of truth used by
+ * every credit-walker variant (and the billing ledger's rolling balance
+ * mirrors the same conservation rule).
+ *
+ * Conservation invariant: money in (cash + prior pool) equals money out
+ * (applied to this cycle + pool carried forward). The pool is the villa's
+ * money — it is NEVER discarded, regardless of how the current cycle was
+ * funded. A cycle fully covered by its own cash simply passes the prior pool
+ * through untouched (plus any cash overpayment on top).
+ *
+ * `applied` is capped at `expected` so a snapshot's paidAmount never exceeds
+ * its obligation; the surplus lives in the returned pool instead.
+ */
+export function advanceCreditWalkStep(
+  expected: number,
+  cashThis: number,
+  creditPool: number,
+): { applied: number; creditPool: number } {
+  // cashThis / creditPool may be transiently negative (refund rows, negative
+  // unlinked adjustments injected into the pool) — let them net out here.
+  const available = cashThis + creditPool;
+  const e = Math.max(0, expected);
+  return {
+    applied: Math.min(e, Math.max(0, available)),
+    creditPool: Math.max(0, available - e),
+  };
+}
+
 export function refreshSnapshotStatus(
   expected: number,
   paid: number,
