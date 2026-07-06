@@ -33,6 +33,7 @@
     "smoke:mobile-apis": "tsx scripts/mobile-api/run-smoke.ts",
     "reconcile:villa-credits": "tsx scripts/reconcile-villa-credits.ts",
     "detect:credit-bug-impact": "tsx scripts/detect-credit-bug-impact.ts",
+    "repair:phantom-credit-cash": "tsx scripts/repair-phantom-credit-cash.ts",
     "test": "tsx --test \"src/**/*.test.ts\" \"scripts/**/*.test.ts\"",
     "lint": "eslint \"src/**/*.ts\"",
     "format": "prettier --write \"src/**/*.ts\"",

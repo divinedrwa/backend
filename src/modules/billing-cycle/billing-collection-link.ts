@@ -259,7 +259,30 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
       : BillingUserPaymentStatus.PENDING;
   const paidAt = new Date();
   const source = params.source ?? BillingPaymentSource.GATEWAY;
-  const ucpAmountPaid = params.cashPaidAmount ?? params.paidAmount;
+
+  // UserCyclePayment.amountPaid must represent REAL CASH only — never the
+  // snapshot's total settled amount, which includes applied advance credit.
+  // Storing the total let reconcileVillaLedgerFromUserCyclePayment (which
+  // treats amountPaid as cash) back-fill the credit portion as a phantom
+  // "Billing cash sync" MaintenancePayment row — double-counting the villa's
+  // credit and inflating the society fund. When the caller doesn't pass the
+  // real cash explicitly, derive it from the maintenance cash ledger.
+  let ucpAmountPaid = params.cashPaidAmount;
+  if (ucpAmountPaid === undefined) {
+    const { maintenanceCycleId } = await ensureMaintenanceCollectionForBillingCycle(
+      tx,
+      params.billingCycleId,
+    );
+    const cashAgg = await tx.maintenancePayment.aggregate({
+      where: {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        maintenanceCollectionCycleId: maintenanceCycleId,
+      },
+      _sum: { amount: true },
+    });
+    ucpAmountPaid = Number(cashAgg._sum.amount ?? 0);
+  }
 
   for (const u of primaryResidents) {
     await tx.userCyclePayment.upsert({
