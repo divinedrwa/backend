@@ -14,6 +14,7 @@ export function buildApprovedVehicleSearchWhere(
   societyId: string,
   query?: string,
   category?: string,
+  vehicleType?: string,
 ): Prisma.VehicleWhereInput {
   const where: Prisma.VehicleWhereInput = {
     societyId,
@@ -25,6 +26,16 @@ export function buildApprovedVehicleSearchWhere(
     where.registrationCategory = cat;
   }
 
+  const type = typeof vehicleType === "string" ? vehicleType.trim().toUpperCase() : "";
+  if (
+    type === "TWO_WHEELER" ||
+    type === "FOUR_WHEELER" ||
+    type === "BICYCLE" ||
+    type === "OTHER"
+  ) {
+    where.type = type;
+  }
+
   const trimmed = typeof query === "string" ? query.trim() : "";
   if (!trimmed) return where;
 
@@ -34,11 +45,12 @@ export function buildApprovedVehicleSearchWhere(
     { registrationNumber: { contains: compact, mode: "insensitive" } },
     { ownerLabel: { contains: trimmed, mode: "insensitive" } },
     { notes: { contains: trimmed, mode: "insensitive" } },
+    { parkingSlot: { contains: trimmed, mode: "insensitive" } },
     { villa: { villaNumber: { contains: trimmed, mode: "insensitive" } } },
     { villa: { block: { contains: trimmed, mode: "insensitive" } } },
   ];
 
-  if (digits.length >= 2) {
+  if (digits.length >= 1) {
     or.push({ registrationDigits: { contains: digits } });
   }
 

@@ -227,12 +227,14 @@ router.get("/approved-vehicles", requireRole(UserRole.GUARD), async (req, res, n
     const q = typeof req.query.q === "string" ? req.query.q : undefined;
     const category =
       typeof req.query.category === "string" ? req.query.category : undefined;
+    const vehicleType =
+      typeof req.query.vehicleType === "string" ? req.query.vehicleType : undefined;
     const limitRaw = Number(req.query.limit);
     const limit = Number.isFinite(limitRaw)
       ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200)
       : 100;
 
-    const where = buildApprovedVehicleSearchWhere(societyId, q, category);
+    const where = buildApprovedVehicleSearchWhere(societyId, q, category, vehicleType);
 
     const [rows, total] = await Promise.all([
       prisma.vehicle.findMany({

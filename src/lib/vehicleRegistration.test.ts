@@ -25,4 +25,14 @@ describe("vehicleRegistration", () => {
     const or = and[0]?.OR as { registrationDigits?: { contains: string } }[];
     assert.ok(or.some((clause) => clause.registrationDigits?.contains === "5670"));
   });
+
+  it("filters by vehicle type when provided", () => {
+    const where = buildApprovedVehicleSearchWhere(
+      "soc1",
+      undefined,
+      undefined,
+      "TWO_WHEELER",
+    );
+    assert.equal(where.type, "TWO_WHEELER");
+  });
 });

@@ -6,7 +6,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 const router = Router();
 
 router.use(requireAuth);
-router.use(requireRole(UserRole.ADMIN));
+router.use(requireRole(UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN));
 
 // GET /api/parking-management/overview
 // Get parking overview with all vehicles and slot usage
