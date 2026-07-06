@@ -276,20 +276,25 @@ async function main() {
   // --apply: delete confirmed-phantom rows and re-run the fixed walker per villa.
   let deleted = 0;
   for (const p of removable) {
-    await prisma.$transaction(async (tx) => {
-      const ids = p.phantomRows.map((r) => r.id);
-      const del = await tx.maintenancePayment.deleteMany({ where: { id: { in: ids }, societyId: p.societyId } });
-      deleted += del.count;
-      // Re-derive snapshots/credit per FY touched.
-      const fys = await tx.financialYear.findMany({ where: { societyId: p.societyId }, select: { id: true } });
-      for (const fy of fys) {
-        await applyVillaCreditAcrossSnapshots(tx, {
-          societyId: p.societyId,
-          villaId: p.villaId,
-          financialYearId: fy.id,
-        });
-      }
-    });
+    // Generous timeout: the re-walk runs several queries per FY and Neon adds
+    // network latency — well over the 5s interactive-transaction default.
+    await prisma.$transaction(
+      async (tx) => {
+        const ids = p.phantomRows.map((r) => r.id);
+        const del = await tx.maintenancePayment.deleteMany({ where: { id: { in: ids }, societyId: p.societyId } });
+        deleted += del.count;
+        // Re-derive snapshots/credit per FY touched.
+        const fys = await tx.financialYear.findMany({ where: { societyId: p.societyId }, select: { id: true } });
+        for (const fy of fys) {
+          await applyVillaCreditAcrossSnapshots(tx, {
+            societyId: p.societyId,
+            villaId: p.villaId,
+            financialYearId: fy.id,
+          });
+        }
+      },
+      { timeout: 60000, maxWait: 20000 },
+    );
     console.log(`  ✓ villa ${p.villaNumber ?? p.villaId}: removed ${p.phantomRows.length} row(s), re-walked`);
   }
   console.log(`\n✅ Applied. Deleted ${deleted} phantom row(s) across ${removable.length} villa(s).\n`);
