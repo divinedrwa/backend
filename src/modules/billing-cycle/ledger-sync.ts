@@ -128,6 +128,7 @@ export async function syncLedgerForPayment(
         paidAmount,
         snapStatus: snap?.status ?? "PAID",
         source: BillingPaymentSource.GATEWAY,
+        cashPaidAmount: amountPaidNum,
       });
       return {
         maintenanceCycleId,
@@ -252,12 +253,15 @@ export async function syncLedgerForPayment(
     paidAmount: finalPaid,
     snapStatus: finalStatus,
     source: BillingPaymentSource.GATEWAY,
+    cashPaidAmount: amountPaidNum,
   });
 
   await ensureVillaLedgersAligned(tx, {
     societyId: billingCycle.societyId,
     villaId: user.villaId,
     billingCycleId: row.cycleId,
+    source: BillingPaymentSource.GATEWAY,
+    cashPaidAmount: amountPaidNum,
   });
 
   return { maintenanceCycleId, snapshotStatus: finalStatus, paidAmount: finalPaid };

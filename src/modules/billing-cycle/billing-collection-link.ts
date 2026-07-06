@@ -232,6 +232,8 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
     paidAmount: number;
     snapStatus: string;
     source?: BillingPaymentSource;
+    /** When set (e.g. gateway cash), stored on user_payments instead of snapshot total settled. */
+    cashPaidAmount?: number;
   },
 ): Promise<void> {
   await clearExcludedResidentsUserCyclePayments(tx, {
@@ -257,6 +259,7 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
       : BillingUserPaymentStatus.PENDING;
   const paidAt = new Date();
   const source = params.source ?? BillingPaymentSource.GATEWAY;
+  const ucpAmountPaid = params.cashPaidAmount ?? params.paidAmount;
 
   for (const u of primaryResidents) {
     await tx.userCyclePayment.upsert({
@@ -264,13 +267,13 @@ export async function syncBillingUserCyclePaymentsFromSnapshot(
       create: {
         userId: u.id,
         cycleId: params.billingCycleId,
-        amountPaid: new Prisma.Decimal(params.paidAmount),
+        amountPaid: new Prisma.Decimal(ucpAmountPaid),
         paymentStatus: payStatus,
         source,
         paidAt: payStatus === BillingUserPaymentStatus.SUCCESS ? paidAt : null,
       },
       update: {
-        amountPaid: new Prisma.Decimal(params.paidAmount),
+        amountPaid: new Prisma.Decimal(ucpAmountPaid),
         paymentStatus: payStatus,
         source,
         paidAt: payStatus === BillingUserPaymentStatus.SUCCESS ? paidAt : null,
@@ -459,6 +462,74 @@ export async function postMarkCashToMaintenanceLedger(
 }
 
 /**
+ * Settle a billing cycle using advance credit only (no gateway cash).
+ * Runs the credit walker and aligns user_payments with the maintenance snapshot.
+ */
+export async function settleBillingCycleFromAdvanceCredit(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    userId: string;
+    billingCycleId: string;
+    source?: BillingPaymentSource;
+  },
+): Promise<{ snapStatus: string; paidAmount: number }> {
+  const user = await tx.user.findUnique({
+    where: { id: params.userId },
+    select: { villaId: true },
+  });
+  if (!user?.villaId) {
+    throw new LedgerSyncError("NO_VILLA", "Resident is not linked to a villa.");
+  }
+
+  const billingCycle = await tx.billingCycle.findFirst({
+    where: { id: params.billingCycleId, societyId: params.societyId },
+    select: { financialYearId: true, amount: true, paymentEndDate: true },
+  });
+  if (!billingCycle?.financialYearId) {
+    throw new LedgerSyncError("NO_FINANCIAL_YEAR", "Billing cycle is not linked to a financial year.");
+  }
+
+  const { maintenanceCycleId, dueDate } = await ensureMaintenanceCollectionForBillingCycle(
+    tx,
+    params.billingCycleId,
+  );
+  await ensureVillaSnapshotForMaintenanceCycle(tx, {
+    maintenanceCycleId,
+    villaId: user.villaId,
+    fallbackExpected: Number(billingCycle.amount),
+    dueDate,
+  });
+
+  await applyVillaCreditAcrossSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: user.villaId,
+    financialYearId: billingCycle.financialYearId,
+    throughCycleId: maintenanceCycleId,
+  });
+
+  const snap = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: user.villaId } },
+    select: { paidAmount: true, status: true },
+  });
+  const paidAmount = Number(snap?.paidAmount ?? 0);
+  const snapStatus = snap?.status ?? "PENDING";
+  const source = params.source ?? BillingPaymentSource.GATEWAY;
+
+  await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+    societyId: params.societyId,
+    villaId: user.villaId,
+    billingCycleId: params.billingCycleId,
+    paidAmount,
+    snapStatus,
+    source,
+    cashPaidAmount: 0,
+  });
+
+  return { snapStatus, paidAmount };
+}
+
+/**
  * When `user_payments` shows SUCCESS but maintenance snapshots still read unpaid,
  * backfill MaintenancePayment rows from the billing ledger.
  */
@@ -507,6 +578,35 @@ export async function reconcileVillaLedgerFromUserCyclePayment(
     fallbackExpected: Number(billingCycle.amount),
     dueDate,
   });
+
+  const snapBefore = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: params.villaId } },
+    select: { paidAmount: true, status: true },
+  });
+  if (snapBefore?.status === "PAID" || snapBefore?.status === "WAIVED") {
+    await applyVillaCreditAcrossSnapshots(tx, {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      financialYearId: billingCycle.financialYearId,
+      throughCycleId: maintenanceCycleId,
+    });
+    const snap = await tx.villaMaintenanceSnapshot.findUnique({
+      where: { cycleId_villaId: { cycleId: maintenanceCycleId, villaId: params.villaId } },
+      select: { paidAmount: true, status: true },
+    });
+    if (snap) {
+      await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        billingCycleId: params.billingCycleId,
+        paidAmount: Number(snap.paidAmount),
+        snapStatus: snap.status,
+        source: BillingPaymentSource.GATEWAY,
+        cashPaidAmount: billingPaid,
+      });
+    }
+    return false;
+  }
 
   const cashAgg = await tx.maintenancePayment.aggregate({
     where: {
@@ -567,6 +667,9 @@ export async function ensureVillaLedgersAligned(
     villaId: string;
     billingCycleId: string;
     note?: string;
+    source?: BillingPaymentSource;
+    /** Gateway cash on user_payments — preserved when syncing from snapshot total. */
+    cashPaidAmount?: number;
   },
 ): Promise<void> {
   await reconcileVillaLedgerFromUserCyclePayment(tx, params);
@@ -601,7 +704,8 @@ export async function ensureVillaLedgersAligned(
     billingCycleId: params.billingCycleId,
     paidAmount: Number(snap.paidAmount),
     snapStatus: snap.status,
-    source: BillingPaymentSource.CASH_MANUAL,
+    source: params.source ?? BillingPaymentSource.CASH_MANUAL,
+    cashPaidAmount: params.cashPaidAmount,
   });
 }
 

@@ -18,7 +18,7 @@ import {
   getPublishableKeyForSociety,
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
-import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
+import { ensureMaintenanceCollectionForBillingCycle, settleBillingCycleFromAdvanceCredit } from "./billing-collection-link";
 import { isGatewayLedgerSynced, reconcileRazorpayFromPoll } from "./gateway-payment-settle";
 import { checkRazorpayOrderStatus } from "./services/razorpay-billing";
 import { mergeRazorpayStatusWithLocal } from "../../services/razorpay-status";
@@ -26,12 +26,17 @@ import {
   computeRazorpayCheckoutBreakup,
   getRazorpayGatewayFeeConfigForSociety,
 } from "./services/razorpay-gateway-fee";
-import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
+import {
+  computeGatewayCheckoutQuoteForCycle,
+  computeGatewayPayAllCheckoutQuote,
+} from "./services/gateway-pay-all";
 import {
   buildGatewayCreateOrderLogPayload,
   buildRazorpayMaintenanceOrderNotes,
   loadGatewayPaymentResidentContext,
 } from "./services/razorpay-order-notes";
+import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
+import { invalidateReconcileCache } from "./services/resident-pending-dues";
 
 /** True when the client is continuing the same checkout (back from Razorpay), not a fresh attempt. */
 function isSameRazorpayCheckoutAttempt(
@@ -172,7 +177,7 @@ router.post(
 
       // Idempotency key match is resolved with the cycle payment row after breakup is computed.
       const payAllQuote = payAllPending
-        ? await computePayAllQuote(auth.societyId, auth.userId)
+        ? await computeGatewayPayAllCheckoutQuote(auth.societyId, auth.userId)
         : null;
       if (payAllPending && !payAllQuote) {
         res.status(400).json({ message: "No pending dues to pay", code: "NOTHING_DUE" });
@@ -195,7 +200,6 @@ router.post(
 
       const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
       const currentLedger = ledger.cycles.find((row) => row.cycleId === cycleId);
-      const balanceBefore = currentLedger?.balanceBefore ?? 0;
       const due = computeAmountDueForCycle(
         cycle,
         new Date(),
@@ -205,10 +209,17 @@ router.post(
           }),
         ),
       );
-      const adjustedDue = payAllQuote
-        ? payAllQuote.maintenanceTotal
-        : await computeCycleAdjustedDue(auth.societyId, auth.userId, cycle, currentLedger);
-      if (adjustedDue <= 0) {
+      const checkoutQuote = payAllQuote
+        ? payAllQuote
+        : await computeGatewayCheckoutQuoteForCycle(
+            auth.societyId,
+            auth.userId,
+            cycle,
+            currentLedger,
+          );
+      const { grossDue, availableCredit, creditApplied, maintenanceAmount } = checkoutQuote;
+
+      if (grossDue <= 0.005) {
         const paymentRow = await prisma.userCyclePayment.upsert({
           where: { userId_cycleId: { userId: auth.userId, cycleId } },
           create: {
@@ -234,8 +245,42 @@ router.post(
           paymentId: paymentRow.id,
           totalDue: 0,
           unadjustedDue: due.totalDue,
-          availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
+          availableCreditApplied: 0,
+          autoSettledFromCredit: false,
+        });
+        return;
+      }
+
+      if (maintenanceAmount <= 0.005) {
+        const settled = await prisma.$transaction(async (tx) =>
+          settleBillingCycleFromAdvanceCredit(tx, {
+            societyId: auth.societyId,
+            userId: auth.userId,
+            billingCycleId: cycleId,
+            source: BillingPaymentSource.GATEWAY,
+          }),
+        );
+        const paymentRow = await prisma.userCyclePayment.findUnique({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+        });
+        invalidateMoneySnapshotCache(auth.societyId);
+        const resident = await prisma.user.findUnique({
+          where: { id: auth.userId },
+          select: { villaId: true },
+        });
+        if (resident?.villaId) invalidateReconcileCache(resident.villaId);
+        res.status(201).json({
+          orderId: null,
+          amountPaise: 0,
+          currency: "INR",
+          key: await getPublishableKeyForSociety(auth.societyId),
+          paymentId: paymentRow?.id ?? null,
+          totalDue: 0,
+          grossDue,
+          unadjustedDue: due.totalDue,
+          availableCreditApplied: creditApplied,
           autoSettledFromCredit: true,
+          snapshotStatus: settled.snapStatus,
         });
         return;
       }
@@ -251,7 +296,7 @@ router.post(
       }
 
       const feeConfig = await getRazorpayGatewayFeeConfigForSociety(auth.societyId);
-      const breakup = computeRazorpayCheckoutBreakup(adjustedDue, feeConfig);
+      const breakup = computeRazorpayCheckoutBreakup(maintenanceAmount, feeConfig);
 
       // Reconcile or reuse only for the same checkout attempt (same idempotency key).
       // A new key means the resident reopened pay after failure — mint a fresh order.
@@ -409,8 +454,10 @@ router.post(
         totalPayable: breakup.totalPayable,
         payAllPending: payAllPending === true,
         pendingCycleCount: payAllQuote?.pendingCount ?? 1,
+        grossDue,
         unadjustedDue: due.totalDue,
-        availableCreditApplied: Math.max(0, Math.min(balanceBefore, due.totalDue)),
+        availableCredit,
+        availableCreditApplied: creditApplied,
       });
     } catch (e: unknown) {
       const err = e as { code?: string; statusCode?: number; error?: { description?: string } };

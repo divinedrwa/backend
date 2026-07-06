@@ -1,7 +1,19 @@
 import type { BillingCycle } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
+import { getVillaCreditBalance } from "../../maintenance-management/credit-walker";
 import { computeAmountDueForCycle } from "../domain/amountDue";
 import { computeUserBillingLedger } from "./cycle-service";
+
+export type GatewayCheckoutQuote = {
+  /** Maintenance due before advance credit (matches hub remainingDue). */
+  grossDue: number;
+  /** Advance credit available from billing ledger + credit walker. */
+  availableCredit: number;
+  /** Portion of grossDue covered by advance credit at checkout. */
+  creditApplied: number;
+  /** Cash amount charged via payment gateway (grossDue − creditApplied). */
+  maintenanceAmount: number;
+};
 
 export type PayAllQuote = {
   /** Oldest pending billing cycle — anchor for UserCyclePayment + ledger payment row */
@@ -47,6 +59,63 @@ export async function computeCycleAdjustedDue(
   );
   return Math.max(0, due.totalDue);
 }
+
+/**
+ * Advance credit visible to a resident — max(billing ledger balance, walker pool).
+ */
+export async function resolveAvailableAdvanceCredit(
+  societyId: string,
+  userId: string,
+  options?: { balanceBefore?: number; financialYearId?: string | null },
+): Promise<number> {
+  const ledgerCredit = Math.max(0, options?.balanceBefore ?? 0);
+
+  const user = await prisma.user.findFirst({
+    where: { id: userId, societyId },
+    select: { villaId: true },
+  });
+  if (!user?.villaId) return ledgerCredit;
+
+  let financialYearId = options?.financialYearId ?? null;
+  if (!financialYearId) {
+    const activeFy = await prisma.financialYear.findFirst({
+      where: { societyId, status: "ACTIVE" },
+      select: { id: true },
+    });
+    financialYearId = activeFy?.id ?? null;
+  }
+  if (!financialYearId) return ledgerCredit;
+
+  const { creditPool } = await getVillaCreditBalance(prisma, {
+    societyId,
+    villaId: user.villaId,
+    financialYearId,
+  });
+  return Math.max(ledgerCredit, creditPool);
+}
+
+function buildGatewayCheckoutQuote(grossDue: number, availableCredit: number): GatewayCheckoutQuote {
+  const creditApplied = Math.min(Math.max(0, availableCredit), Math.max(0, grossDue));
+  const maintenanceAmount = Math.max(0, grossDue - creditApplied);
+  return { grossDue, availableCredit, creditApplied, maintenanceAmount };
+}
+
+/** Single-cycle gateway checkout — subtracts advance credit from the cash charge. */
+export async function computeGatewayCheckoutQuoteForCycle(
+  societyId: string,
+  userId: string,
+  cycle: Pick<BillingCycle, "id" | "amount" | "cycleKey" | "lateFee" | "paymentEndDate" | "gracePeriodDays" | "financialYearId">,
+  ledgerRow?: { expectedAmount: number; cashPaidAmount: number; balanceBefore: number },
+): Promise<GatewayCheckoutQuote> {
+  const grossDue = await computeCycleAdjustedDue(societyId, userId, cycle, ledgerRow);
+  const availableCredit = await resolveAvailableAdvanceCredit(societyId, userId, {
+    balanceBefore: ledgerRow?.balanceBefore,
+    financialYearId: cycle.financialYearId,
+  });
+  return buildGatewayCheckoutQuote(grossDue, availableCredit);
+}
+
+export type PayAllCheckoutQuote = PayAllQuote & GatewayCheckoutQuote;
 
 /**
  * Quote for "Pay all" — every billing cycle with remaining maintenance due.
@@ -100,4 +169,26 @@ export async function computePayAllQuote(
     pendingCycleIds,
     pendingCount: pendingCycleIds.length,
   };
+}
+
+/** Pay-all gateway checkout — applies advance credit once against the combined due. */
+export async function computeGatewayPayAllCheckoutQuote(
+  societyId: string,
+  userId: string,
+): Promise<PayAllCheckoutQuote | null> {
+  const payAll = await computePayAllQuote(societyId, userId);
+  if (!payAll) return null;
+
+  const ledger = await computeUserBillingLedger(societyId, userId);
+  const anchorCycle = await prisma.billingCycle.findUnique({
+    where: { id: payAll.anchorCycleId },
+    select: { financialYearId: true },
+  });
+  const availableCredit = await resolveAvailableAdvanceCredit(societyId, userId, {
+    balanceBefore: ledger.currentBalance,
+    financialYearId: anchorCycle?.financialYearId,
+  });
+  const checkout = buildGatewayCheckoutQuote(payAll.maintenanceTotal, availableCredit);
+
+  return { ...payAll, ...checkout };
 }

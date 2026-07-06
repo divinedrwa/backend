@@ -1,6 +1,7 @@
 import { Router } from "express";
 import { z } from "zod";
 import {
+  BillingPaymentSource,
   BillingUserPaymentStatus,
   UserRole,
 } from "@prisma/client";
@@ -13,9 +14,11 @@ import {
   initiatePhonePePayment,
   isPhonePeConfiguredForSociety,
 } from "../../services/phonepe-billing";
-import { computeCycleAdjustedDue, computePayAllQuote } from "./services/gateway-pay-all";
-import { ensureMaintenanceCollectionForBillingCycle } from "./billing-collection-link";
+import { computeGatewayCheckoutQuoteForCycle, computeGatewayPayAllCheckoutQuote } from "./services/gateway-pay-all";
+import { ensureMaintenanceCollectionForBillingCycle, settleBillingCycleFromAdvanceCredit } from "./billing-collection-link";
 import { isGatewayLedgerSynced, reconcilePhonePeFromPoll } from "./gateway-payment-settle";
+import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
+import { invalidateReconcileCache } from "./services/resident-pending-dues";
 
 function buildMerchantTransactionId(cycleKey: string, userId: string): string {
   const safeKey = cycleKey.replace(/[^a-zA-Z0-9]/g, "");
@@ -121,7 +124,7 @@ router.post(
       }
 
       const payAllQuote = payAllPending
-        ? await computePayAllQuote(auth.societyId, auth.userId)
+        ? await computeGatewayPayAllCheckoutQuote(auth.societyId, auth.userId)
         : null;
       if (payAllPending && !payAllQuote) {
         res.status(400).json({ message: "No pending dues to pay", code: "NOTHING_DUE" });
@@ -144,14 +147,54 @@ router.post(
 
       const ledger = await computeUserBillingLedger(auth.societyId, auth.userId);
       const currentLedger = ledger.cycles.find((row) => row.cycleId === cycleId);
-      const adjustedDue = payAllQuote
-        ? payAllQuote.maintenanceTotal
-        : await computeCycleAdjustedDue(auth.societyId, auth.userId, cycle, currentLedger);
+      const checkoutQuote = payAllQuote
+        ? payAllQuote
+        : await computeGatewayCheckoutQuoteForCycle(
+            auth.societyId,
+            auth.userId,
+            cycle,
+            currentLedger,
+          );
+      const { grossDue, creditApplied, maintenanceAmount } = checkoutQuote;
 
-      if (adjustedDue <= 0) {
+      if (grossDue <= 0.005) {
         res.status(400).json({ message: "No amount due for this cycle", code: "NOTHING_DUE" });
         return;
       }
+
+      if (maintenanceAmount <= 0.005) {
+        await prisma.$transaction(async (tx) =>
+          settleBillingCycleFromAdvanceCredit(tx, {
+            societyId: auth.societyId,
+            userId: auth.userId,
+            billingCycleId: cycleId,
+            source: BillingPaymentSource.GATEWAY,
+          }),
+        );
+        const paymentRow = await prisma.userCyclePayment.findUnique({
+          where: { userId_cycleId: { userId: auth.userId, cycleId } },
+        });
+        invalidateMoneySnapshotCache(auth.societyId);
+        const resident = await prisma.user.findUnique({
+          where: { id: auth.userId },
+          select: { villaId: true },
+        });
+        if (resident?.villaId) invalidateReconcileCache(resident.villaId);
+        res.status(201).json({
+          redirectUrl: null,
+          merchantTransactionId: null,
+          paymentId: paymentRow?.id ?? null,
+          totalDue: 0,
+          grossDue,
+          availableCreditApplied: creditApplied,
+          autoSettledFromCredit: true,
+          payAllPending: payAllPending === true,
+          pendingCycleCount: payAllQuote?.pendingCount ?? 1,
+        });
+        return;
+      }
+
+      const adjustedDue = maintenanceAmount;
 
       const existing = await prisma.userCyclePayment.findUnique({
         where: { userId_cycleId: { userId: auth.userId, cycleId } },
@@ -290,6 +333,8 @@ router.post(
         merchantTransactionId: result.merchantTransactionId,
         paymentId: paymentRow.id,
         totalDue: adjustedDue,
+        grossDue,
+        availableCreditApplied: creditApplied,
         payAllPending: payAllPending === true,
         pendingCycleCount: payAllQuote?.pendingCount ?? 1,
       });
