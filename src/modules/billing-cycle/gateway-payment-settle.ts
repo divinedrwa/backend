@@ -5,6 +5,7 @@ import {
   Prisma,
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
+import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import { prisma } from "../../lib/prisma";
 import { notifyUser } from "../../services/notification.service";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
@@ -534,6 +535,7 @@ async function settleGatewayPayment(
 
     if (newlySettled && row.userId) {
       await notifyGatewayBillingPayment(row.userId, row.cycle.id, "success");
+      invalidateMoneySnapshotCache(row.cycle.societyId);
       const villa = await prisma.user.findUnique({
         where: { id: row.userId },
         select: { villaId: true },

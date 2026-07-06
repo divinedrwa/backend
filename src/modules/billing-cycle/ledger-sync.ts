@@ -1,7 +1,11 @@
 import crypto from "crypto";
 import { BillingPaymentSource, PaymentMode, Prisma } from "@prisma/client";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
-import { refreshSnapshotStatus, resolveSnapshotExpectedTotal } from "../maintenance-management/snapshot-helpers";
+import {
+  loadCreditWalkBillingContext,
+  resolveWalkExpectedForCycle,
+} from "../maintenance-management/credit-walk-billing-context";
+import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
 import {
   ensureMaintenanceCollectionForBillingCycle,
   ensureVillaLedgersAligned,
@@ -82,7 +86,15 @@ export async function syncLedgerForPayment(
 
   const maintenanceCycle = await tx.maintenanceCollectionCycle.findUnique({
     where: { id: maintenanceCycleId },
-    select: { id: true, periodMonth: true, periodYear: true, dueDate: true, societyId: true },
+    select: {
+      id: true,
+      periodMonth: true,
+      periodYear: true,
+      periodKey: true,
+      financialYearId: true,
+      dueDate: true,
+      societyId: true,
+    },
   });
   if (!maintenanceCycle) {
     throw new LedgerSyncError("MAINTENANCE_CYCLE_MISSING", "Maintenance collection cycle missing after link");
@@ -126,9 +138,16 @@ export async function syncLedgerForPayment(
   }
 
   const [snapshot] = await tx.$queryRawUnsafe<
-    { id: string; expectedAmount: string; paidAmount: string; lateFeeAmount: string }[]
+    {
+      id: string;
+      expectedAmount: string;
+      paidAmount: string;
+      lateFeeAmount: string;
+      lateFeeAppliedAt: Date | null;
+      status: string;
+    }[]
   >(
-    `SELECT id, "expectedAmount"::text, "paidAmount"::text, "lateFeeAmount"::text FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
+    `SELECT id, "expectedAmount"::text, "paidAmount"::text, "lateFeeAmount"::text, "lateFeeAppliedAt", status FROM "VillaMaintenanceSnapshot" WHERE "cycleId" = $1 AND "villaId" = $2 FOR UPDATE`,
     maintenanceCycle.id,
     user.villaId,
   );
@@ -140,8 +159,19 @@ export async function syncLedgerForPayment(
     );
   }
 
-  const expected =
-    resolveSnapshotExpectedTotal(snapshot.expectedAmount, snapshot.lateFeeAmount);
+  const billingCtx = await loadCreditWalkBillingContext(tx, billingCycle.societyId, [
+    user.villaId,
+  ]);
+  const expected = resolveWalkExpectedForCycle(
+    billingCtx,
+    {
+      id: maintenanceCycle.id,
+      financialYearId: maintenanceCycle.financialYearId,
+      periodKey: maintenanceCycle.periodKey,
+    },
+    snapshot,
+    paidAt,
+  );
   const paidSoFar = Number(snapshot.paidAmount);
   const appliedToCycle = Math.max(0, Math.min(amountPaidNum, expected - paidSoFar));
   const newPaid = paidSoFar + appliedToCycle;
@@ -208,12 +238,19 @@ export async function syncLedgerForPayment(
     throughCycleId: maintenanceCycle.id,
   });
 
+  const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
+    where: { id: snapshot.id },
+    select: { paidAmount: true, status: true },
+  });
+  const finalPaid = Number(reconciledSnapshot?.paidAmount ?? newPaid);
+  const finalStatus = reconciledSnapshot?.status ?? snapStatus;
+
   await syncBillingUserCyclePaymentsFromSnapshot(tx, {
     societyId: billingCycle.societyId,
     villaId: user.villaId,
     billingCycleId: row.cycleId,
-    paidAmount: newPaid,
-    snapStatus,
+    paidAmount: finalPaid,
+    snapStatus: finalStatus,
     source: BillingPaymentSource.GATEWAY,
   });
 
@@ -223,5 +260,5 @@ export async function syncLedgerForPayment(
     billingCycleId: row.cycleId,
   });
 
-  return { maintenanceCycleId, snapshotStatus: snapStatus, paidAmount: newPaid };
+  return { maintenanceCycleId, snapshotStatus: finalStatus, paidAmount: finalPaid };
 }

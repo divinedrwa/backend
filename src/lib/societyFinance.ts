@@ -1,4 +1,5 @@
 import { Prisma } from "@prisma/client";
+import { getVillaCreditBalancesBulk } from "../modules/maintenance-management/credit-walker";
 import { prisma as defaultPrisma } from "./prisma";
 
 type Db = Prisma.TransactionClient | typeof defaultPrisma;
@@ -317,52 +318,23 @@ export async function computeSocietyMoneySnapshot(
     );
   }
 
-  // Advance credit pool: single global walk across ALL cycles chronologically.
-  // Unlike the credit-walker (which operates per-FY for admin actions), the
-  // dashboard snapshot must let credit carry across FY boundaries — a villa's
-  // overpayment in FY1 can cover dues in FY2.
-  //
-  // Index unlinked payments by (villaId, month, year) for per-period injection.
-  const unlinkedByVillaPeriod = new Map<string, number>();
-  for (const mp of maintenancePayments) {
-    if (mp.maintenanceCollectionCycleId) continue;
-    const v = Number(mp.amount);
-    if (Math.abs(v) < 0.005) continue;
-    const k = `${mp.villaId}:${mp.month}:${mp.year}`;
-    unlinkedByVillaPeriod.set(k, (unlinkedByVillaPeriod.get(k) ?? 0) + v);
-  }
-  // Per-villa linked cash indexed by (villaId, cycleId) — use raw MP sums
-  // (NOT reconciled cashRows). The credit-walker uses MP only, and we must
-  // match it. Using reconciled max(MP, UCP) inflates the credit when a cycle
-  // has both credit-applied UCP and real cash MP (UCP = credit + cash > MP).
-  const linkedCashByVillaCycle = new Map<string, number>();
-  for (const mp of maintenancePayments) {
-    if (!mp.maintenanceCollectionCycleId) continue;
-    const k = `${mp.villaId}:${mp.maintenanceCollectionCycleId}`;
-    linkedCashByVillaCycle.set(k, (linkedCashByVillaCycle.get(k) ?? 0) + Number(mp.amount));
-  }
-  // Snapshot expected by (villaId, cycleId)
-  const snapExpected = new Map<string, { expected: number; status: string }>();
-  const villaIds = new Set<string>();
-  for (const s of snapshots) {
-    snapExpected.set(`${s.villaId}:${s.cycleId}`, { expected: Number(s.expectedAmount), status: s.status });
-    villaIds.add(s.villaId);
-  }
-  // Walk ALL cycles in chronological order per villa. Unlinked adjustments
-  // are injected at the cycle whose period matches their (month, year).
+  // Advance credit pool — use the shared credit walker (includes billing late
+  // fees and unlinked manual adjustments) so society fund UI matches per-villa
+  // admin/resident credit balances.
+  const activeFy = await db.financialYear.findFirst({
+    where: { societyId, status: "ACTIVE" },
+    select: { id: true },
+    orderBy: { startDate: "desc" },
+  });
   let totalAdvanceCredit = 0;
-  for (const villaId of villaIds) {
-    let creditPool = 0;
-    for (const cycle of maintenanceCycles) {
-      // Inject unlinked adjustments that match this cycle's period
-      creditPool += unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
-      const snap = snapExpected.get(`${villaId}:${cycle.id}`);
-      if (!snap) continue;
-      if (snap.status === "WAIVED") continue;
-      const cash = linkedCashByVillaCycle.get(`${villaId}:${cycle.id}`) ?? 0;
-      creditPool = Math.max(0, cash + creditPool - snap.expected);
+  if (activeFy) {
+    const creditBalances = await getVillaCreditBalancesBulk(db, {
+      societyId,
+      financialYearId: activeFy.id,
+    });
+    for (const pool of creditBalances.values()) {
+      totalAdvanceCredit += pool;
     }
-    totalAdvanceCredit += creditPool;
   }
 
   // Additional funds + expenses.

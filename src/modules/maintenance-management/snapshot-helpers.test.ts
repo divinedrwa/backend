@@ -17,15 +17,10 @@ describe("resolveSnapshotExpectedTotal", () => {
 function walkSingleCycleCreditPool(params: {
   unlinkedCredit: number;
   cashPaid: number;
-  expectedAmount: number;
-  lateFeeAmount: number;
+  walkExpected: number;
 }): number {
   let creditPool = params.unlinkedCredit;
-  const expected = resolveSnapshotExpectedTotal(
-    params.expectedAmount,
-    params.lateFeeAmount,
-  );
-  creditPool = Math.max(0, params.cashPaid + creditPool - expected);
+  creditPool = Math.max(0, params.cashPaid + creditPool - params.walkExpected);
   return creditPool;
 }
 
@@ -34,18 +29,16 @@ describe("credit walker pool with late fees", () => {
     const remaining = walkSingleCycleCreditPool({
       unlinkedCredit: 100,
       cashPaid: 1000,
-      expectedAmount: 1000,
-      lateFeeAmount: 100,
+      walkExpected: 1100,
     });
     assert.equal(remaining, 0);
   });
 
-  it("leaves stray credit when late fee is omitted from expected total", () => {
+  it("leaves stray credit when walk expected omits late fee", () => {
     const remaining = walkSingleCycleCreditPool({
       unlinkedCredit: 100,
       cashPaid: 1000,
-      expectedAmount: 1000,
-      lateFeeAmount: 0,
+      walkExpected: 1000,
     });
     assert.equal(remaining, 100);
   });

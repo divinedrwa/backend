@@ -32,6 +32,8 @@ export type BillingLedgerCycleRow = {
   lateFeeAmount: number;
   expectedAmount: number;
   cashPaidAmount: number;
+  /** Advance credit applied toward this cycle (not cash received). */
+  creditApplied: number;
   paidAmount: number;
   deltaAmount: number;
   balanceBefore: number;
@@ -184,7 +186,9 @@ export async function buildCurrentCycleResponse(input: {
         walkerCredit = result.creditPool;
       }
     }
-    const availableCredit = Math.max(ledgerCredit, walkerCredit);
+    const availableCredit = maintenanceBillingExcluded
+      ? 0
+      : Math.max(ledgerCredit, walkerCredit);
 
     return {
       cycleId: null,
@@ -222,6 +226,7 @@ export async function buildCurrentCycleResponse(input: {
       expectedAmount: Number(cycle.amount),
       cashPaidAmount:
         payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0,
+      creditApplied: 0,
       paidAmount:
         payment?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(payment?.amountPaid ?? 0) : 0,
       deltaAmount:
@@ -238,7 +243,7 @@ export async function buildCurrentCycleResponse(input: {
   const previousDue = Math.max(0, -currentLedger.balanceBefore);
   const remainingDue = Math.max(
     0,
-    currentLedger.expectedAmount - currentLedger.cashPaidAmount,
+    currentLedger.expectedAmount - currentLedger.cashPaidAmount - currentLedger.creditApplied,
   );
   const isPaid = remainingDue <= 0.005;
 
@@ -253,7 +258,10 @@ export async function buildCurrentCycleResponse(input: {
     });
     walkerCredit = result.creditPool;
   }
-  const availableCredit = Math.max(ledgerCredit, walkerCredit);
+  const availableCredit =
+    maintenanceBillingExcluded || isPaid || remainingDue <= 0.005
+      ? 0
+      : Math.max(ledgerCredit, walkerCredit);
 
   const serverStatus = deriveCycleStatusUtc(nowUtc, cycle.paymentStartDate, cycle.paymentEndDate);
 
@@ -323,6 +331,7 @@ export async function computeUserBillingLedger(
       lateFeeAmount: 0,
       expectedAmount: 0,
       cashPaidAmount: 0,
+      creditApplied: 0,
       paidAmount: 0,
       deltaAmount: 0,
       balanceBefore: 0,
@@ -355,6 +364,8 @@ export async function computeUserBillingLedger(
       lateFeeAppliedAt: Date | null;
     }
   >();
+  const billingCycleIdToMcId = new Map<string, string>();
+  let cashByMcId = new Map<string, number>();
 
   const waivers = await prisma.billingLateFeeWaiver.findMany({
     where: { userId, cycleId: { in: cycles.map((c) => c.id) } },
@@ -377,24 +388,40 @@ export async function computeUserBillingLedger(
     );
     const mIds = [...new Set(maintenanceCycles.map((m) => m.id))];
     if (mIds.length > 0) {
-      const snaps = await prisma.villaMaintenanceSnapshot.findMany({
-        where: { villaId, cycleId: { in: mIds } },
-        select: {
-          cycleId: true,
-          expectedAmount: true,
-          paidAmount: true,
-          status: true,
-          lateFeeAmount: true,
-          lateFeeAppliedAt: true,
-        },
-      });
+      const [snaps, cashAgg] = await Promise.all([
+        prisma.villaMaintenanceSnapshot.findMany({
+          where: { villaId, cycleId: { in: mIds } },
+          select: {
+            cycleId: true,
+            expectedAmount: true,
+            paidAmount: true,
+            status: true,
+            lateFeeAmount: true,
+            lateFeeAppliedAt: true,
+          },
+        }),
+        prisma.maintenancePayment.groupBy({
+          by: ["maintenanceCollectionCycleId"],
+          where: { societyId, villaId, maintenanceCollectionCycleId: { in: mIds } },
+          _sum: { amount: true },
+        }),
+      ]);
       const snapByMcId = new Map(snaps.map((s) => [s.cycleId, s]));
+      cashByMcId = new Map<string, number>();
+      for (const row of cashAgg) {
+        if (row.maintenanceCollectionCycleId) {
+          cashByMcId.set(row.maintenanceCollectionCycleId, Number(row._sum.amount || 0));
+        }
+      }
       for (const c of cycles) {
         if (!c.financialYearId) continue;
         const mcId = mcIdByKey.get(`${c.financialYearId}:${c.cycleKey}`);
         if (!mcId) continue;
         const snap = snapByMcId.get(mcId);
-        if (snap) billingCycleIdToSnap.set(c.id, snap);
+        if (snap) {
+          billingCycleIdToSnap.set(c.id, snap);
+          billingCycleIdToMcId.set(c.id, mcId);
+        }
       }
     }
   }
@@ -412,6 +439,7 @@ export async function computeUserBillingLedger(
 
     let expectedAmount: number;
     let cashPaidAmount: number;
+    let creditApplied: number;
     let paymentStatus: BillingUserPaymentStatus | "NONE";
     let paidAt: string | null;
 
@@ -423,17 +451,25 @@ export async function computeUserBillingLedger(
       }
       const gatewayPaid =
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
-      cashPaidAmount = Math.max(snapPaid, gatewayPaid);
+      const mcId = billingCycleIdToMcId.get(c.id);
+      const actualCash = mcId ? (cashByMcId.get(mcId) ?? 0) : gatewayPaid;
+      cashPaidAmount = actualCash;
+
+      const creditFromPrior = Math.max(0, Math.min(expectedAmount, rollingBalance));
+      const totalSettled = Math.min(
+        expectedAmount,
+        Math.max(snapPaid, actualCash + creditFromPrior),
+      );
+      creditApplied = Math.max(0, Math.min(totalSettled, totalSettled - actualCash));
 
       const effectivelyPaid =
         snap.status === "PAID" ||
         snap.status === "WAIVED" ||
-        cashPaidAmount >= expectedAmount - 0.005 ||
-        snapPaid >= expectedAmount - 0.005;
+        totalSettled >= expectedAmount - 0.005;
 
       if (effectivelyPaid) {
         paymentStatus = BillingUserPaymentStatus.SUCCESS;
-      } else if (cashPaidAmount > 0.005 || snap.status === "PARTIAL") {
+      } else if (actualCash > 0.005 || snap.status === "PARTIAL") {
         paymentStatus = BillingUserPaymentStatus.PENDING;
       } else {
         paymentStatus = p?.paymentStatus ?? "NONE";
@@ -443,14 +479,13 @@ export async function computeUserBillingLedger(
       expectedAmount = totalExpected;
       cashPaidAmount =
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
+      creditApplied = Math.max(0, Math.min(expectedAmount, rollingBalance));
       paymentStatus = p?.paymentStatus ?? "NONE";
       paidAt = p?.paidAt?.toISOString() ?? null;
     }
 
     const balanceBefore = rollingBalance;
-    const creditApplied = Math.max(0, Math.min(expectedAmount, balanceBefore));
-    // Keep paidAmount uncapped so cycle-level overpayment is visible as positive delta/credit.
-    const paidAmount = creditApplied + cashPaidAmount;
+    const paidAmount = Math.min(expectedAmount, cashPaidAmount + creditApplied);
     const deltaAmount = paidAmount - expectedAmount;
     rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
     rows.push({
@@ -461,6 +496,7 @@ export async function computeUserBillingLedger(
       lateFeeAmount,
       expectedAmount,
       cashPaidAmount,
+      creditApplied,
       paidAmount,
       deltaAmount,
       balanceBefore,

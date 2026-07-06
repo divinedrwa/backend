@@ -1,8 +1,30 @@
 import { Prisma, PrismaClient } from "@prisma/client";
-import { refreshSnapshotStatus, resolveSnapshotExpectedTotal } from "./snapshot-helpers";
+import { refreshSnapshotStatus } from "./snapshot-helpers";
+import {
+  loadCreditWalkBillingContext,
+  resolveWalkExpectedForCycle,
+} from "./credit-walk-billing-context";
 
 type Tx = Prisma.TransactionClient;
 type ReadDb = PrismaClient | Tx;
+
+const mcCycleSelect = {
+  id: true,
+  financialYearId: true,
+  periodKey: true,
+  dueDate: true,
+  periodMonth: true,
+  periodYear: true,
+} as const;
+
+const snapWalkSelect = {
+  cycleId: true,
+  expectedAmount: true,
+  lateFeeAmount: true,
+  lateFeeAppliedAt: true,
+  paidAmount: true,
+  status: true,
+} as const;
 
 /**
  * Re-derives every `VillaMaintenanceSnapshot.paidAmount` and `status` for a
@@ -39,16 +61,17 @@ export async function applyVillaCreditAcrossSnapshots(
   },
 ): Promise<void> {
   const { societyId, villaId, financialYearId, throughCycleId } = params;
+  const nowUtc = new Date();
 
-  // Fetch ALL cycles across ALL FYs for global walk.
   const allCycles = await tx.maintenanceCollectionCycle.findMany({
     where: { societyId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-    select: { id: true, financialYearId: true, dueDate: true, periodMonth: true, periodYear: true },
+    select: mcCycleSelect,
   });
   if (allCycles.length === 0) return;
 
-  // Determine which cycles are writable (in target FY, up to throughCycleId).
+  const billingCtx = await loadCreditWalkBillingContext(tx, societyId, [villaId]);
+
   const targetFyCycleIds = new Set<string>();
   for (const c of allCycles) {
     if (c.financialYearId !== financialYearId) continue;
@@ -56,7 +79,6 @@ export async function applyVillaCreditAcrossSnapshots(
     if (c.id === throughCycleId) break;
   }
 
-  // Stop the global walk at throughCycleId (no point walking past it).
   let walkCycles = allCycles;
   if (throughCycleId) {
     const idx = allCycles.findIndex((c) => c.id === throughCycleId);
@@ -68,6 +90,7 @@ export async function applyVillaCreditAcrossSnapshots(
   const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
     tx.villaMaintenanceSnapshot.findMany({
       where: { villaId, cycleId: { in: walkCycleIds } },
+      select: { id: true, ...snapWalkSelect },
     }),
     tx.maintenancePayment.groupBy({
       by: ["maintenanceCollectionCycleId"],
@@ -102,13 +125,12 @@ export async function applyVillaCreditAcrossSnapshots(
     if (!snap) continue;
     if (snap.status === "WAIVED") continue;
 
-    const expected = resolveSnapshotExpectedTotal(snap.expectedAmount, snap.lateFeeAmount);
+    const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
     const availableForCycle = cashThis + creditPool;
     const applied = Math.min(expected, Math.max(0, availableForCycle));
     creditPool = Math.max(0, availableForCycle - expected);
 
-    // Only write updates for cycles in the target FY.
     if (!targetFyCycleIds.has(cycle.id)) continue;
 
     const newStatus = refreshSnapshotStatus(expected, applied, cycle.dueDate);
@@ -140,20 +162,22 @@ export async function getVillaCreditBalance(
   params: { societyId: string; villaId: string; financialYearId: string },
 ): Promise<{ creditPool: number }> {
   const { societyId, villaId } = params;
+  const nowUtc = new Date();
 
   const cycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-    select: { id: true, periodMonth: true, periodYear: true },
+    select: mcCycleSelect,
   });
   if (cycles.length === 0) return { creditPool: 0 };
 
+  const billingCtx = await loadCreditWalkBillingContext(db, societyId, [villaId]);
   const cycleIds = cycles.map((c) => c.id);
 
   const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
     db.villaMaintenanceSnapshot.findMany({
       where: { villaId, cycleId: { in: cycleIds } },
-      select: { cycleId: true, expectedAmount: true, lateFeeAmount: true, status: true },
+      select: snapWalkSelect,
     }),
     db.maintenancePayment.groupBy({
       by: ["maintenanceCollectionCycleId"],
@@ -186,7 +210,7 @@ export async function getVillaCreditBalance(
     const snap = snapByCycle.get(cycle.id);
     if (!snap) continue;
     if (snap.status === "WAIVED") continue;
-    const expected = resolveSnapshotExpectedTotal(snap.expectedAmount, snap.lateFeeAmount);
+    const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
     creditPool = Math.max(0, cashThis + creditPool - expected);
   }
@@ -204,21 +228,26 @@ export async function getVillaCreditBalancesBulk(
   params: { societyId: string; financialYearId: string },
 ): Promise<Map<string, number>> {
   const { societyId } = params;
+  const nowUtc = new Date();
 
   const cycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-    select: { id: true, periodMonth: true, periodYear: true },
+    select: mcCycleSelect,
   });
   if (cycles.length === 0) return new Map();
 
   const cycleIds = cycles.map((c) => c.id);
 
-  const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
-    db.villaMaintenanceSnapshot.findMany({
-      where: { cycleId: { in: cycleIds } },
-      select: { villaId: true, cycleId: true, expectedAmount: true, lateFeeAmount: true, status: true },
-    }),
+  const snapshots = await db.villaMaintenanceSnapshot.findMany({
+    where: { cycleId: { in: cycleIds } },
+    select: { villaId: true, ...snapWalkSelect },
+  });
+
+  const villaIds = [...new Set(snapshots.map((s) => s.villaId))];
+  const billingCtx = await loadCreditWalkBillingContext(db, societyId, villaIds);
+
+  const [cashAgg, unlinkedRows] = await Promise.all([
     db.maintenancePayment.groupBy({
       by: ["villaId", "maintenanceCollectionCycleId"],
       where: { societyId, maintenanceCollectionCycleId: { in: cycleIds } },
@@ -231,18 +260,16 @@ export async function getVillaCreditBalancesBulk(
     }),
   ]);
 
-  // Group snapshots per villa, keyed by cycleId
-  const villaSnaps = new Map<string, Map<string, { expected: number; status: string }>>();
+  const villaSnaps = new Map<string, Map<string, (typeof snapshots)[number]>>();
   for (const s of snapshots) {
     let m = villaSnaps.get(s.villaId);
-    if (!m) { m = new Map(); villaSnaps.set(s.villaId, m); }
-    m.set(s.cycleId, {
-      expected: resolveSnapshotExpectedTotal(s.expectedAmount, s.lateFeeAmount),
-      status: s.status,
-    });
+    if (!m) {
+      m = new Map();
+      villaSnaps.set(s.villaId, m);
+    }
+    m.set(s.cycleId, s);
   }
 
-  // Cash per (villa, cycle)
   const cashKey = (vid: string, cid: string) => `${vid}|${cid}`;
   const cashMap = new Map<string, number>();
   for (const row of cashAgg) {
@@ -264,8 +291,9 @@ export async function getVillaCreditBalancesBulk(
       const snap = snapsPerCycle.get(cycle.id);
       if (!snap) continue;
       if (snap.status === "WAIVED") continue;
+      const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
       const cash = cashMap.get(cashKey(villaId, cycle.id)) ?? 0;
-      creditPool = Math.max(0, cash + creditPool - snap.expected);
+      creditPool = Math.max(0, cash + creditPool - expected);
     }
     result.set(villaId, creditPool);
   }

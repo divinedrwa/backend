@@ -138,3 +138,25 @@ export function resolveLedgerCycleExpected(
     totalExpected: snapBase + billingLate,
   };
 }
+
+/**
+ * Total obligation for a cycle when walking advance credit.
+ * Unlike [resolveLedgerCycleExpected], this keeps the full cycle charge
+ * (including billing late fee) even after the base snapshot amount is paid,
+ * so cash + advance credit can settle late fees and the pool zeroes correctly.
+ */
+export function resolveCreditWalkCycleExpected(
+  snap: LedgerSnapshotInput,
+  billingCycle: BillingCycleDueFields | null | undefined,
+  nowUtc: Date,
+  lateFeeWaived = false,
+): number {
+  const snapLate = Number(snap.lateFeeAmount ?? 0);
+  if (snapLate > 0.005 || snap.lateFeeAppliedAt) {
+    return Number(snap.expectedAmount) + snapLate;
+  }
+  if (billingCycle) {
+    return resolvePerCycleExpectedTotal(billingCycle, snap, nowUtc, lateFeeWaived).totalExpected;
+  }
+  return Number(snap.expectedAmount);
+}

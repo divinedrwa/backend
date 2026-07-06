@@ -120,10 +120,13 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
     const cycle = cycleById.get(row.cycleId);
     const dueDate = cycle?.paymentEndDate ?? null;
     const { month, year } = parseCycleMonthYear(row.cycleKey, dueDate);
-    const creditApplied = Math.max(0, Math.min(row.expectedAmount, row.balanceBefore));
-    // Cash/gateway received for this cycle only — not advance credit from prior cycles.
-    // Residents should see "to pay" when admin marks unpaid even if the villa has credit.
-    const remainingDue = Math.max(0, row.expectedAmount - row.cashPaidAmount);
+    const settledCredit = row.creditApplied;
+    const creditAvailable = Math.max(
+      0,
+      Math.min(row.expectedAmount - row.cashPaidAmount, row.balanceBefore),
+    );
+    const creditApplied = settledCredit > 0.005 ? settledCredit : creditAvailable;
+    const remainingDue = Math.max(0, row.expectedAmount - row.cashPaidAmount - creditApplied);
     const previousDue = Math.max(0, -row.balanceBefore);
     const availableCredit = Math.max(0, row.balanceBefore);
     const isOverdue = Boolean(

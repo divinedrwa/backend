@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   computeAmountDueForCycle,
+  resolveCreditWalkCycleExpected,
   resolvePerCycleExpectedTotal,
   resolvePerCycleLateFee,
   resolveLedgerCycleExpected,
@@ -45,6 +46,27 @@ describe("resolvePerCycleLateFee", () => {
     const totals = resolvePerCycleExpectedTotal(juneCycle, null, afterGrace, true);
     assert.equal(totals.lateFeeAmount, 0);
     assert.equal(totals.totalExpected, 1100);
+  });
+});
+
+const basePlusLateCycle = {
+  amount: 1000,
+  lateFee: 100,
+  paymentEndDate: new Date("2026-06-10T00:00:00.000Z"),
+  gracePeriodDays: 0,
+};
+
+describe("resolveCreditWalkCycleExpected", () => {
+  it("keeps full cycle obligation for credit walk after base cash is recorded", () => {
+    const afterGrace = new Date("2026-06-20T00:00:00.000Z");
+    const snap = {
+      expectedAmount: 1000,
+      paidAmount: 1000,
+      lateFeeAmount: 0,
+      status: "PARTIAL",
+    };
+    assert.equal(resolveLedgerCycleExpected(basePlusLateCycle, snap, afterGrace, false).totalExpected, 1000);
+    assert.equal(resolveCreditWalkCycleExpected(snap, basePlusLateCycle, afterGrace, false), 1100);
   });
 });
 

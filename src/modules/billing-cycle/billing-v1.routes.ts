@@ -1704,6 +1704,15 @@ router.get(
         const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
         payment.invoiceNumber = invoiceNumber;
         data = receiptDataFromPayment(payment);
+        const ledger = await computeUserBillingLedger(auth.societyId, userId);
+        const ledgerRow = ledger.cycles.find((r) => r.cycleId === cycleId);
+        if (ledgerRow) {
+          data.amountDue = ledgerRow.expectedAmount;
+          data.amountPaid = ledgerRow.cashPaidAmount;
+          data.creditApplied = ledgerRow.creditApplied;
+          data.status =
+            ledgerRow.paidAmount >= ledgerRow.expectedAmount - 0.005 ? "PAID" : "PARTIAL";
+        }
         filename = `receipt-${payment.cycle.cycleKey}-${payment.user?.villa?.villaNumber ?? "unit"}.pdf`;
       } else {
         // ── Strategy 2: Build receipt from ledger + user profile ──
@@ -1737,7 +1746,7 @@ router.get(
           ? [villa.block, villa.villaNumber].filter(Boolean).join("-") || villa.villaNumber
           : "-";
 
-        const creditApplied = Math.max(0, Math.min(ledgerRow.expectedAmount, ledgerRow.balanceBefore));
+        const creditApplied = ledgerRow.creditApplied;
 
         data = {
           societyName: cycle.society?.name ?? "Society",
