@@ -1,9 +1,13 @@
 import { Router } from "express";
 import { z } from "zod";
+import { UserRole, VehicleRegistrationCategory, VehicleRegistrationSource } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole } from "@prisma/client";
+import {
+  normalizeRegistrationNumber,
+  registrationDigitsOnly,
+} from "../../lib/vehicleRegistration";
 
 const router = Router();
 
@@ -61,6 +65,8 @@ router.get("/my-vehicles", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
       model: v.model,
       color: v.color,
       parkingSlot: v.parkingSlot,
+      registrationCategory: v.registrationCategory,
+      source: v.source,
       villa: v.villa,
       createdAt: v.createdAt,
     }));
@@ -98,7 +104,7 @@ router.post("/register-vehicle", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
     // Check if vehicle already registered
     const existing = await prisma.vehicle.findFirst({
       where: {
-        registrationNumber,
+        registrationNumber: normalizeRegistrationNumber(registrationNumber),
         societyId,
       },
     });
@@ -107,16 +113,21 @@ router.post("/register-vehicle", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
       return res.status(400).json({ message: "Vehicle already registered" });
     }
 
+    const plate = normalizeRegistrationNumber(registrationNumber);
     const vehicle = await prisma.vehicle.create({
       data: {
         societyId,
         villaId: user.villaId,
-        registrationNumber: registrationNumber.toUpperCase(),
+        registrationNumber: plate,
+        registrationDigits: registrationDigitsOnly(plate),
         type: normalizedType,
         make: make?.trim() || "",
         model: model?.trim() || "",
         color: color?.trim() || "",
         parkingSlot,
+        registrationCategory: VehicleRegistrationCategory.RESIDENT,
+        source: VehicleRegistrationSource.RESIDENT,
+        status: "APPROVED",
       },
     });
 

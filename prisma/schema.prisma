@@ -1324,27 +1324,53 @@ enum VehicleType {
   OTHER
 }
 
+enum VehicleRegistrationCategory {
+  RESIDENT
+  VISITOR
+  OTHER
+}
+
+enum VehicleRegistrationSource {
+  RESIDENT
+  ADMIN
+}
+
+enum VehicleApprovalStatus {
+  APPROVED
+  SUSPENDED
+}
+
 // Vehicle Registration
 model Vehicle {
-  id                  String      @id @default(cuid())
-  societyId           String
-  villaId             String
-  type                VehicleType
-  make                String
-  model               String
-  registrationNumber  String
-  color               String
-  parkingSlot         String?
-  rcCopy              String?
-  createdAt           DateTime    @default(now())
-  updatedAt           DateTime    @updatedAt
+  id                   String                      @id @default(cuid())
+  societyId            String
+  villaId              String?
+  type                 VehicleType
+  make                 String
+  model                String
+  registrationNumber   String
+  /// Digits-only plate for partial search (e.g. guard enters "5670").
+  registrationDigits   String                      @default("")
+  color                String
+  parkingSlot          String?
+  rcCopy               String?
+  registrationCategory VehicleRegistrationCategory @default(RESIDENT)
+  source               VehicleRegistrationSource   @default(RESIDENT)
+  status               VehicleApprovalStatus       @default(APPROVED)
+  ownerLabel           String?
+  notes                String?
+  createdAt            DateTime                    @default(now())
+  updatedAt            DateTime                    @updatedAt
 
   society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  villa   Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  villa   Villa?  @relation(fields: [villaId], references: [id], onDelete: SetNull)
 
   @@unique([societyId, registrationNumber])
   @@index([societyId])
   @@index([villaId])
+  @@index([societyId, status])
+  @@index([societyId, registrationDigits])
+  @@index([societyId, registrationCategory])
 }
 
 // Pre-Approved Visitors with OTP

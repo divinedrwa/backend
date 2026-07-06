@@ -6,6 +6,11 @@ import { validateBody } from "../../middlewares/validate";
 import { UserRole, GateVehicleKind, SocBroadcastKind, IncidentSeverity, NotificationCategory } from "@prisma/client";
 import { resolveGuardLogRange } from "./guardLogRange";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
+import {
+  buildApprovedVehicleSearchWhere,
+  mapVehicleToApi,
+  vehicleInclude,
+} from "../../lib/vehicleRegistration";
 
 const router = Router();
 router.use(requireAuth);
@@ -210,6 +215,40 @@ router.get("/residents-directory", requireRole(UserRole.GUARD), async (req, res,
     });
 
     return res.json({ residents: rows, count: rows.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/guards/approved-vehicles — read-only internal vehicle registry for gate verification
+router.get("/approved-vehicles", requireRole(UserRole.GUARD), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const q = typeof req.query.q === "string" ? req.query.q : undefined;
+    const category =
+      typeof req.query.category === "string" ? req.query.category : undefined;
+    const limitRaw = Number(req.query.limit);
+    const limit = Number.isFinite(limitRaw)
+      ? Math.min(Math.max(Math.trunc(limitRaw), 1), 200)
+      : 100;
+
+    const where = buildApprovedVehicleSearchWhere(societyId, q, category);
+
+    const [rows, total] = await Promise.all([
+      prisma.vehicle.findMany({
+        where,
+        include: vehicleInclude,
+        orderBy: [{ registrationNumber: "asc" }],
+        take: limit,
+      }),
+      prisma.vehicle.count({ where }),
+    ]);
+
+    return res.json({
+      vehicles: rows.map(mapVehicleToApi),
+      count: rows.length,
+      total,
+    });
   } catch (error) {
     next(error);
   }

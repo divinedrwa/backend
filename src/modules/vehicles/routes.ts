@@ -1,23 +1,61 @@
-import { Prisma, UserRole, VehicleType } from "@prisma/client";
+import {
+  Prisma,
+  UserRole,
+  VehicleRegistrationCategory,
+  VehicleRegistrationSource,
+  VehicleType,
+} from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
-import { requireAuth } from "../../middlewares/auth";
+import { requireAuth, isAdminLikeRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { auditFromRequest } from "../../services/audit.service";
+import {
+  buildApprovedVehicleSearchWhere,
+  mapVehicleToApi,
+  normalizeRegistrationNumber,
+  registrationDigitsOnly,
+  vehicleInclude,
+} from "../../lib/vehicleRegistration";
 
 const router = Router();
 
-const createVehicleSchema = z.object({
-  villaId: z.string().cuid(),
-  vehicleNumber: z.string().trim().min(2).max(20),
-  vehicleType: z.nativeEnum(VehicleType),
-  model: z.string().trim().optional(),
-  color: z.string().trim().optional(),
-  parkingSlot: z.string().trim().optional(),
-  rcCopy: z.string().optional()
-});
+const createVehicleSchema = z
+  .object({
+    registrationCategory: z
+      .enum(["RESIDENT", "VISITOR", "OTHER"])
+      .default("RESIDENT"),
+    villaId: z.string().cuid().optional(),
+    vehicleNumber: z.string().trim().min(2).max(20),
+    vehicleType: z.nativeEnum(VehicleType),
+    model: z.string().trim().optional(),
+    color: z.string().trim().optional(),
+    parkingSlot: z.string().trim().optional(),
+    ownerLabel: z.string().trim().optional(),
+    notes: z.string().trim().optional(),
+    rcCopy: z.string().optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.registrationCategory === "RESIDENT" && !data.villaId) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Villa is required for resident vehicles",
+        path: ["villaId"],
+      });
+    }
+    if (
+      (data.registrationCategory === "VISITOR" || data.registrationCategory === "OTHER") &&
+      !data.ownerLabel?.trim()
+    ) {
+      ctx.addIssue({
+        code: "custom",
+        message: "Owner / description is required for visitor and other vehicles",
+        path: ["ownerLabel"],
+      });
+    }
+  });
 
 const updateVehicleSchema = z.object({
   vehicleNumber: z.string().trim().min(2).max(20).optional(),
@@ -25,30 +63,34 @@ const updateVehicleSchema = z.object({
   model: z.string().trim().optional(),
   color: z.string().trim().optional(),
   parkingSlot: z.string().trim().optional(),
-  rcCopy: z.string().optional()
+  ownerLabel: z.string().trim().optional(),
+  notes: z.string().trim().optional(),
+  rcCopy: z.string().optional(),
+  registrationCategory: z.enum(["RESIDENT", "VISITOR", "OTHER"]).optional(),
 });
 
 router.use(requireAuth);
 
+function canManageSocietyVehicles(role: UserRole): boolean {
+  return role === UserRole.SUPER_ADMIN || isAdminLikeRole(role);
+}
+
 // List vehicles
 router.get("/", async (req, res, next) => {
   try {
-    const whereClause: Prisma.VehicleWhereInput = {
-      societyId: req.auth!.societyId
-    };
+    const societyId = req.auth!.societyId;
+    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
+    const category =
+      typeof req.query.category === "string" ? req.query.category : undefined;
 
-    // Residents see only their villa's vehicles
+    const whereClause: Prisma.VehicleWhereInput = buildApprovedVehicleSearchWhere(
+      societyId,
+      search || undefined,
+      category,
+    );
+
     if (req.auth!.role === UserRole.RESIDENT && req.auth!.villaId) {
       whereClause.villaId = req.auth!.villaId;
-    }
-
-    const search = typeof req.query.search === "string" ? req.query.search.trim() : "";
-    if (search) {
-      whereClause.OR = [
-        { registrationNumber: { contains: search, mode: "insensitive" } },
-        { model: { contains: search, mode: "insensitive" } },
-        { villa: { villaNumber: { contains: search, mode: "insensitive" } } },
-      ];
     }
 
     const pagination = getPagination(req);
@@ -72,6 +114,11 @@ router.get("/", async (req, res, next) => {
       model: v.model,
       color: v.color,
       parkingSlot: v.parkingSlot,
+      registrationCategory: v.registrationCategory,
+      source: v.source,
+      status: v.status,
+      ownerLabel: v.ownerLabel,
+      notes: v.notes,
       villa: v.villa,
       createdAt: v.createdAt,
     }));
@@ -83,122 +130,104 @@ router.get("/", async (req, res, next) => {
 });
 
 // Register vehicle
-router.post(
-  "/",
-  validateBody(createVehicleSchema),
-  async (req, res, next) => {
-    try {
-      const body = req.body as z.infer<typeof createVehicleSchema>;
+router.post("/", validateBody(createVehicleSchema), async (req, res, next) => {
+  try {
+    const body = req.body as z.infer<typeof createVehicleSchema>;
+    const auth = req.auth!;
 
-      // Verify villa access
+    if (!canManageSocietyVehicles(auth.role)) {
+      return res.status(403).json({ message: "Only admins can register vehicles from this endpoint" });
+    }
+
+    if (body.villaId) {
       const villa = await prisma.villa.findFirst({
-        where: {
-          id: body.villaId,
-          societyId: req.auth!.societyId
-        }
+        where: { id: body.villaId, societyId: auth.societyId },
       });
-
       if (!villa) {
         return res.status(404).json({ message: "Villa not found" });
       }
-
-      // Residents can only register vehicle for their villa
-      if (req.auth!.role === UserRole.RESIDENT) {
-        if (req.auth!.villaId !== body.villaId) {
-          return res.status(403).json({ message: "Cannot register vehicle for another villa" });
-        }
-      }
-
-      const vehicleData: Prisma.VehicleUncheckedCreateInput = {
-        societyId: req.auth!.societyId,
-        villaId: body.villaId,
-        registrationNumber: body.vehicleNumber.toUpperCase(),
-        type: body.vehicleType,
-        make: body.model?.trim() || "",
-        model: body.model?.trim() || "",
-        color: body.color?.trim() || "",
-      };
-
-      if (body.parkingSlot) vehicleData.parkingSlot = body.parkingSlot;
-      if (body.rcCopy) vehicleData.rcCopy = body.rcCopy;
-
-      const vehicle = await prisma.vehicle.create({
-        data: vehicleData,
-        include: {
-          villa: {
-            select: {
-              villaNumber: true,
-              block: true
-            }
-          }
-        }
-      });
-
-      return res.status(201).json({
-        vehicle: {
-          id: vehicle.id,
-          vehicleNumber: vehicle.registrationNumber,
-          vehicleType: vehicle.type,
-          model: vehicle.model,
-          color: vehicle.color,
-          parkingSlot: vehicle.parkingSlot,
-          villa: vehicle.villa,
-          createdAt: vehicle.createdAt,
-        },
-      });
-    } catch (error) {
-      next(error);
     }
+
+    const registrationNumber = normalizeRegistrationNumber(body.vehicleNumber);
+    const vehicleData: Prisma.VehicleUncheckedCreateInput = {
+      societyId: auth.societyId,
+      villaId: body.villaId ?? null,
+      registrationNumber,
+      registrationDigits: registrationDigitsOnly(registrationNumber),
+      type: body.vehicleType,
+      make: body.model?.trim() || "",
+      model: body.model?.trim() || "",
+      color: body.color?.trim() || "",
+      registrationCategory: body.registrationCategory as VehicleRegistrationCategory,
+      source: VehicleRegistrationSource.ADMIN,
+      status: "APPROVED",
+      ownerLabel: body.ownerLabel?.trim() || null,
+      notes: body.notes?.trim() || null,
+    };
+
+    if (body.parkingSlot) vehicleData.parkingSlot = body.parkingSlot;
+    if (body.rcCopy) vehicleData.rcCopy = body.rcCopy;
+
+    const vehicle = await prisma.vehicle.create({
+      data: vehicleData,
+      include: vehicleInclude,
+    });
+
+    return res.status(201).json({ vehicle: mapVehicleToApi(vehicle) });
+  } catch (error) {
+    next(error);
   }
-);
+});
 
 // Update vehicle
-router.patch(
-  "/:id",
-  validateBody(updateVehicleSchema),
-  async (req, res, next) => {
-    try {
-      const body = req.body as z.infer<typeof updateVehicleSchema>;
-      const { id } = req.params;
+router.patch("/:id", validateBody(updateVehicleSchema), async (req, res, next) => {
+  try {
+    const body = req.body as z.infer<typeof updateVehicleSchema>;
+    const { id } = req.params;
 
-      const whereClause: Prisma.VehicleWhereInput = {
-        id,
-        societyId: req.auth!.societyId
-      };
+    const whereClause: Prisma.VehicleWhereInput = {
+      id,
+      societyId: req.auth!.societyId,
+    };
 
-      // Residents can only update their villa's vehicles
-      if (req.auth!.role === UserRole.RESIDENT && req.auth!.villaId) {
-        whereClause.villaId = req.auth!.villaId;
-      }
-
-      const updateData: Prisma.VehicleUncheckedUpdateInput = {};
-      if (body.vehicleNumber) {
-        updateData.registrationNumber = body.vehicleNumber.toUpperCase();
-      }
-      if (body.vehicleType) updateData.type = body.vehicleType;
-      if (body.model) {
-        updateData.make = body.model.trim();
-        updateData.model = body.model.trim();
-      }
-      if (body.color) updateData.color = body.color;
-      if (body.parkingSlot !== undefined) updateData.parkingSlot = body.parkingSlot;
-      if (body.rcCopy !== undefined) updateData.rcCopy = body.rcCopy;
-
-      const vehicle = await prisma.vehicle.updateMany({
-        where: whereClause,
-        data: updateData
-      });
-
-      if (vehicle.count === 0) {
-        return res.status(404).json({ message: "Vehicle not found" });
-      }
-
-      return res.json({ message: "Vehicle updated" });
-    } catch (error) {
-      next(error);
+    if (req.auth!.role === UserRole.RESIDENT && req.auth!.villaId) {
+      whereClause.villaId = req.auth!.villaId;
     }
+
+    const updateData: Prisma.VehicleUncheckedUpdateInput = {};
+    if (body.vehicleNumber) {
+      const registrationNumber = normalizeRegistrationNumber(body.vehicleNumber);
+      updateData.registrationNumber = registrationNumber;
+      updateData.registrationDigits = registrationDigitsOnly(registrationNumber);
+    }
+    if (body.vehicleType) updateData.type = body.vehicleType;
+    if (body.model) {
+      updateData.make = body.model.trim();
+      updateData.model = body.model.trim();
+    }
+    if (body.color) updateData.color = body.color;
+    if (body.parkingSlot !== undefined) updateData.parkingSlot = body.parkingSlot;
+    if (body.ownerLabel !== undefined) updateData.ownerLabel = body.ownerLabel.trim() || null;
+    if (body.notes !== undefined) updateData.notes = body.notes.trim() || null;
+    if (body.rcCopy !== undefined) updateData.rcCopy = body.rcCopy;
+    if (body.registrationCategory) {
+      updateData.registrationCategory = body.registrationCategory;
+    }
+
+    const vehicle = await prisma.vehicle.updateMany({
+      where: whereClause,
+      data: updateData,
+    });
+
+    if (vehicle.count === 0) {
+      return res.status(404).json({ message: "Vehicle not found" });
+    }
+
+    return res.json({ message: "Vehicle updated" });
+  } catch (error) {
+    next(error);
   }
-);
+});
 
 // Delete vehicle
 router.delete("/:id", async (req, res, next) => {
@@ -207,16 +236,15 @@ router.delete("/:id", async (req, res, next) => {
 
     const whereClause: Prisma.VehicleWhereInput = {
       id,
-      societyId: req.auth!.societyId
+      societyId: req.auth!.societyId,
     };
 
-    // Residents can only delete their villa's vehicles
     if (req.auth!.role === UserRole.RESIDENT && req.auth!.villaId) {
       whereClause.villaId = req.auth!.villaId;
     }
 
     const vehicle = await prisma.vehicle.deleteMany({
-      where: whereClause
+      where: whereClause,
     });
 
     if (vehicle.count === 0) {

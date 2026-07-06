@@ -153,6 +153,7 @@ export const MOBILE_API_CASES: MobileApiCase[] = [
   { name: "guard my patrols", method: "GET", path: "/guards/my-patrols", roles: ["guard"], expect: [200] },
   { name: "guard patrols today", method: "GET", path: "/guards/patrols-today", roles: ["guard"], expect: [200] },
   { name: "guard gate vehicles today", method: "GET", path: "/guards/gate-vehicle/today", roles: ["guard"], expect: [200] },
+  { name: "guard approved vehicles", method: "GET", path: "/guards/approved-vehicles", roles: ["guard"], expect: [200] },
   { name: "guard checklist", method: "GET", path: "/guards/checklist", roles: ["guard"], expect: [200] },
 
   // ── Admin mobile — dashboard & ops ──────────────────────────────────

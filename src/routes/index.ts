@@ -206,6 +206,6 @@ router.use("/guards", guardRoutes); // Dashboard, shift, SOS
 router.use("/guards", guardVisitorRoutes); // Check-in/out
 router.use("/guards", guardParcelRoutes); // Parcel logging
 router.use("/guards", guardPatrolsRoutes); // Patrols, legacy create-incident
-router.use("/guards", guardOperationsRoutes); // Vehicle ledger, SOC, directory, incidents
+router.use("/guards", guardOperationsRoutes); // Vehicle ledger, SOC, directory, incidents, approved vehicles
 
 export default router;
