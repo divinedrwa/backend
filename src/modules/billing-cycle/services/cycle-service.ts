@@ -442,6 +442,7 @@ export async function computeUserBillingLedger(
     let creditApplied: number;
     let paymentStatus: BillingUserPaymentStatus | "NONE";
     let paidAt: string | null;
+    let actualCash = 0;
 
     if (snap) {
       expectedAmount = totalExpected;
@@ -479,15 +480,25 @@ export async function computeUserBillingLedger(
       expectedAmount = totalExpected;
       cashPaidAmount =
         p?.paymentStatus === BillingUserPaymentStatus.SUCCESS ? Number(p.amountPaid) : 0;
+      actualCash = cashPaidAmount;
       creditApplied = Math.max(0, Math.min(expectedAmount, rollingBalance));
       paymentStatus = p?.paymentStatus ?? "NONE";
       paidAt = p?.paidAt?.toISOString() ?? null;
     }
 
     const balanceBefore = rollingBalance;
-    const paidAmount = Math.min(expectedAmount, cashPaidAmount + creditApplied);
+    let paidAmount: number;
+    if (snap && cashPaidAmount >= expectedAmount - 0.005) {
+      paidAmount = Math.min(expectedAmount, cashPaidAmount);
+      rollingBalance = Math.max(0, cashPaidAmount - expectedAmount);
+    } else if (!snap && cashPaidAmount >= expectedAmount - 0.005) {
+      paidAmount = Math.min(expectedAmount, cashPaidAmount);
+      rollingBalance = Math.max(0, cashPaidAmount - expectedAmount);
+    } else {
+      paidAmount = Math.min(expectedAmount, cashPaidAmount + creditApplied);
+      rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
+    }
     const deltaAmount = paidAmount - expectedAmount;
-    rollingBalance = rollingBalance + cashPaidAmount - expectedAmount;
     rows.push({
       cycleId: c.id,
       cycleKey: c.cycleKey,

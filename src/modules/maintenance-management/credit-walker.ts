@@ -127,9 +127,17 @@ export async function applyVillaCreditAcrossSnapshots(
 
     const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
-    const availableForCycle = cashThis + creditPool;
-    const applied = Math.min(expected, Math.max(0, availableForCycle));
-    creditPool = Math.max(0, availableForCycle - expected);
+    let applied: number;
+    if (cashThis >= expected - 0.005) {
+      // Cycle fully covered by cash — only cash overpayment carries forward.
+      // Prior credit pool must not persist when it was not needed to settle this cycle.
+      applied = expected;
+      creditPool = Math.max(0, cashThis - expected);
+    } else {
+      const availableForCycle = cashThis + creditPool;
+      applied = Math.min(expected, Math.max(0, availableForCycle));
+      creditPool = Math.max(0, availableForCycle - expected);
+    }
 
     if (!targetFyCycleIds.has(cycle.id)) continue;
 
@@ -212,7 +220,11 @@ export async function getVillaCreditBalance(
     if (snap.status === "WAIVED") continue;
     const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
     const cashThis = cashByCycle.get(cycle.id) ?? 0;
-    creditPool = Math.max(0, cashThis + creditPool - expected);
+    if (cashThis >= expected - 0.005) {
+      creditPool = Math.max(0, cashThis - expected);
+    } else {
+      creditPool = Math.max(0, cashThis + creditPool - expected);
+    }
   }
 
   return { creditPool };
@@ -293,7 +305,11 @@ export async function getVillaCreditBalancesBulk(
       if (snap.status === "WAIVED") continue;
       const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
       const cash = cashMap.get(cashKey(villaId, cycle.id)) ?? 0;
-      creditPool = Math.max(0, cash + creditPool - expected);
+      if (cash >= expected - 0.005) {
+        creditPool = Math.max(0, cash - expected);
+      } else {
+        creditPool = Math.max(0, cash + creditPool - expected);
+      }
     }
     result.set(villaId, creditPool);
   }
