@@ -27,6 +27,7 @@ import { applyVillaCreditAcrossSnapshots, getVillaCreditBalance } from "./credit
 import {
   buildCycleFinancialDashboardCore,
   pickMaintenanceCollectionCycleId,
+  FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR,
 } from "./financial-dashboard-cycle";
 import { notifyUsers } from "../../services/notification.service";
 import { auditFromRequest } from "../../services/audit.service";
@@ -2039,7 +2040,14 @@ router.get("/financial-dashboard", async (req, res, next) => {
     if (!collectionCycleId) {
       const { month: qMonth, year: qYear } = parseMonthYear(req.query);
       const autoMatched = await prisma.maintenanceCollectionCycle.findFirst({
-        where: { societyId, periodMonth: qMonth, periodYear: qYear },
+        where: {
+          societyId,
+          periodMonth: qMonth,
+          periodYear: qYear,
+          // Draft cycles created without snapshot generation must not hijack the
+          // month dashboard — fall back to the legacy month view instead.
+          snapshots: { some: {} },
+        },
         select: { id: true },
       });
       if (autoMatched) collectionCycleId = autoMatched.id;
@@ -2047,13 +2055,11 @@ router.get("/financial-dashboard", async (req, res, next) => {
 
     if (collectionCycleId) {
       const core = await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
-      if ("error" in core) {
-        return res.status(400).json({ message: core.error });
-      }
-      const month = core.month;
-      const year = core.year;
+      if (!("error" in core)) {
+        const month = core.month;
+        const year = core.year;
 
-      const [globalPending, expenses, recentAdditionalFunds, money] = await Promise.all([
+        const [globalPending, expenses, recentAdditionalFunds, money] = await Promise.all([
         // Canonical pending dues from VillaMaintenanceSnapshot (not the old
         // Maintenance table which can be stale).
         prisma.villaMaintenanceSnapshot.findMany({
@@ -2184,6 +2190,11 @@ router.get("/financial-dashboard", async (req, res, next) => {
           status: s.status,
         })),
       });
+      }
+      if ("error" in core && core.error !== FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR) {
+        return res.status(400).json({ message: core.error });
+      }
+      // Snapshot-less draft cycle: fall through to legacy month dashboard below.
     }
 
     const { month, year } = parseMonthYear(req.query);

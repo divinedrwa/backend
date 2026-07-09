@@ -2,6 +2,9 @@ import { BillingUserPaymentStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
 import { getVillaCreditBalancesBulk } from "./credit-walker";
 
+export const FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR =
+  "No billing snapshots for this period. Configure a rule and generate snapshots first.";
+
 export type CycleFinancialDashboardCore =
   | {
       cycle: {
@@ -102,10 +105,7 @@ export async function buildCycleFinancialDashboardCore(
   const dashExcludedIds = new Set(dashExclusions.map((e) => e.villaId));
 
   if (snapshots.length === 0) {
-    return {
-      error:
-        "No billing snapshots for this period. Configure a rule and generate snapshots first.",
-    };
+    return { error: FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR };
   }
 
   const snapByVilla = new Map(snapshots.map((s) => [s.villaId, s]));
