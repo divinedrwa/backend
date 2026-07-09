@@ -38,7 +38,13 @@ type UserCyclePayment = {
 };
 type MaintenanceCycle = { id: string; financialYearId: string; periodKey: string; periodMonth: number; periodYear: number };
 type AdditionalFund = { amount: number; receivedDate: Date | null; month: number | null; year: number | null };
-type Expense = { amount: number; paymentDate: Date | null; month: number | null; year: number | null };
+type Expense = {
+  amount: number;
+  paymentDate: Date | null;
+  month: number | null;
+  year: number | null;
+  deletedAt?: Date | null;
+};
 
 function fakePrisma(opts: {
   snapshots?: Snapshot[];
@@ -94,7 +100,15 @@ function fakePrisma(opts: {
     userCyclePayment: { findMany: async () => userCyclePayments },
     maintenanceCollectionCycle: { findMany: async () => maintenanceCycles },
     additionalFund: { findMany: async () => additionalFunds },
-    expense: { findMany: async () => expenses },
+    expense: {
+      findMany: async (args?: { where?: { deletedAt?: null } }) => {
+        let rows = expenses;
+        if (args?.where?.deletedAt === null) {
+          rows = rows.filter((e) => !e.deletedAt);
+        }
+        return rows;
+      },
+    },
     // Credit walker's billing context — no billing cycles in these scenarios.
     billingCycle: { findMany: async () => [] },
   } as unknown as PrismaClient;
@@ -330,5 +344,28 @@ describe("computeSocietyMoneySnapshot", () => {
     assert.equal(m.maintenanceCashForMonth(3, 2026), 1300);
     assert.equal(m.maintenanceCashForMonth(4, 2026), 370);
     assert.equal(m.maintenanceCashAllTime, 1670);
+  });
+
+  it("excludes soft-deleted expenses from fund balance", async () => {
+    const db = fakePrisma({
+      expenses: [
+        {
+          amount: 500,
+          paymentDate: new Date("2026-07-01"),
+          month: 7,
+          year: 2026,
+        },
+        {
+          amount: 300,
+          paymentDate: new Date("2026-07-02"),
+          month: 7,
+          year: 2026,
+          deletedAt: new Date("2026-07-03"),
+        },
+      ],
+    });
+    const m = await computeSocietyMoneySnapshot(db, "s1");
+    assert.equal(m.expensesAllTime, 500);
+    assert.equal(m.currentFundBalance, -500);
   });
 });
