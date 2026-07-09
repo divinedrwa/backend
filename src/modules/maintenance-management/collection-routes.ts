@@ -17,6 +17,10 @@ import {
   syncAllUserCyclePaymentsForMaintenanceCycle,
   syncBillingUserCyclePaymentsFromSnapshot,
 } from "../billing-cycle/billing-collection-link";
+import {
+  loadBillingCyclePeriodKeys,
+  maintenanceCollectionBackedByBillingCycleWhere,
+} from "../billing-cycle/billing-collection-scope";
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import {
   notifySocietyMaintenanceLedgerUpdate,
@@ -226,7 +230,11 @@ router.get("/financial-years/:fyId/cycles", async (req, res, next) => {
     if (!fy) return res.status(404).json({ message: "Financial year not found" });
 
     const cycles = await prisma.maintenanceCollectionCycle.findMany({
-      where: { financialYearId: fyId },
+      where: maintenanceCollectionBackedByBillingCycleWhere(
+        societyId,
+        await loadBillingCyclePeriodKeys(prisma, societyId, fyId),
+        { financialYearId: fyId },
+      ),
       orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
       include: {
         rule: true,

@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { getVillaCreditBalancesBulk } from "../modules/maintenance-management/credit-walker";
+import { loadBillingCyclePeriodKeys } from "../modules/billing-cycle/billing-collection-scope";
 import { prisma as defaultPrisma } from "./prisma";
 
 type Db = Prisma.TransactionClient | typeof defaultPrisma;
@@ -192,8 +193,10 @@ export async function computeSocietyMoneySnapshot(
     }),
   ]);
 
+  const billingPeriodKeys = await loadBillingCyclePeriodKeys(db, societyId);
+
   const maintenanceCycles = await db.maintenanceCollectionCycle.findMany({
-    where: { societyId },
+    where: { societyId, periodKey: { in: billingPeriodKeys } },
     select: { id: true, financialYearId: true, periodKey: true, periodMonth: true, periodYear: true },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
   });
@@ -204,7 +207,9 @@ export async function computeSocietyMoneySnapshot(
 
   const expectedBySnap = new Map<string, number>();
   const snapByKey = new Map<string, (typeof snapshots)[number]>();
+  const backedCycleIds = new Set(maintenanceCycles.map((mc) => mc.id));
   for (const s of snapshots) {
+    if (!backedCycleIds.has(s.cycleId)) continue;
     expectedBySnap.set(`${s.villaId}:${s.cycleId}`, Number(s.expectedAmount));
     snapByKey.set(`${s.villaId}:${s.cycleId}`, s);
   }
@@ -225,6 +230,7 @@ export async function computeSocietyMoneySnapshot(
       if (k) nonCycleCashByMonth.set(k, (nonCycleCashByMonth.get(k) ?? 0) + v);
       continue;
     }
+    if (!backedCycleIds.has(mp.maintenanceCollectionCycleId)) continue;
     const key = `${mp.villaId}:${mp.maintenanceCollectionCycleId}`;
     const slot = mpByKey.get(key) ?? { sum: 0, latest: null };
     slot.sum += Number(mp.amount);

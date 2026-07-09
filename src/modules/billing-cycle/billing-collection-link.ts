@@ -131,11 +131,9 @@ export async function removeMaintenanceCollectionForBillingCycle(
   });
   if (!collectionCycle) return;
 
-  const payCount = await tx.maintenancePayment.count({
+  await tx.maintenancePayment.deleteMany({
     where: { maintenanceCollectionCycleId: collectionCycle.id },
   });
-  if (payCount > 0) return;
-
   await tx.cycleVillaExclusion.deleteMany({ where: { cycleId: collectionCycle.id } });
   await tx.villaMaintenanceSnapshot.deleteMany({ where: { cycleId: collectionCycle.id } });
   await tx.maintenanceCycleRule.deleteMany({ where: { cycleId: collectionCycle.id } });

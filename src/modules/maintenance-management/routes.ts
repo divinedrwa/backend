@@ -17,6 +17,11 @@ import {
   ensureVillaLedgersAligned,
   syncBillingUserCyclePaymentsFromSnapshot,
 } from "../billing-cycle/billing-collection-link";
+import {
+  loadBillingCyclePeriodKeys,
+  maintenanceCollectionBackedByBillingCycleWhere,
+  isCollectionCycleBackedByBillingCycle,
+} from "../billing-cycle/billing-collection-scope";
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -314,8 +319,12 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
     // PARTIAL instead of marking the bill fully PAID). Falls back to the legacy
     // path only when the society has no collection cycle for this month/year.
     if (!body.maintenanceCollectionCycleId) {
+      const periodKeys = await loadBillingCyclePeriodKeys(prisma, societyId);
       const autoCycle = await prisma.maintenanceCollectionCycle.findFirst({
-        where: { societyId, periodMonth: body.month, periodYear: body.year },
+        where: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys, {
+          periodMonth: body.month,
+          periodYear: body.year,
+        }),
         orderBy: { createdAt: "desc" },
         select: { id: true },
       });
@@ -1502,7 +1511,11 @@ router.get("/shortfall/:fyId", async (req, res, next) => {
     if (!fy) return res.status(404).json({ message: "Financial year not found" });
 
     const cycles = await prisma.maintenanceCollectionCycle.findMany({
-      where: { financialYearId: fyId },
+      where: maintenanceCollectionBackedByBillingCycleWhere(
+        societyId,
+        await loadBillingCyclePeriodKeys(prisma, societyId, fyId),
+        { financialYearId: fyId },
+      ),
       orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
       select: {
         id: true,
@@ -2030,24 +2043,38 @@ router.get("/financial-dashboard", async (req, res, next) => {
     if (!societyId) {
       return res.status(403).json({ message: "Tenant context required" });
     }
+    const periodKeys = await loadBillingCyclePeriodKeys(prisma, societyId);
     let collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+
+    if (collectionCycleId) {
+      const explicitMeta = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: collectionCycleId, societyId },
+        select: { periodKey: true },
+      });
+      if (
+        !explicitMeta ||
+        !(await isCollectionCycleBackedByBillingCycle(prisma, societyId, explicitMeta.periodKey))
+      ) {
+        collectionCycleId = null;
+      }
+    }
 
     // Auto-detect MaintenanceCollectionCycle for the given month/year so the
     // snapshot-based path is used whenever a cycle exists — even when the
     // client doesn't pass an explicit cycleId.  This guarantees the admin
     // month-view uses the same canonical VillaMaintenanceSnapshot data as the
-    // cycle-view.
+    // cycle-view. Orphan collection rows left after a BillingCycle delete are
+    // ignored.
     if (!collectionCycleId) {
       const { month: qMonth, year: qYear } = parseMonthYear(req.query);
       const autoMatched = await prisma.maintenanceCollectionCycle.findFirst({
-        where: {
-          societyId,
+        where: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys, {
           periodMonth: qMonth,
           periodYear: qYear,
           // Draft cycles created without snapshot generation must not hijack the
           // month dashboard — fall back to the legacy month view instead.
           snapshots: { some: {} },
-        },
+        }),
         select: { id: true },
       });
       if (autoMatched) collectionCycleId = autoMatched.id;
@@ -2064,7 +2091,7 @@ router.get("/financial-dashboard", async (req, res, next) => {
         // Maintenance table which can be stale).
         prisma.villaMaintenanceSnapshot.findMany({
           where: {
-            cycle: { societyId },
+            cycle: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys),
             status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
           },
           select: {
@@ -2641,9 +2668,11 @@ router.get("/outstanding-dues", async (req, res, next) => {
       return res.status(403).json({ message: "Tenant context required" });
     }
 
+    const periodKeys = await loadBillingCyclePeriodKeys(prisma, societyId);
+
     const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
       where: {
-        cycle: { societyId },
+        cycle: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys),
         status: { notIn: ["PAID", "WAIVED"] },
       },
       include: {
@@ -2856,7 +2885,21 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
     if (!societyId) {
       return res.status(403).json({ message: "Tenant context required" });
     }
-    const collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+    const periodKeys = await loadBillingCyclePeriodKeys(prisma, societyId);
+    let collectionCycleId = pickMaintenanceCollectionCycleId(req.query);
+
+    if (collectionCycleId) {
+      const explicitMeta = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { id: collectionCycleId, societyId },
+        select: { periodKey: true },
+      });
+      if (
+        !explicitMeta ||
+        !(await isCollectionCycleBackedByBillingCycle(prisma, societyId, explicitMeta.periodKey))
+      ) {
+        collectionCycleId = null;
+      }
+    }
 
     if (collectionCycleId) {
       const core = await buildCycleFinancialDashboardCore(societyId, collectionCycleId);
@@ -2909,9 +2952,12 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
 
     const { month, year } = parseMonthYear(req.query);
 
-    // Try snapshot-based data first (canonical).
+    // Try snapshot-based data first (canonical) — ignore orphan collection rows.
     const pdfCycle = await prisma.maintenanceCollectionCycle.findFirst({
-      where: { societyId, periodMonth: month, periodYear: year },
+      where: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys, {
+        periodMonth: month,
+        periodYear: year,
+      }),
       select: { id: true },
     });
 
@@ -2928,7 +2974,7 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
         }),
         prisma.villaMaintenanceSnapshot.findMany({
           where: {
-            cycle: { societyId },
+            cycle: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys),
             status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
           },
           select: {

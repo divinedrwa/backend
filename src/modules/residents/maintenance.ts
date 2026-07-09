@@ -11,6 +11,10 @@ import {
   resolveSnapshotCycleTotals,
 } from "../billing-cycle/services/per-cycle-late-fee-context";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
+import {
+  loadBillingCyclePeriodKeys,
+  maintenanceCollectionBackedByBillingCycleWhere,
+} from "../billing-cycle/billing-collection-scope";
 
 const router = Router();
 
@@ -931,7 +935,11 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     // (same data the Overview tab uses) and always override old Maintenance
     // table aggregates when present.
     const yearCollectionCycles = await prisma.maintenanceCollectionCycle.findMany({
-      where: { societyId, periodYear: year },
+      where: maintenanceCollectionBackedByBillingCycleWhere(
+        societyId,
+        await loadBillingCyclePeriodKeys(prisma, societyId),
+        { periodYear: year },
+      ),
       select: {
         id: true,
         periodMonth: true,
