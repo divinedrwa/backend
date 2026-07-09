@@ -6,7 +6,7 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import {
-  assertComplaintStatusTransition,
+  buildComplaintStatusUpdate,
   computeComplaintSlaDeadline,
 } from "../../services/complaintLifecycle.service";
 import { notifyResidentsComplaintStatusChanged } from "../../services/complaintStatusNotification.service";
@@ -129,23 +129,16 @@ router.patch(
         return res.status(404).json({ message: "Complaint not found" });
       }
 
+      let updateData;
       try {
-        assertComplaintStatusTransition(existing.status, status);
+        updateData = buildComplaintStatusUpdate(existing, { status, priority });
       } catch (err) {
         const message = err instanceof Error ? err.message : "Invalid status transition";
         return res.status(400).json({ message });
       }
 
-      const data: Record<string, unknown> = {};
-      if (status !== existing.status) data.status = status;
-      if (status === "RESOLVED" && !existing.resolvedAt) data.resolvedAt = new Date();
-      if (priority && priority !== existing.priority) {
-        data.priority = priority;
-        data.slaDeadline = computeComplaintSlaDeadline(priority, existing.createdAt);
-      }
-
-      if (Object.keys(data).length > 0) {
-        await prisma.complaint.update({ where: { id }, data });
+      if (Object.keys(updateData).length > 0) {
+        await prisma.complaint.update({ where: { id }, data: updateData });
       }
 
       if (existing.status !== status) {
@@ -157,6 +150,7 @@ router.patch(
           residentId: existing.residentId,
           previousStatus: existing.status,
           newStatus: status,
+          actorUserId: req.auth!.userId,
         });
       }
 

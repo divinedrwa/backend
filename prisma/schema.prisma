@@ -713,6 +713,7 @@ model Complaint {
   status      ComplaintStatus    @default(OPEN)
   adminNotes  String?            @db.Text
   slaDeadline DateTime?
+  slaBreachNotifiedAt DateTime?
   resolvedAt  DateTime?
   createdAt   DateTime           @default(now())
   updatedAt   DateTime           @updatedAt

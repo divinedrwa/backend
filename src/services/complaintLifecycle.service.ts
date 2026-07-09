@@ -51,6 +51,11 @@ export function buildComplaintStatusUpdate(
     updateData.resolvedAt = new Date();
   }
 
+  if (next.status === ComplaintStatus.RESOLVED || next.status === ComplaintStatus.CLOSED) {
+    updateData.slaDeadline = null;
+    updateData.slaBreachNotifiedAt = null;
+  }
+
   if (next.priority && next.priority !== existing.priority) {
     updateData.priority = next.priority;
     updateData.slaDeadline = computeComplaintSlaDeadline(next.priority, existing.createdAt);

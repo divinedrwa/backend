@@ -4,18 +4,18 @@ import { notifySocietyRoles, notifyUser } from "./notification.service";
 
 /**
  * Finds complaints whose SLA deadline has passed while still OPEN or IN_PROGRESS,
- * and notifies society admins about the breach.
+ * and notifies society admins about the breach once per complaint.
  *
  * Called once per hour from the billing cron job.
  */
 export async function checkComplaintSlaBreaches(): Promise<number> {
   const now = new Date();
 
-  // Find complaints past their SLA that are still unresolved
   const breached = await prisma.complaint.findMany({
     where: {
       slaDeadline: { lt: now },
       status: { in: ["OPEN", "IN_PROGRESS"] },
+      slaBreachNotifiedAt: null,
     },
     select: {
       id: true,
@@ -29,7 +29,6 @@ export async function checkComplaintSlaBreaches(): Promise<number> {
 
   if (breached.length === 0) return 0;
 
-  // Group by society to send one notification per society
   const bySociety = new Map<string, typeof breached>();
   for (const c of breached) {
     const list = bySociety.get(c.societyId) ?? [];
@@ -57,6 +56,11 @@ export async function checkComplaintSlaBreaches(): Promise<number> {
       data: { type: "COMPLAINT_SLA_BREACH" },
     });
   }
+
+  await prisma.complaint.updateMany({
+    where: { id: { in: breached.map((c) => c.id) } },
+    data: { slaBreachNotifiedAt: now },
+  });
 
   logger.info({ breachedCount: breached.length }, "[sla-cron] Complaint SLA breach notifications sent");
   return breached.length;
@@ -86,10 +90,9 @@ export async function autoCloseResolvedComplaints(): Promise<number> {
 
   await prisma.complaint.updateMany({
     where: { id: { in: stale.map((c) => c.id) } },
-    data: { status: "CLOSED" },
+    data: { status: "CLOSED", slaDeadline: null, slaBreachNotifiedAt: null },
   });
 
-  // Notify residents whose complaints were auto-closed
   for (const c of stale) {
     if (c.residentId) {
       void notifyUser(c.residentId, {

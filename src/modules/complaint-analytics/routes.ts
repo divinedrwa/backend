@@ -464,6 +464,7 @@ router.patch(
           residentId: updatedComplaint.residentId,
           previousStatus,
           newStatus: status,
+          actorUserId: req.auth!.userId,
         });
       }
 

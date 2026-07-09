@@ -33,4 +33,19 @@ describe("complaintLifecycle.service", () => {
     assert.equal(patch.status, ComplaintStatus.RESOLVED);
     assert.ok(patch.resolvedAt instanceof Date);
   });
+
+  it("clears SLA tracking when moving to RESOLVED", () => {
+    const patch = buildComplaintStatusUpdate(
+      {
+        status: ComplaintStatus.IN_PROGRESS,
+        resolvedAt: null,
+        priority: ComplaintPriority.HIGH,
+        createdAt: new Date("2026-01-01"),
+      },
+      { status: ComplaintStatus.RESOLVED },
+    );
+    assert.equal(patch.status, ComplaintStatus.RESOLVED);
+    assert.equal(patch.slaDeadline, null);
+    assert.equal(patch.slaBreachNotifiedAt, null);
+  });
 });

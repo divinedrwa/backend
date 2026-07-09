@@ -1,5 +1,4 @@
-import { ComplaintStatus, NotificationCategory } from "@prisma/client";
-import { residentLikeRoleFilter } from "../lib/residentLike";
+import { ComplaintStatus, NotificationCategory, UserRole } from "@prisma/client";
 import { logger } from "../lib/logger";
 import { prisma } from "../lib/prisma";
 import { NotificationService } from "./notification.service";
@@ -31,9 +30,16 @@ export async function notifyResidentsComplaintStatusChanged(params: {
   residentId: string | null;
   previousStatus: ComplaintStatus;
   newStatus: ComplaintStatus;
+  /** Admin who changed the status — skipped as a recipient to avoid self-notify. */
+  actorUserId?: string;
 }): Promise<void> {
   try {
     if (params.previousStatus === params.newStatus) {
+      return;
+    }
+
+    // Resident was already told when the complaint was marked resolved.
+    if (params.previousStatus === ComplaintStatus.RESOLVED && params.newStatus === ComplaintStatus.CLOSED) {
       return;
     }
 
@@ -60,12 +66,16 @@ export async function notifyResidentsComplaintStatusChanged(params: {
         where: {
           societyId: params.societyId,
           villaId: params.villaId,
-          ...residentLikeRoleFilter,
+          role: { in: [UserRole.RESIDENT, UserRole.RESIDENT_CUM_ADMIN] },
           isActive: true,
         },
         select: { id: true },
       });
       userIds = residents.map((r) => r.id);
+    }
+
+    if (params.actorUserId) {
+      userIds = userIds.filter((id) => id !== params.actorUserId);
     }
 
     if (userIds.length === 0) {
