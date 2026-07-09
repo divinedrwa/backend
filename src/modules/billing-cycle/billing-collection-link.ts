@@ -110,6 +110,38 @@ export async function ensureMaintenanceCollectionForBillingCycle(
   return { maintenanceCycleId: maintenanceCycle.id, periodKey, dueDate };
 }
 
+/** Remove the linked maintenance collection cycle when a draft billing cycle is deleted. */
+export async function removeMaintenanceCollectionForBillingCycle(
+  tx: Prisma.TransactionClient,
+  billingCycle: {
+    societyId: string;
+    financialYearId: string | null;
+    cycleKey: string;
+  },
+): Promise<void> {
+  if (!billingCycle.financialYearId) return;
+
+  const collectionCycle = await tx.maintenanceCollectionCycle.findFirst({
+    where: {
+      societyId: billingCycle.societyId,
+      financialYearId: billingCycle.financialYearId,
+      periodKey: billingCycle.cycleKey,
+    },
+    select: { id: true },
+  });
+  if (!collectionCycle) return;
+
+  const payCount = await tx.maintenancePayment.count({
+    where: { maintenanceCollectionCycleId: collectionCycle.id },
+  });
+  if (payCount > 0) return;
+
+  await tx.cycleVillaExclusion.deleteMany({ where: { cycleId: collectionCycle.id } });
+  await tx.villaMaintenanceSnapshot.deleteMany({ where: { cycleId: collectionCycle.id } });
+  await tx.maintenanceCycleRule.deleteMany({ where: { cycleId: collectionCycle.id } });
+  await tx.maintenanceCollectionCycle.delete({ where: { id: collectionCycle.id } });
+}
+
 /** Create a villa snapshot row when missing (minimal bootstrap for gateway pay). */
 export async function ensureVillaSnapshotForMaintenanceCycle(
   tx: Prisma.TransactionClient,

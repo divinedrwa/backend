@@ -19,10 +19,12 @@ import { validateBody } from "../../middlewares/validate";
 import {
   generateSnapshotsForBillingCycle,
   ensureMaintenanceCollectionForBillingCycle,
+  removeMaintenanceCollectionForBillingCycle,
   refreshUnpaidSnapshotsForBillingCycleAmount,
   ensureVillaLedgersAligned,
   postMarkCashToMaintenanceLedger,
 } from "./billing-collection-link";
+import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import {
   buildCurrentCycleResponse,
@@ -324,11 +326,13 @@ router.delete(
         await tx.userCyclePayment.deleteMany({ where: { cycleId: id } });
         await tx.billingLateFeeWaiver.deleteMany({ where: { cycleId: id } });
         await tx.billingPaymentLog.deleteMany({ where: { cycleId: id } });
+        await removeMaintenanceCollectionForBillingCycle(tx, found);
         await tx.billingCycle.delete({ where: { id } });
       });
 
       await invalidateDisplayCycleHint(auth.societyId);
       await invalidateReconcileCache(auth.societyId);
+      invalidateMoneySnapshotCache(auth.societyId);
       auditFromRequest(req, {
         societyId: auth.societyId,
         adminId: auth.userId,
