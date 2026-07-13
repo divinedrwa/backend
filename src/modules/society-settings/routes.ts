@@ -43,6 +43,9 @@ const societySettingsSelectBase = {
   lateFeePercentage: true,
   lateFeeFixedAmount: true,
   maintenanceGracePeriodDays: true,
+  maintenanceBillingMode: true,
+  maintenanceFixedAmount: true,
+  maintenanceSqftRate: true,
 } as const;
 
 async function fetchSocietySettings(societyId: string) {
@@ -304,6 +307,59 @@ router.patch(
       await bustSocietySettingsCache(societyId);
 
       return res.json({ message: "Late fee settings updated", lateFee: society });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * PATCH /api/society-settings/maintenance-billing — A8/A9 billing mode (ADMIN).
+ */
+const maintenanceBillingPatchSchema = z
+  .object({
+    maintenanceBillingMode: z.enum(["FIXED", "SQFT"]).optional(),
+    maintenanceFixedAmount: z.number().positive().optional(),
+    maintenanceSqftRate: z.number().positive().optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "Send at least one field to update",
+  });
+
+router.patch(
+  "/maintenance-billing",
+  requireRole(UserRole.ADMIN),
+  validateBody(maintenanceBillingPatchSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const body = req.body as z.infer<typeof maintenanceBillingPatchSchema>;
+
+      const data: Prisma.SocietyUpdateInput = {};
+      if (body.maintenanceBillingMode !== undefined) {
+        data.maintenanceBillingMode = body.maintenanceBillingMode;
+      }
+      if (body.maintenanceFixedAmount !== undefined) {
+        data.maintenanceFixedAmount = new Prisma.Decimal(body.maintenanceFixedAmount);
+      }
+      if (body.maintenanceSqftRate !== undefined) {
+        data.maintenanceSqftRate = new Prisma.Decimal(body.maintenanceSqftRate);
+      }
+
+      await prisma.society.updateMany({ where: { id: societyId }, data });
+
+      const society = await prisma.society.findUnique({
+        where: { id: societyId },
+        select: {
+          maintenanceBillingMode: true,
+          maintenanceFixedAmount: true,
+          maintenanceSqftRate: true,
+        },
+      });
+
+      await bustSocietySettingsCache(societyId);
+
+      return res.json({ message: "Maintenance billing settings updated", maintenanceBilling: society });
     } catch (error) {
       next(error);
     }

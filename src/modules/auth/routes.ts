@@ -11,6 +11,7 @@ import {
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
+import { getLegalConsentStatus } from "../../lib/legalVersions";
 import { validateBody } from "../../middlewares/validate";
 import crypto from "crypto";
 import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
@@ -203,9 +204,13 @@ async function serializeAuthUser(user: {
     villaId: user.villaId,
   });
   const refreshToken = await createRefreshTokenForUser(user.id);
+  // L2 — surface consent state additively so updated clients can gate on re-acceptance.
+  // Older clients ignore the `legal` block and behave exactly as before (non-breaking).
+  const legal = await getLegalConsentStatus(prisma, user.id);
   return {
     token,
     refreshToken,
+    legal,
     user: {
       id: user.id,
       username: user.username,

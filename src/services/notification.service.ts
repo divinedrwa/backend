@@ -3,6 +3,7 @@ import { logger } from "../lib/logger";
 import admin from "firebase-admin";
 import { NotificationCategory, UserRole } from "@prisma/client";
 import { RESIDENT_LIKE_ROLES } from "../lib/residentLike";
+import { isCategoryMutable } from "../lib/notificationPreferences";
 
 // Initialize Firebase Admin SDK (if not already initialized).
 // Prefer FIREBASE_SERVICE_ACCOUNT_JSON from .env (dotenv must load before this module — see app.ts).
@@ -97,8 +98,19 @@ export class NotificationService {
       const societyId = user.societyId || "";
       let pushSent = false;
 
-      // Only attempt FCM when the user has push enabled globally.
-      if (user.notifyPush) {
+      // L3 — respect per-category mute for mutable categories (critical ones ignore it).
+      const category = options?.category ?? NotificationCategory.SYSTEM;
+      let categoryMuted = false;
+      if (user.notifyPush && isCategoryMutable(category)) {
+        const pref = await prisma.notificationCategoryPreference.findUnique({
+          where: { userId_category: { userId, category } },
+          select: { pushEnabled: true },
+        });
+        categoryMuted = pref ? !pref.pushEnabled : false;
+      }
+
+      // Only attempt FCM when push is enabled globally and this category isn't muted.
+      if (user.notifyPush && !categoryMuted) {
         const devices = await prisma.pushDevice.findMany({
           where: {
             userId,
@@ -128,7 +140,12 @@ export class NotificationService {
           }
         }
       } else {
-        logger.debug({ userId }, "Skipping push because user has notifyPush disabled");
+        logger.debug(
+          { userId, category, categoryMuted },
+          categoryMuted
+            ? "Skipping push because user muted this category"
+            : "Skipping push because user has notifyPush disabled",
+        );
       }
 
       if (options?.persistInApp === false) {
@@ -185,7 +202,16 @@ export class NotificationService {
     for (let i = 0; i < userIds.length; i += CHUNK) {
       const chunk = userIds.slice(i, i + CHUNK);
       try {
-        const [users, devices] = await Promise.all([
+        // L3 — for mutable categories, find who muted this category (bulk, no N+1).
+        const category = options?.category ?? NotificationCategory.SYSTEM;
+        const mutedFetch = isCategoryMutable(category)
+          ? prisma.notificationCategoryPreference.findMany({
+              where: { userId: { in: chunk }, category, pushEnabled: false },
+              select: { userId: true },
+            })
+          : Promise.resolve([] as { userId: string }[]);
+
+        const [users, devices, mutedRows] = await Promise.all([
           prisma.user.findMany({
             where: { id: { in: chunk } },
             select: { id: true, societyId: true, notifyPush: true },
@@ -194,7 +220,9 @@ export class NotificationService {
             where: { userId: { in: chunk }, isActive: true },
             select: { userId: true, token: true },
           }),
+          mutedFetch,
         ]);
+        const mutedUserIds = new Set(mutedRows.map((r) => r.userId));
 
         // Group devices by userId
         const devicesByUser = new Map<string, string[]>();
@@ -208,7 +236,7 @@ export class NotificationService {
         const allTokens: string[] = [];
         const pushSentUserIds = new Set<string>();
         for (const user of users) {
-          if (user.notifyPush) {
+          if (user.notifyPush && !mutedUserIds.has(user.id)) {
             const tokens = devicesByUser.get(user.id);
             if (tokens && tokens.length > 0) {
               allTokens.push(...tokens);
