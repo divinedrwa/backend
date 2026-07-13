@@ -20,10 +20,65 @@ export interface ReconciliationResult {
     cycleTitle: string;
     villaSum: number;
     societyCash: number;
+    creditApplied: number;
+    unexplainedDifference: number;
     difference: number;
     matched: boolean;
   }>;
   alertsCreated: number;
+  /** Open alerts auto-closed because diff is now within ₹0.01. */
+  alertsResolved: number;
+  /** Open alerts refreshed with latest villaSum / societyCash / difference. */
+  alertsUpdated: number;
+}
+
+const MATCH_TOLERANCE_INR = 0.01;
+
+export function isReconciliationCycleMatched(villaSum: number, societyCash: number): boolean {
+  return Math.abs(villaSum - societyCash) <= MATCH_TOLERANCE_INR;
+}
+
+export type CycleReconciliationBreakdown = {
+  villaSum: number;
+  societyCash: number;
+  creditApplied: number;
+  unexplainedDifference: number;
+  matched: boolean;
+  /** Value stored on alerts — only unexplained drift, not credit-only gaps. */
+  alertDifference: number;
+};
+
+/**
+ * A6: When advance credit settles snapshots without new cash, villaSum > societyCash
+ * is expected — not a ledger error. Only excess cash (societyCash > villaSum) is flagged.
+ */
+export function computeCycleReconciliationBreakdown(
+  villaSum: number,
+  societyCash: number,
+): CycleReconciliationBreakdown {
+  const creditApplied = Math.max(0, villaSum - societyCash);
+  const cashExcess = Math.max(0, societyCash - villaSum);
+  const exactMatch = isReconciliationCycleMatched(villaSum, societyCash);
+  const creditExplained =
+    creditApplied > MATCH_TOLERANCE_INR && cashExcess <= MATCH_TOLERANCE_INR;
+  const matched = exactMatch || creditExplained;
+  const unexplainedDifference = cashExcess;
+  const alertDifference = matched ? 0 : Math.abs(villaSum - societyCash);
+  return {
+    villaSum,
+    societyCash,
+    // creditApplied is max(0, villaSum − societyCash): the villa-side amount settled
+    // by advance credit rather than fresh cash. It is naturally 0 when cash exceeds
+    // the villa sum, so no branching is needed.
+    creditApplied,
+    unexplainedDifference,
+    matched,
+    alertDifference,
+  };
+}
+
+function alertSeverityForDifference(difference: number): "CRITICAL" | "WARNING" {
+  return difference > 1000 ? "CRITICAL" : "WARNING";
 }
 
 /**
@@ -136,57 +191,112 @@ export async function reconcileSocietyLedger(
     // 5. Check each cycle
     const cycleResults: ReconciliationResult['cycleResults'] = [];
     let alertsCreated = 0;
+    let alertsResolved = 0;
+    let alertsUpdated = 0;
     let maxDifference = 0;
 
     for (const [cycleId, data] of byCycle) {
-      const villaSum = data.villaSum;
-      const societyCash = reconciledCashMap.get(cycleId) || 0;
-      const difference = Math.abs(villaSum - societyCash);
-      const matched = difference <= 0.01; // Allow 1 paisa tolerance
+      const breakdown = computeCycleReconciliationBreakdown(
+        data.villaSum,
+        reconciledCashMap.get(cycleId) || 0,
+      );
+      const {
+        villaSum,
+        societyCash,
+        creditApplied,
+        unexplainedDifference,
+        matched,
+        alertDifference,
+      } = breakdown;
 
       cycleResults.push({
         cycleId,
         cycleTitle: data.cycleTitle,
         villaSum,
         societyCash,
-        difference,
+        creditApplied,
+        unexplainedDifference,
+        difference: alertDifference,
         matched,
       });
 
-      if (!matched) {
-        maxDifference = Math.max(maxDifference, difference);
-
-        // Check if alert already exists for this cycle
-        const existingAlert = await db.reconciliationAlert.findFirst({
+      if (matched) {
+        const resolveNote =
+          creditApplied > MATCH_TOLERANCE_INR
+            ? `Auto-resolved: ₹${creditApplied.toFixed(2)} settled via advance credit (cash ₹${societyCash.toFixed(2)})`
+            : "Auto-resolved: ledger matched within ₹0.01 tolerance";
+        const resolved = await db.reconciliationAlert.updateMany({
           where: {
             societyId,
             cycleId,
             resolvedAt: null,
           },
+          data: {
+            resolvedAt: new Date(),
+            notes: resolveNote,
+          },
         });
+        alertsResolved += resolved.count;
+        continue;
+      }
 
-        if (!existingAlert) {
-          // Create new alert
-          await db.reconciliationAlert.create({
-            data: {
-              societyId,
-              cycleId,
-              villaSum,
-              societyCash,
-              difference,
-              severity: difference > 1000 ? 'CRITICAL' : 'WARNING',
-            },
-          });
-          alertsCreated++;
+      maxDifference = Math.max(maxDifference, alertDifference);
 
-          logger.error({
+      const existingAlert = await db.reconciliationAlert.findFirst({
+        where: {
+          societyId,
+          cycleId,
+          resolvedAt: null,
+        },
+      });
+
+      const severity = alertSeverityForDifference(alertDifference);
+
+      if (existingAlert) {
+        await db.reconciliationAlert.update({
+          where: { id: existingAlert.id },
+          data: {
+            villaSum,
+            societyCash,
+            creditApplied,
+            unexplainedDifference,
+            difference: alertDifference,
+            severity,
+          },
+        });
+        alertsUpdated++;
+
+        logger.warn({
+          cycleId,
+          cycleTitle: data.cycleTitle,
+          villaSum: villaSum.toFixed(2),
+          societyCash: societyCash.toFixed(2),
+          creditApplied: creditApplied.toFixed(2),
+          difference: alertDifference.toFixed(2),
+        }, `[Reconciliation] MISMATCH persists in cycle ${cycleId} (alert refreshed)`);
+      } else {
+        await db.reconciliationAlert.create({
+          data: {
+            societyId,
             cycleId,
-            cycleTitle: data.cycleTitle,
-            villaSum: villaSum.toFixed(2),
-            societyCash: societyCash.toFixed(2),
-            difference: difference.toFixed(2),
-          }, `[Reconciliation] MISMATCH in cycle ${cycleId}`);
-        }
+            villaSum,
+            societyCash,
+            creditApplied,
+            unexplainedDifference,
+            difference: alertDifference,
+            severity,
+          },
+        });
+        alertsCreated++;
+
+        logger.error({
+          cycleId,
+          cycleTitle: data.cycleTitle,
+          villaSum: villaSum.toFixed(2),
+          societyCash: societyCash.toFixed(2),
+          creditApplied: creditApplied.toFixed(2),
+          difference: alertDifference.toFixed(2),
+        }, `[Reconciliation] MISMATCH in cycle ${cycleId}`);
       }
     }
 
@@ -199,21 +309,30 @@ export async function reconcileSocietyLedger(
       (sum, amount) => sum + amount,
       0
     );
-    const totalDifference = Math.abs(totalVillaSum - totalSocietyCash);
-    const overallMatched = totalDifference <= 0.01;
+    const overallBreakdown = computeCycleReconciliationBreakdown(
+      totalVillaSum,
+      totalSocietyCash,
+    );
+    const totalDifference = overallBreakdown.alertDifference;
 
     logger.info({
       villaSum: totalVillaSum.toFixed(2),
       reconciledCash: totalSocietyCash.toFixed(2),
       snapshotCash: societySnapshot.maintenanceCashAllTime.toFixed(2),
+      creditApplied: overallBreakdown.creditApplied.toFixed(2),
       diff: totalDifference.toFixed(2),
+      alertsCreated,
+      alertsResolved,
+      alertsUpdated,
     }, `[Reconciliation] Overall for society ${societyId}`);
 
     return {
-      matched: overallMatched && cycleResults.every(r => r.matched),
+      matched: overallBreakdown.matched && cycleResults.every((r) => r.matched),
       totalDifference,
       cycleResults,
       alertsCreated,
+      alertsResolved,
+      alertsUpdated,
     };
   } catch (error) {
     logger.error({ err: error, societyId }, `[Reconciliation] Error for society ${societyId}`);
@@ -249,9 +368,14 @@ export async function reconcileAllSocieties(): Promise<{
           societyName: society.name,
           totalDifference: result.totalDifference.toFixed(2),
           alertsCreated: result.alertsCreated,
+          alertsResolved: result.alertsResolved,
+          alertsUpdated: result.alertsUpdated,
         }, `[Cron] Reconciliation FAILED for ${society.name}`);
       } else {
-        logger.info(`[Cron] Reconciliation OK for ${society.name}`);
+        logger.info({
+          societyName: society.name,
+          alertsResolved: result.alertsResolved,
+        }, `[Cron] Reconciliation OK for ${society.name}`);
       }
 
       totalAlerts += result.alertsCreated;

@@ -7,6 +7,7 @@ import {
 } from "@prisma/client";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { findLikelyDuplicateMaintenancePayment } from "../../lib/paymentDuplicateGuard";
 import { ensureVillaLedgersAligned } from "../billing-cycle/billing-collection-link";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 
@@ -125,6 +126,26 @@ export async function recordPaymentAndSyncLedgers(
         include: paymentInclude,
       })
     : null;
+
+  if (!existingByKey) {
+    const duplicate = await findLikelyDuplicateMaintenancePayment(tx, {
+      societyId,
+      villaId,
+      month,
+      year,
+      amount,
+      paymentMode: paymentMode as PaymentMode,
+      paymentDate: new Date(paymentDate),
+    });
+    if (duplicate) {
+      const err = new Error(
+        `Duplicate payment suspected: receipt ${duplicate.receiptNumber} already recorded for this villa, period, amount and mode within ${24}h`,
+      ) as Error & { code: string; duplicatePaymentId: string };
+      err.code = "DUPLICATE_PAYMENT_SUSPECTED";
+      err.duplicatePaymentId = duplicate.id;
+      throw err;
+    }
+  }
 
   const payment =
     existingByKey ??
