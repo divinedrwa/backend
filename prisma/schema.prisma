@@ -59,6 +59,11 @@ enum MaintenanceCycleRuleType {
   CUSTOM
 }
 
+enum MaintenanceBillingMode {
+  FIXED
+  SQFT
+}
+
 enum VillaMaintenanceSnapshotStatus {
   PENDING
   PARTIAL
@@ -147,6 +152,9 @@ model Society {
   archivedAt DateTime?
   archivedBy String?
 
+  /// Phase J1/A3: sandbox tenants — excluded from production auto-jobs and gateway capture.
+  isSandbox Boolean @default(false)
+
   invitations Invitation[]
 
   createdAt DateTime @default(now())
@@ -230,6 +238,11 @@ model Society {
 
   /// Grace period days after the maintenance due date before late fee kicks in.
   maintenanceGracePeriodDays Int @default(15)
+
+  /// A8/A9: how monthly maintenance is calculated society-wide.
+  maintenanceBillingMode MaintenanceBillingMode @default(FIXED)
+  maintenanceFixedAmount Decimal? @db.Decimal(12, 2)
+  maintenanceSqftRate    Decimal? @db.Decimal(12, 4)
 
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
@@ -433,6 +446,8 @@ model User {
   staffAttendanceMarked  StaffAttendance[]     @relation("StaffAttendanceMarker")
   waterSupplyRequests    WaterSupplyRequest[]  @relation("WaterSupplyRequestUser")
   waterSupplyResolutions WaterSupplyRequest[]  @relation("WaterSupplyRequestResolver")
+  legalConsents               UserLegalConsent[]
+  notificationCategoryPreferences NotificationCategoryPreference[]
 
   @@index([societyId])
   @@index([villaId])
@@ -559,6 +574,12 @@ model MaintenancePayment {
   bankAccountId   String?
   remarks         String?
   idempotencyKey  String?     @unique // Prevent duplicate payments on retry
+  /// L1: reversal audit — set on the original row when reversed.
+  reversedAt           DateTime?
+  reversedByUserId     String?
+  reversalReason       String?
+  /// L1: negative offset row points at the original payment.
+  reversalOfPaymentId  String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -573,6 +594,8 @@ model MaintenancePayment {
   villaMaintenanceSnapshot     VillaMaintenanceSnapshot?   @relation(fields: [villaMaintenanceSnapshotId], references: [id], onDelete: SetNull)
   financialYearId              String?
   financialYear                FinancialYear?              @relation(fields: [financialYearId], references: [id], onDelete: SetNull)
+  reversalOf                   MaintenancePayment?         @relation("PaymentReversalOffset", fields: [reversalOfPaymentId], references: [id], onDelete: SetNull)
+  reversalOffsets              MaintenancePayment[]        @relation("PaymentReversalOffset")
 
   @@index([societyId])
   @@index([villaId])
@@ -584,6 +607,7 @@ model MaintenancePayment {
   @@index([idempotencyKey])
   @@index([villaId, month, year])
   @@index([financialYearId])
+  @@index([reversalOfPaymentId])
 }
 
 // ==========================================
@@ -2148,12 +2172,47 @@ model ReconciliationAlert {
   resolvedAt   DateTime?
   resolvedBy   String?
   notes        String?
+  /// A6: villa-side amount settled by advance credit rather than fresh cash.
+  creditApplied         Decimal  @default(0) @db.Decimal(12, 2)
+  /// A6: cash excess not explained by credit — the actionable drift.
+  unexplainedDifference Decimal? @db.Decimal(12, 2)
 
   @@index([societyId])
   @@index([cycleId])
   @@index([detectedAt])
   @@index([resolvedAt])
   @@index([severity])
+}
+
+/// L2: append-only legal consent audit trail (terms + privacy version acceptance).
+model UserLegalConsent {
+  id             String   @id @default(cuid())
+  userId         String
+  termsVersion   String
+  privacyVersion String
+  acceptedAt     DateTime @default(now())
+  ipAddress      String?
+  userAgent      String?
+  appVersion     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, acceptedAt])
+}
+
+/// L3: per-category push opt-out. Absence of a row means the category is enabled.
+model NotificationCategoryPreference {
+  id          String               @id @default(cuid())
+  userId      String
+  category    NotificationCategory
+  pushEnabled Boolean              @default(true)
+  updatedAt   DateTime             @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, category])
+  @@index([userId])
 }
 
 /// Pending user onboarding by phone/email invite (token redeemed at registration flows).

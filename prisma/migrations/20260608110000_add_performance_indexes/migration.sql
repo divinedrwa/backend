@@ -21,9 +21,10 @@ CREATE INDEX IF NOT EXISTS "idx_maintenance_payment_date"
 
 -- ============================================================================
 -- 3. BILLING CYCLE USER PAYMENTS (Pending dues calculation)
+-- Table is user_payments (Prisma model UserCyclePayment @@map); FK column is cycleId.
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS "idx_ucp_billing_cycle" 
-  ON "UserCyclePayment"("billingCycleId", "userId");
+  ON "user_payments"("cycleId", "userId");
 
 -- ============================================================================
 -- 4. ACTIVE PUSH DEVICES (Notification delivery)
@@ -54,16 +55,18 @@ CREATE INDEX IF NOT EXISTS "idx_preapproved_otp"
 
 -- ============================================================================
 -- 8. VILLA MAINTENANCE SNAPSHOTS (Billing cycle processing)
+-- FK column is cycleId (MaintenanceCollectionCycle), not billingCycleId.
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS "idx_villa_snapshot_cycle" 
-  ON "VillaMaintenanceSnapshot"("billingCycleId", "villaId");
+  ON "VillaMaintenanceSnapshot"("cycleId", "villaId");
 
 -- ============================================================================
 -- 9. USER SOCIETY ROLE LOOKUPS (Auth, permission checks)
+-- User has isActive only (no archivedAt on User — that lives on Society).
 -- ============================================================================
 CREATE INDEX IF NOT EXISTS "idx_user_society_role" 
   ON "User"("societyId", "role", "isActive") 
-  WHERE "isActive" = true AND "archivedAt" IS NULL;
+  WHERE "isActive" = true;
 
 -- ============================================================================
 -- 10. PARCEL PENDING COLLECTION (Resident parcel list)
