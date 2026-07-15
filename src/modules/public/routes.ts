@@ -5,6 +5,7 @@ import { prisma } from "../../lib/prisma";
 import { cacheMiddleware } from "../../middlewares/cache";
 import { requireAuth } from "../../middlewares/auth";
 import { isMissingColumnError } from "../../lib/schemaChecks";
+import { societyIsSandboxColumnExists } from "../../lib/sandboxSociety";
 import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
@@ -41,10 +42,17 @@ router.get("/societies", cacheMiddleware(300), async (req, res, next) => {
         : {}),
     };
     /** All tenants for login pickers (mobile + web). Exclude archived societies. */
+    const hasSandboxFlag = await societyIsSandboxColumnExists();
     const [rows, total] = await Promise.all([
       prisma.society.findMany({
         where,
-        select: { id: true, name: true, address: true, status: true },
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          status: true,
+          ...(hasSandboxFlag ? { isSandbox: true } : {}),
+        },
         orderBy: { name: "asc" },
         take: pagination.take,
         skip: pagination.skip,

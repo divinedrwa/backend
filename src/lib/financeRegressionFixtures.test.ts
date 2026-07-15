@@ -135,9 +135,8 @@ describe("finance regression fixtures (C7)", () => {
     assert.equal(recon.matched, true);
   });
 
-  it("K19 stale alert: re-run reconciliation refreshes open alert amounts", async () => {
-    let alertVillaSum = 800;
-    let alertSocietyCash = 400;
+  it("K19 stale alert: re-run reconciliation auto-resolves when cycle now matches", async () => {
+    let resolveCalled = false;
     const db = {
       villaMaintenanceSnapshot: {
         findMany: async () => [
@@ -186,29 +185,25 @@ describe("finance regression fixtures (C7)", () => {
       expense: { findMany: async () => [] },
       billingCycle: { findMany: async () => [] },
       reconciliationAlert: {
-        updateMany: async () => ({ count: 0 }),
+        updateMany: async (args: { data: { resolvedAt?: Date; notes?: string } }) => {
+          if (args.data.resolvedAt) resolveCalled = true;
+          return { count: 1 };
+        },
         findFirst: async () => ({
           id: "alert-stale",
-          villaSum: alertVillaSum,
-          societyCash: alertSocietyCash,
+          villaSum: 800,
+          societyCash: 400,
           severity: "CRITICAL",
         }),
         create: async () => ({}),
-        update: async (args: {
-          where: { id: string };
-          data: { villaSum?: number; societyCash?: number; severity?: string };
-        }) => {
-          if (args.data.villaSum != null) alertVillaSum = args.data.villaSum;
-          if (args.data.societyCash != null) alertSocietyCash = args.data.societyCash;
-          return {};
-        },
+        update: async () => ({}),
       },
     } as unknown as PrismaClient;
 
     const first = await reconcileSocietyLedger("s-fixture", db);
-    assert.equal(first.alertsUpdated, 1);
-    assert.equal(alertVillaSum, 600);
-    assert.equal(alertSocietyCash, 800);
-    assert.equal(first.matched, false);
+    assert.equal(first.alertsUpdated, 0);
+    assert.equal(first.alertsResolved, 1);
+    assert.equal(first.matched, true);
+    assert.equal(resolveCalled, true);
   });
 });

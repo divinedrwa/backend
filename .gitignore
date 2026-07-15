@@ -8,6 +8,7 @@ coverage/
 
 # Runtime/generated
 uploads/
+.local-db-dumps/
 *.log
 npm-debug.log*
 yarn-debug.log*

@@ -37,6 +37,7 @@ import {
 } from "./services/razorpay-order-notes";
 import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import { invalidateReconcileCache } from "./services/resident-pending-dues";
+import { checkOnlineGatewayCaptureAllowed } from "../../lib/sandboxSociety";
 
 /** True when the client is continuing the same checkout (back from Razorpay), not a fresh attempt. */
 function isSameRazorpayCheckoutAttempt(
@@ -380,6 +381,15 @@ router.post(
         res.status(503).json({
           message: "Online payments are not configured",
           code: "PAYMENT_GATEWAY_UNAVAILABLE",
+        });
+        return;
+      }
+
+      const sandboxBlock = await checkOnlineGatewayCaptureAllowed(auth.societyId);
+      if (sandboxBlock) {
+        res.status(403).json({
+          message: sandboxBlock.message,
+          code: sandboxBlock.code,
         });
         return;
       }

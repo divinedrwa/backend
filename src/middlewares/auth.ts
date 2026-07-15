@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from "express";
 import { SocietyStatus, SocietySubscriptionStatus, UserRole } from "@prisma/client";
 import { prisma } from "../lib/prisma";
 import { verifyAuthToken } from "../utils/jwt";
+import { readBearerOrCookieToken } from "../lib/tenantAuthCookie";
 
 // ── Auth user cache ─────────────────────────────────────────────────
 // Short-lived in-memory cache for the per-request user+society lookup.
@@ -112,13 +113,15 @@ function isSuperAdminAllowedPath(req: Request): boolean {
  * Super admin tokens may only call /api/auth, /api/public, /api/super.
  */
 export async function requireAuth(req: Request, res: Response, next: NextFunction): Promise<void> {
-  const authHeader = req.headers.authorization;
-  if (!authHeader?.startsWith("Bearer ")) {
+  const token = readBearerOrCookieToken(
+    req.headers.authorization,
+    req.headers.cookie,
+  );
+  if (!token) {
     res.status(401).json({ message: "Unauthorized" });
     return;
   }
 
-  const token = authHeader.slice(7);
   let payload: ReturnType<typeof verifyAuthToken>;
   try {
     payload = verifyAuthToken(token);

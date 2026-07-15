@@ -17,6 +17,7 @@ import {
 import { computeGatewayCheckoutQuoteForCycle, computeGatewayPayAllCheckoutQuote } from "./services/gateway-pay-all";
 import { ensureMaintenanceCollectionForBillingCycle, settleBillingCycleFromAdvanceCredit } from "./billing-collection-link";
 import { isGatewayLedgerSynced, reconcilePhonePeFromPoll } from "./gateway-payment-settle";
+import { checkOnlineGatewayCaptureAllowed } from "../../lib/sandboxSociety";
 import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import { invalidateReconcileCache } from "./services/resident-pending-dues";
 
@@ -246,6 +247,15 @@ router.post(
         res.status(503).json({
           message: "PhonePe payments are not configured",
           code: "PAYMENT_GATEWAY_UNAVAILABLE",
+        });
+        return;
+      }
+
+      const sandboxBlock = await checkOnlineGatewayCaptureAllowed(auth.societyId);
+      if (sandboxBlock) {
+        res.status(403).json({
+          message: sandboxBlock.message,
+          code: sandboxBlock.code,
         });
         return;
       }

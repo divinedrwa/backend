@@ -12,6 +12,7 @@ import {
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { getLegalConsentStatus } from "../../lib/legalVersions";
+import { setTenantAuthCookies, clearTenantAuthCookies } from "../../lib/tenantAuthCookie";
 import { validateBody } from "../../middlewares/validate";
 import crypto from "crypto";
 import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
@@ -293,6 +294,7 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
       });
     }
 
+    clearTenantAuthCookies(res);
     return res.status(204).send();
   } catch (error) {
     next(error);
@@ -598,7 +600,9 @@ router.post("/admin/login", loginRateLimiter, validateBody(adminLoginSchema), as
 
     clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
-    return res.json(await serializeAuthUser(user));
+    const authBody = await serializeAuthUser(user);
+    setTenantAuthCookies(res, { token: authBody.token, refreshToken: authBody.refreshToken });
+    return res.json(authBody);
   } catch (error) {
     next(error);
   }

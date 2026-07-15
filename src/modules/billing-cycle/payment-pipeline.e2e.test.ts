@@ -305,7 +305,7 @@ describe("payment pipeline E2E harness (C1)", () => {
     assert.equal(result.cycleResults[0]?.creditApplied, 200);
   });
 
-  it("reconciliation creates alert when cash exceeds snapshot settled total", async () => {
+  it("bank overpayment vs snapshot is auto-matched (advance credit, no alert)", async () => {
     const db = fakeReconcilePrisma({
       snapshots: [
         {
@@ -345,9 +345,9 @@ describe("payment pipeline E2E harness (C1)", () => {
     });
 
     const result = await reconcileSocietyLedger("s1", db);
-    assert.equal(result.matched, false);
-    assert.equal(result.alertsCreated, 1);
-    assert.ok(result.cycleResults[0]!.unexplainedDifference > 0);
+    assert.equal(result.matched, true);
+    assert.equal(result.alertsCreated, 0);
+    assert.equal(result.cycleResults[0]!.unexplainedDifference, 0);
   });
 
   it("duplicate guard skips reversed payments", async () => {

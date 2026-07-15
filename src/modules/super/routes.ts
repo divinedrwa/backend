@@ -21,6 +21,7 @@ import { auditFromRequest } from "../../services/audit.service";
 import { compareSemver } from "../../lib/semver";
 import { computeOnboardingStatus } from "../../lib/societyOnboarding";
 import { aggregatePlatformRevenue } from "../../lib/platformRevenue";
+import { societyIsSandboxColumnExists } from "../../lib/sandboxSociety";
 
 const router = Router();
 
@@ -30,6 +31,7 @@ router.use(requireRole(UserRole.SUPER_ADMIN));
 const createSocietySchema = z.object({
   name: z.string().trim().min(2).max(200),
   address: z.string().trim().max(500).optional(),
+  isSandbox: z.boolean().optional(),
 });
 
 function parseSocietySearch(req: { query: Record<string, unknown> }): string | undefined {
@@ -48,13 +50,21 @@ router.post("/societies", validateBody(createSocietySchema), async (req, res, ne
     trialEndsAt.setDate(trialEndsAt.getDate() + 30);
 
     const society = await prisma.$transaction(async (tx) => {
+      const hasSandboxFlag = await societyIsSandboxColumnExists();
       const created = await tx.society.create({
         data: {
           name: body.name.trim(),
           address: body.address?.trim() || null,
           createdByUserId: req.auth!.userId,
+          ...(hasSandboxFlag && body.isSandbox === true ? { isSandbox: true } : {}),
         },
-        select: { id: true, name: true, address: true, status: true },
+        select: {
+          id: true,
+          name: true,
+          address: true,
+          status: true,
+          ...(hasSandboxFlag ? { isSandbox: true } : {}),
+        },
       });
       await tx.societySubscription.create({
         data: {

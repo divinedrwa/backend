@@ -9,6 +9,7 @@ import { logger } from "./lib/logger";
 import { prisma } from "./lib/prisma";
 import { runBillingReminderJobs, syncAllBillingCycleStatuses } from "./modules/billing-cycle/services/cycle-service";
 import { reconcileAllSocieties } from "./lib/reconciliation";
+import { autoGenerateNextMaintenanceCycles } from "./lib/autoMaintenanceCycle";
 import { NotificationService } from "./services/notification.service";
 import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
@@ -73,6 +74,15 @@ cron.schedule(
             {
               name: "billingReminders",
               fn: async () => { await runBillingReminderJobs(); },
+            },
+            {
+              name: "autoMaintenanceCycles",
+              fn: async () => {
+                const r = await autoGenerateNextMaintenanceCycles();
+                if (r.cyclesCreated > 0) {
+                  logger.info(r, "[billing-cron] Auto maintenance cycles");
+                }
+              },
             },
             {
               name: "ledgerReconciliation",

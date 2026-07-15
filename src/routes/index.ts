@@ -51,6 +51,7 @@ import invitationRoutes from "../modules/invitations/routes";
 import importRoutes from "../modules/import/routes";
 import exportRoutes from "../modules/export/routes";
 import reconciliationRoutes from "../modules/reconciliation/routes";
+import adminOpsRoutes from "../modules/admin-ops/system-health.routes";
 import upiPaymentAdminRoutes from "../modules/upi-payments/admin-routes";
 import upiPaymentResidentRoutes from "../modules/upi-payments/resident-routes";
 import specialProjectRoutes from "../modules/special-projects/routes";
@@ -159,6 +160,9 @@ router.use("/v1", billingV1Routes);
 
 /** Financial reconciliation & monitoring (admin only). */
 router.use("/reconciliation", reconciliationRoutes);
+
+/** Admin ops: system health (F1). */
+router.use("/admin-ops", adminOpsRoutes);
 
 /** UPI payment submissions (admin verify/reject). */
 router.use("/upi-payments", upiPaymentAdminRoutes);

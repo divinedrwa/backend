@@ -21,6 +21,11 @@ import { Sentry } from "./instrument";
 
 export const app = express();
 
+// JSON API responses must not use Express conditional ETags — browsers send
+// If-None-Match on repeat GETs, Express returns 304 with an empty body, and
+// axios rejects non-2xx statuses so clients show false "could not load" errors.
+app.set("etag", false);
+
 // Trust the first proxy hop so express-rate-limit and similar middlewares
 // see the client IP (not the proxy's) when deployed behind nginx/Vercel/Render.
 app.set("trust proxy", 1);
@@ -100,6 +105,7 @@ function corsOriginCheck(
 
 app.use(
   cors({
+    credentials: true,
     origin:
       corsAllowList.length > 0 || vercelSlug || firebaseProjectId
         ? corsOriginCheck

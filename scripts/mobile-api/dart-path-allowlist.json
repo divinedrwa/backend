@@ -1,0 +1,6 @@
+{
+  "paths": [
+    "/auth/logout",
+    "/guards/parcel-received"
+  ]
+}

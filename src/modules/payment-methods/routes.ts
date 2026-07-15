@@ -21,6 +21,10 @@ import {
   getEnvPhonePeDisplayName,
   isPhonePeConfigured,
 } from "../../services/phonepe-billing";
+import {
+  isSandboxSociety,
+  validateGatewayConfigForSandbox,
+} from "../../lib/sandboxSociety";
 import { isUpiQrConfigReady } from "../../lib/decodeUpiQrImage";
 import {
   enrichUpiVpaConfig,
@@ -91,6 +95,18 @@ router.post(
       }
       if (type === PaymentMethodType.UPI_VPA && !isUpiVpaConfigReady(finalConfig)) {
         enabled = false;
+      }
+
+      if (
+        type === PaymentMethodType.RAZORPAY ||
+        type === PaymentMethodType.PHONEPE
+      ) {
+        if (await isSandboxSociety(societyId)) {
+          const sandboxIssue = validateGatewayConfigForSandbox(type, finalConfig);
+          if (sandboxIssue) {
+            return res.status(400).json(sandboxIssue);
+          }
+        }
       }
 
       const encryptedConfig = encryptConfigSecrets(type, finalConfig);
@@ -190,6 +206,23 @@ router.patch(
           }
         }
         data.config = encryptConfigSecrets(existing.type, mergedConfig) as Prisma.InputJsonValue;
+      }
+
+      const configToValidate =
+        mergedConfig ?? (existing.config as Record<string, unknown>);
+      if (
+        existing.type === PaymentMethodType.RAZORPAY ||
+        existing.type === PaymentMethodType.PHONEPE
+      ) {
+        if (await isSandboxSociety(societyId)) {
+          const sandboxIssue = validateGatewayConfigForSandbox(
+            existing.type,
+            configToValidate,
+          );
+          if (sandboxIssue) {
+            return res.status(400).json(sandboxIssue);
+          }
+        }
       }
 
       if (isEnabled !== undefined) {
