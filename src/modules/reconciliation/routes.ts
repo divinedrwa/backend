@@ -8,9 +8,24 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { reconcileSocietyLedger } from "../../lib/reconciliation";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { Prisma, UserRole } from "@prisma/client";
+
+function serializeAlert<T extends { villaSum: unknown; societyCash: unknown; creditApplied?: unknown; unexplainedDifference?: unknown; difference: unknown }>(
+  alert: T,
+) {
+  return {
+    ...alert,
+    villaSum: Number(alert.villaSum),
+    societyCash: Number(alert.societyCash),
+    creditApplied: Number(alert.creditApplied ?? 0),
+    unexplainedDifference:
+      alert.unexplainedDifference != null ? Number(alert.unexplainedDifference) : null,
+    difference: Number(alert.difference),
+  };
+}
 
 const router = Router();
 
@@ -67,7 +82,27 @@ router.get(
         totalDifference: allAlerts.reduce((sum, a) => sum + Number(a.difference), 0),
       };
 
-      return res.json({ alerts, stats, ...paginationMeta(total, alerts.length, pagination) });
+      // Include `month`/`year` aliases on cycle for deployed admin web (reads
+      // alert.cycle.month — API stores periodMonth/periodYear on the model).
+      const alertsPayload = alerts.map((a) => {
+        const serialized = serializeAlert(a);
+        return {
+          ...serialized,
+          cycle: a.cycle
+            ? {
+                ...a.cycle,
+                month: a.cycle.periodMonth,
+                year: a.cycle.periodYear,
+              }
+            : null,
+        };
+      });
+
+      return res.json({
+        alerts: alertsPayload,
+        stats,
+        ...paginationMeta(total, alerts.length, pagination),
+      });
     } catch (e) {
       next(e);
     }
@@ -129,13 +164,20 @@ router.get(
       const sixMonthsAgo = new Date();
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
-      const [unresolvedAlerts, criticalAlerts, recentPayments, totalCycles, activeCycles] =
+      const [unresolvedAlerts, criticalAlerts, warningAlerts, totalDifferenceAgg, recentPayments, totalCycles, activeCycles] =
         await Promise.all([
           prisma.reconciliationAlert.count({
             where: { societyId, resolvedAt: null },
           }),
           prisma.reconciliationAlert.count({
             where: { societyId, resolvedAt: null, severity: 'CRITICAL' },
+          }),
+          prisma.reconciliationAlert.count({
+            where: { societyId, resolvedAt: null, severity: 'WARNING' },
+          }),
+          prisma.reconciliationAlert.aggregate({
+            where: { societyId, resolvedAt: null },
+            _sum: { difference: true },
           }),
           prisma.maintenancePayment.count({
             where: {
@@ -151,9 +193,13 @@ router.get(
           }),
         ]);
 
+      const healthStatus =
+        criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY';
+      const totalDifference = Number(totalDifferenceAgg._sum.difference ?? 0);
+
       return res.json({
         financialHealth: {
-          status: criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY',
+          status: healthStatus,
           unresolvedAlerts,
           criticalAlerts,
           recentPayments7Days: recentPayments,
@@ -162,11 +208,35 @@ router.get(
           total: totalCycles,
           active: activeCycles,
         },
+        // Legacy flat shape — kept for deployed admin web until frontend v2 ships.
+        healthStatus,
+        criticalCount: criticalAlerts,
+        warningCount: warningAlerts,
+        totalDifference,
+        recentPaymentsCount: recentPayments,
+        totalCycles,
+        activeCycles,
       });
     } catch (e) {
       next(e);
     }
   }
+);
+
+// POST /api/reconciliation/run — manual reconcile + auto-resolve expected variances
+router.post(
+  "/run",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const result = await reconcileSocietyLedger(societyId);
+      return res.json({ ok: true, result });
+    } catch (e) {
+      next(e);
+    }
+  },
 );
 
 export default router;

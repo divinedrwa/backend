@@ -1,5 +1,6 @@
 import { Router } from "express";
 import authRoutes from "../modules/auth/routes";
+import legalRoutes from "../modules/legal/routes";
 import publicRoutes from "../modules/public/routes";
 import superRoutes from "../modules/super/routes";
 import {
@@ -86,6 +87,7 @@ const router = Router();
 router.use("/public", applyRateLimitIfEnabled(publicLimiter), publicRoutes);
 router.use("/auth", applyRateLimitIfEnabled(authLimiter), authRoutes);
 router.use("/super", applyRateLimitIfEnabled(superAdminLimiter), superRoutes);
+router.use("/legal", legalRoutes);
 router.use("/users", userRoutes);
 router.use("/resident-management", residentManagementRoutes);
 router.use("/villas", villaRoutes);

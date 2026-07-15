@@ -5,6 +5,12 @@ import { prisma } from "../../lib/prisma";
 import { cacheMiddleware } from "../../middlewares/cache";
 import { requireAuth } from "../../middlewares/auth";
 import { isMissingColumnError } from "../../lib/schemaChecks";
+import {
+  CURRENT_PRIVACY_VERSION,
+  CURRENT_TERMS_VERSION,
+  PRIVACY_URL,
+  TERMS_URL,
+} from "../../lib/legalVersions";
 
 const router = Router();
 
@@ -80,6 +86,20 @@ router.get("/app-version", async (req, res, next) => {
   } catch (e) {
     next(e);
   }
+});
+
+/**
+ * GET /api/public/legal-version — current Terms/Privacy versions + hosted URLs (no auth).
+ * Lets clients render/link the docs before login. Per-user acceptance state is at
+ * GET /api/legal/status (authenticated).
+ */
+router.get("/legal-version", cacheMiddleware(300), (_req, res) => {
+  res.json({
+    termsVersion: CURRENT_TERMS_VERSION,
+    privacyVersion: CURRENT_PRIVACY_VERSION,
+    termsUrl: TERMS_URL,
+    privacyUrl: PRIVACY_URL,
+  });
 });
 
 /**

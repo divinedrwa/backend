@@ -22,11 +22,20 @@ describe("computeCycleReconciliationBreakdown (A6)", () => {
     assert.equal(b.alertDifference, 0);
   });
 
-  it("flags excess cash over snapshot settled total", () => {
+  it("treats bank overpayment (cash > snapshot) as matched advance credit", () => {
     const b = computeCycleReconciliationBreakdown(300, 500);
-    assert.equal(b.matched, false);
+    assert.equal(b.matched, true);
+    assert.equal(b.advanceOverpayment, 200);
     assert.equal(b.creditApplied, 0);
-    assert.equal(b.unexplainedDifference, 200);
-    assert.equal(b.alertDifference, 200);
+    assert.equal(b.unexplainedDifference, 0);
+    assert.equal(b.alertDifference, 0);
+  });
+
+  it("buildReconciliationAutoResolveNote explains overpayment", async () => {
+    const { buildReconciliationAutoResolveNote } = await import("./reconciliation.js");
+    const b = computeCycleReconciliationBreakdown(24200, 24500);
+    const note = buildReconciliationAutoResolveNote("Maintenance May 2026", b);
+    assert.match(note, /overpayment/i);
+    assert.match(note, /300\.00/);
   });
 });

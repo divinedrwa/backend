@@ -5,6 +5,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import { isCategoryMutable } from "../../lib/notificationPreferences";
 import {
   isFirebaseConfigured,
   notifySocietyRoles,
@@ -91,6 +92,67 @@ router.post("/devices/remove", validateBody(removeDeviceSchema), async (req, res
       });
     }
     return res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * GET /api/notifications/preferences — L3 per-category push preferences for the caller.
+ * Returns every category with its effective `pushEnabled` and whether it's `mutable`
+ * (critical categories are always-on and cannot be muted). Absence of a row = enabled.
+ */
+router.get("/preferences", async (req, res, next) => {
+  try {
+    const { userId } = req.auth!;
+    const rows = await prisma.notificationCategoryPreference.findMany({
+      where: { userId },
+      select: { category: true, pushEnabled: true },
+    });
+    const byCategory = new Map(rows.map((r) => [r.category, r.pushEnabled]));
+
+    const categories = Object.values(NotificationCategory).map((category) => ({
+      category,
+      mutable: isCategoryMutable(category),
+      // Non-mutable categories are always enabled; mutable default to enabled.
+      pushEnabled: isCategoryMutable(category)
+        ? (byCategory.get(category) ?? true)
+        : true,
+    }));
+
+    res.json({ preferences: categories });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * PUT /api/notifications/preferences — mute/unmute push for one category.
+ * Rejects always-on categories (SOS, PAYMENT, SYSTEM) with 400.
+ */
+const updatePreferenceSchema = z.object({
+  category: z.nativeEnum(NotificationCategory),
+  pushEnabled: z.boolean(),
+});
+
+router.put("/preferences", validateBody(updatePreferenceSchema), async (req, res, next) => {
+  try {
+    const { userId } = req.auth!;
+    const { category, pushEnabled } = req.body as z.infer<typeof updatePreferenceSchema>;
+
+    if (!isCategoryMutable(category)) {
+      return res.status(400).json({
+        message: `The "${category}" category is critical and cannot be muted.`,
+      });
+    }
+
+    await prisma.notificationCategoryPreference.upsert({
+      where: { userId_category: { userId, category } },
+      create: { userId, category, pushEnabled },
+      update: { pushEnabled },
+    });
+
+    return res.json({ category, pushEnabled, mutable: true });
   } catch (error) {
     next(error);
   }

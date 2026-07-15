@@ -36,6 +36,7 @@ import {
 } from "./financial-dashboard-cycle";
 import { notifyUsers } from "../../services/notification.service";
 import { auditFromRequest } from "../../services/audit.service";
+import { reverseMaintenancePayment } from "../../lib/reverseMaintenancePayment";
 
 const router = Router();
 
@@ -945,6 +946,45 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
     next(error);
   }
 });
+
+/**
+ * POST /api/maintenance-management/payments/:paymentId/reverse
+ * Reverse one maintenance payment (L1 offset row + ledger resync).
+ * Does not change the legacy cycle-wide deleteMany reverse-payment endpoint above.
+ */
+const reverseSinglePaymentSchema = z.object({
+  reason: z.string().trim().max(500).optional(),
+});
+
+router.post(
+  "/payments/:paymentId/reverse",
+  validateBody(reverseSinglePaymentSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId, userId } = req.auth!;
+      const paymentId = req.params.paymentId;
+      const body = req.body as z.infer<typeof reverseSinglePaymentSchema>;
+
+      const result = await prisma.$transaction(
+        async (tx) =>
+          reverseMaintenancePayment(tx, {
+            paymentId,
+            societyId,
+            reversedByUserId: userId,
+            reason: body.reason,
+          }),
+        { timeout: 20_000 },
+      );
+
+      return res.status(200).json({
+        message: "Payment reversed",
+        ...result,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // POST /api/maintenance-management/apply-credit
 // Apply advance credit from prior overpayments to a billing cycle
