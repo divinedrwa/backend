@@ -4,6 +4,7 @@ import multer from "multer";
 import { ZodError } from "zod";
 import { Sentry } from "../instrument";
 import { logger } from "../lib/logger";
+import { PaymentReversalError } from "../lib/reverseMaintenancePayment";
 
 function captureServerError(err: unknown, req: Request): void {
   if (!process.env.SENTRY_DSN) return;
@@ -64,6 +65,17 @@ export function errorHandler(
       code: "DUPLICATE_PAYMENT_SUSPECTED",
       ...(duplicatePaymentId ? { duplicatePaymentId } : {}),
     });
+    return;
+  }
+
+  if (err instanceof PaymentReversalError) {
+    const status =
+      err.code === "PAYMENT_NOT_FOUND"
+        ? 404
+        : err.code === "ALREADY_REVERSED" || err.code === "ALREADY_OFFSET"
+          ? 409
+          : 400;
+    res.status(status).json({ message: err.message, code: err.code });
     return;
   }
 
