@@ -103,10 +103,11 @@ describe("finance regression fixtures (C7)", () => {
     assert.equal(junCycle!.creditApplied, 1500);
   });
 
-  it("FIXTURE_EXCESS_CASH: cash above snapshot settled triggers alert", async () => {
+  it("FIXTURE_EXCESS_CASH: bank overpayment vs snapshot is auto-matched (advance credit)", async () => {
     const breakdown = computeCycleReconciliationBreakdown(300, 500);
-    assert.equal(breakdown.matched, false);
-    assert.equal(breakdown.unexplainedDifference, 200);
+    assert.equal(breakdown.matched, true);
+    assert.equal(breakdown.advanceOverpayment, 200);
+    assert.equal(breakdown.unexplainedDifference, 0);
   });
 
   it("FIXTURE_CASH_MATCH: MP cash equals snapshot paidAmount", async () => {

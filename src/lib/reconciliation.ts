@@ -42,35 +42,62 @@ export type CycleReconciliationBreakdown = {
   villaSum: number;
   societyCash: number;
   creditApplied: number;
+  /** Cash received above snapshot settled — bank overpayment → advance credit pool. */
+  advanceOverpayment: number;
   unexplainedDifference: number;
   matched: boolean;
   /** Value stored on alerts — only unexplained drift, not credit-only gaps. */
   alertDifference: number;
 };
 
+/** Human-readable note when reconciliation auto-closes an alert (no payment mutation). */
+export function buildReconciliationAutoResolveNote(
+  cycleTitle: string,
+  breakdown: CycleReconciliationBreakdown,
+): string {
+  const { villaSum, societyCash, creditApplied, advanceOverpayment } = breakdown;
+  if (advanceOverpayment > MATCH_TOLERANCE_INR) {
+    return (
+      `Auto-resolved — ${cycleTitle}: ₹${advanceOverpayment.toFixed(2)} bank overpayment ` +
+      `(cash ₹${societyCash.toFixed(2)} vs snapshot settled ₹${villaSum.toFixed(2)}). ` +
+      `This is advance credit for future billing cycles, not missing money or a duplicate. ` +
+      `No payment or fund adjustment was made.`
+    );
+  }
+  if (creditApplied > MATCH_TOLERANCE_INR) {
+    return (
+      `Auto-resolved — ${cycleTitle}: ₹${creditApplied.toFixed(2)} settled from advance credit ` +
+      `(snapshot ₹${villaSum.toFixed(2)} vs cash ₹${societyCash.toFixed(2)} this period). ` +
+      `Prior overpayments covered this cycle. No payment correction needed.`
+    );
+  }
+  return `Auto-resolved — ${cycleTitle}: villa snapshots and society cash match within ₹0.01.`;
+}
+
 /**
- * A6: When advance credit settles snapshots without new cash, villaSum > societyCash
- * is expected — not a ledger error. Only excess cash (societyCash > villaSum) is flagged.
+ * A6: Two expected gaps are not ledger errors:
+ * - villaSum > societyCash → prior advance credit applied to snapshots
+ * - societyCash > villaSum → bank overpayment (advance credit pool for later cycles)
  */
 export function computeCycleReconciliationBreakdown(
   villaSum: number,
   societyCash: number,
 ): CycleReconciliationBreakdown {
   const creditApplied = Math.max(0, villaSum - societyCash);
-  const cashExcess = Math.max(0, societyCash - villaSum);
+  const advanceOverpayment = Math.max(0, societyCash - villaSum);
   const exactMatch = isReconciliationCycleMatched(villaSum, societyCash);
   const creditExplained =
-    creditApplied > MATCH_TOLERANCE_INR && cashExcess <= MATCH_TOLERANCE_INR;
-  const matched = exactMatch || creditExplained;
-  const unexplainedDifference = cashExcess;
+    creditApplied > MATCH_TOLERANCE_INR && advanceOverpayment <= MATCH_TOLERANCE_INR;
+  const overpaymentExplained =
+    advanceOverpayment > MATCH_TOLERANCE_INR && creditApplied <= MATCH_TOLERANCE_INR;
+  const matched = exactMatch || creditExplained || overpaymentExplained;
+  const unexplainedDifference = matched ? 0 : Math.abs(villaSum - societyCash);
   const alertDifference = matched ? 0 : Math.abs(villaSum - societyCash);
   return {
     villaSum,
     societyCash,
-    // creditApplied is max(0, villaSum − societyCash): the villa-side amount settled
-    // by advance credit rather than fresh cash. It is naturally 0 when cash exceeds
-    // the villa sum, so no branching is needed.
     creditApplied,
+    advanceOverpayment,
     unexplainedDifference,
     matched,
     alertDifference,
@@ -221,10 +248,7 @@ export async function reconcileSocietyLedger(
       });
 
       if (matched) {
-        const resolveNote =
-          creditApplied > MATCH_TOLERANCE_INR
-            ? `Auto-resolved: ₹${creditApplied.toFixed(2)} settled via advance credit (cash ₹${societyCash.toFixed(2)})`
-            : "Auto-resolved: ledger matched within ₹0.01 tolerance";
+        const resolveNote = buildReconciliationAutoResolveNote(data.cycleTitle, breakdown);
         const resolved = await db.reconciliationAlert.updateMany({
           where: {
             societyId,
