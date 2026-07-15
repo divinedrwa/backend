@@ -54,6 +54,19 @@ export function errorHandler(
     return;
   }
 
+  if (
+    err instanceof Error &&
+    (err as Error & { code?: string }).code === "DUPLICATE_PAYMENT_SUSPECTED"
+  ) {
+    const duplicatePaymentId = (err as Error & { duplicatePaymentId?: string }).duplicatePaymentId;
+    res.status(409).json({
+      message: err.message,
+      code: "DUPLICATE_PAYMENT_SUSPECTED",
+      ...(duplicatePaymentId ? { duplicatePaymentId } : {}),
+    });
+    return;
+  }
+
   if (err instanceof Prisma.PrismaClientKnownRequestError) {
     if (err.code === "P2003") {
       res.status(400).json({

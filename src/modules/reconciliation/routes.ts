@@ -129,13 +129,20 @@ router.get(
       const sixMonthsAgo = new Date();
       sixMonthsAgo.setMonth(sixMonthsAgo.getMonth() - 6);
 
-      const [unresolvedAlerts, criticalAlerts, recentPayments, totalCycles, activeCycles] =
+      const [unresolvedAlerts, criticalAlerts, warningAlerts, totalDifferenceAgg, recentPayments, totalCycles, activeCycles] =
         await Promise.all([
           prisma.reconciliationAlert.count({
             where: { societyId, resolvedAt: null },
           }),
           prisma.reconciliationAlert.count({
             where: { societyId, resolvedAt: null, severity: 'CRITICAL' },
+          }),
+          prisma.reconciliationAlert.count({
+            where: { societyId, resolvedAt: null, severity: 'WARNING' },
+          }),
+          prisma.reconciliationAlert.aggregate({
+            where: { societyId, resolvedAt: null },
+            _sum: { difference: true },
           }),
           prisma.maintenancePayment.count({
             where: {
@@ -151,9 +158,13 @@ router.get(
           }),
         ]);
 
+      const healthStatus =
+        criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY';
+      const totalDifference = Number(totalDifferenceAgg._sum.difference ?? 0);
+
       return res.json({
         financialHealth: {
-          status: criticalAlerts > 0 ? 'CRITICAL' : unresolvedAlerts > 0 ? 'WARNING' : 'HEALTHY',
+          status: healthStatus,
           unresolvedAlerts,
           criticalAlerts,
           recentPayments7Days: recentPayments,
@@ -162,6 +173,14 @@ router.get(
           total: totalCycles,
           active: activeCycles,
         },
+        // Legacy flat shape — kept for deployed admin web until frontend v2 ships.
+        healthStatus,
+        criticalCount: criticalAlerts,
+        warningCount: warningAlerts,
+        totalDifference,
+        recentPaymentsCount: recentPayments,
+        totalCycles,
+        activeCycles,
       });
     } catch (e) {
       next(e);
