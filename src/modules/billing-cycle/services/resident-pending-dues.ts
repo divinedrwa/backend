@@ -75,6 +75,15 @@ export async function reconcileVillaLedgersForRecentCycles(
   _reconcileTimestamps.set(villaId, Date.now());
 }
 
+/** Remaining cash due for one ledger row (matches buildCurrentCycleResponse). */
+export function computeRemainingDueFromLedgerRow(row: {
+  expectedAmount: number;
+  cashPaidAmount: number;
+  creditApplied: number;
+}): number {
+  return Math.max(0, row.expectedAmount - row.cashPaidAmount - row.creditApplied);
+}
+
 /**
  * Canonical pending-dues list for a billing subject (resident or admin-with-villa).
  * Uses [computeUserBillingLedger] — same source as pay-all and maintenance-pending.
@@ -111,7 +120,7 @@ export async function buildPendingDuesFromLedger(
   const rows: UserPendingDueRow[] = [];
 
   for (const row of ledger.cycles) {
-    const remainingDue = Math.max(0, row.expectedAmount - row.cashPaidAmount);
+    const remainingDue = computeRemainingDueFromLedgerRow(row);
     if (remainingDue <= 0.005) continue;
 
     const cycle = cycleById.get(row.cycleId);

@@ -1,6 +1,27 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { pendingDuesToCurrentCycleShape, type UserPendingDueRow } from "./resident-pending-dues";
+import {
+  pendingDuesToCurrentCycleShape,
+  computeRemainingDueFromLedgerRow,
+  type UserPendingDueRow,
+} from "./resident-pending-dues";
+
+describe("computeRemainingDueFromLedgerRow", () => {
+  it("subtracts advance credit already applied to the snapshot", () => {
+    // A-09 June: exp 1100, cash 0, ₹200 credit from May overpayment → ₹900 due
+    assert.equal(
+      computeRemainingDueFromLedgerRow({ expectedAmount: 1100, cashPaidAmount: 0, creditApplied: 200 }),
+      900,
+    );
+  });
+
+  it("returns zero when credit fully settles the cycle (A-05 June)", () => {
+    assert.equal(
+      computeRemainingDueFromLedgerRow({ expectedAmount: 1100, cashPaidAmount: 1000, creditApplied: 100 }),
+      0,
+    );
+  });
+});
 
 describe("pendingDuesToCurrentCycleShape", () => {
   it("maps ledger pending rows to /v1/cycles/current pendingDues shape", () => {
