@@ -913,7 +913,24 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     }
     const expenseByMonth = new Map<number, number>();
     const expenseBreakdownByMonth = new Map<number, Record<string, number>>();
+    const visibleYearCycles = (
+      await prisma.billingCycle.findMany({
+        where: { societyId, cycleKey: { startsWith: `${year}-` }, ...publishedBillingCycleFilter },
+        select: {
+          cycleKey: true,
+          publishedAt: true,
+          paymentStartDate: true,
+          paymentEndDate: true,
+        },
+      })
+    ).filter((c) => isAppVisibleBillingCycle(now, c));
+    const visibleExpenseMonths = new Set(
+      visibleYearCycles
+        .map((c) => parseInt(c.cycleKey.split("-")[1] ?? "", 10))
+        .filter((m) => m >= 1 && m <= 12),
+    );
     for (const e of yearExpenseSummaries) {
+      if (!visibleExpenseMonths.has(e.month)) continue;
       expenseByMonth.set(e.month, Number(e.totalExpenses ?? 0));
       const raw = (e.categoryBreakdown ?? {}) as Record<string, unknown>;
       const normalized: Record<string, number> = {};
@@ -1019,20 +1036,39 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
 
     const liveCategoryBreakdown: Record<string, number> = {};
     let liveExpenseTotal = 0;
-    for (const expense of periodLiveExpenses) {
-      const key = expense.category?.name ?? "Other";
-      const amt = Number(expense.amount);
-      if (amt <= 0) continue;
-      liveExpenseTotal += amt;
-      liveCategoryBreakdown[key] = (liveCategoryBreakdown[key] ?? 0) + amt;
+    const periodCycleKey = `${year}-${String(month).padStart(2, "0")}`;
+    const periodBillingCycle = await prisma.billingCycle.findFirst({
+      where: { societyId, cycleKey: periodCycleKey, ...publishedBillingCycleFilter },
+      select: {
+        id: true,
+        publishedAt: true,
+        paymentStartDate: true,
+        paymentEndDate: true,
+      },
+    });
+    const periodExpensesVisible =
+      periodBillingCycle != null && isAppVisibleBillingCycle(now, periodBillingCycle);
+
+    if (periodExpensesVisible) {
+      for (const expense of periodLiveExpenses) {
+        const key = expense.category?.name ?? "Other";
+        const amt = Number(expense.amount);
+        if (amt <= 0) continue;
+        liveExpenseTotal += amt;
+        liveCategoryBreakdown[key] = (liveCategoryBreakdown[key] ?? 0) + amt;
+      }
     }
-    const hasLiveExpenses = liveExpenseTotal > 0;
+    const hasLiveExpenses = periodExpensesVisible && liveExpenseTotal > 0;
     const residentExpenseTotal = hasLiveExpenses
       ? liveExpenseTotal
-      : Number(monthlyExpenseSummary?.totalExpenses ?? 0);
+      : periodExpensesVisible
+        ? Number(monthlyExpenseSummary?.totalExpenses ?? 0)
+        : 0;
     const residentCategoryBreakdown = hasLiveExpenses
       ? liveCategoryBreakdown
-      : ((monthlyExpenseSummary?.categoryBreakdown ?? {}) as Record<string, unknown>);
+      : periodExpensesVisible
+        ? ((monthlyExpenseSummary?.categoryBreakdown ?? {}) as Record<string, unknown>)
+        : {};
 
     return res.json({
       filter: { month, year },
