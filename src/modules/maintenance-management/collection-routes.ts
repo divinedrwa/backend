@@ -1219,6 +1219,8 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       const pay = lastPayByVilla.get(villa.id);
       const expected = Number(s.expectedAmount);
       const paidAmt = Number(s.paidAmount);
+      const cashThisCycle = cashByVilla.get(villa.id) ?? 0;
+      const creditAppliedThisCycle = Math.max(0, paidAmt - cashThisCycle);
 
       let uiStatus: "PAID" | "PENDING" | "OVERDUE" | "PARTIAL" = "PENDING";
       if (s.status === "PAID") uiStatus = "PAID";
@@ -1251,7 +1253,8 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
         paymentMode: pay?.paymentMode ?? null,
         snapshotId: s.id,
         advanceCredit: creditBalances.get(villa.id) ?? 0,
-        cashPaidThisCycle: cashByVilla.get(villa.id) ?? 0,
+        cashPaidThisCycle: cashThisCycle,
+        creditAppliedThisCycle,
         isExcluded: excludedVillaIds.has(villa.id),
       };
     });

@@ -16,6 +16,7 @@ import { prisma } from "../../lib/prisma";
 import {
   ensureVillaLedgersAligned,
   syncBillingUserCyclePaymentsFromSnapshot,
+  syncVillaBillingCyclesFromSnapshots,
 } from "../billing-cycle/billing-collection-link";
 import {
   loadBillingCyclePeriodKeys,
@@ -1080,67 +1081,23 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
         },
       });
 
-      // Walk up to this cycle so prior overpayment credit flows in.
+      // Global credit walk + billing sync (all FYs / cycles).
       await applyVillaCreditAcrossSnapshots(tx, {
         societyId,
         villaId: body.villaId,
         financialYearId: cycle.financialYearId,
-        throughCycleId: cycle.id,
+      });
+
+      await syncVillaBillingCyclesFromSnapshots(tx, {
+        societyId,
+        villaId: body.villaId,
+        source: BillingPaymentSource.CASH_MANUAL,
       });
 
       const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
         where: { id: snapshot.id },
         select: { paidAmount: true, status: true },
       });
-
-      // Sync UserCyclePayment (same pattern as mark-paid)
-      const billingCycle = await tx.billingCycle.findFirst({
-        where: { societyId, financialYearId: cycle.financialYearId, cycleKey: cycle.periodKey },
-        select: { id: true },
-      });
-      if (billingCycle) {
-        await clearExcludedResidentsUserCyclePayments(tx, {
-          societyId,
-          villaId: body.villaId,
-          billingCycleId: billingCycle.id,
-        });
-        const snapStatus = reconciledSnapshot?.status ?? "PENDING";
-        const payStatus =
-          snapStatus === "PAID" || snapStatus === "WAIVED"
-            ? BillingUserPaymentStatus.SUCCESS
-            : BillingUserPaymentStatus.PENDING;
-        const primaryResidents = await tx.user.findMany({
-          where: {
-            societyId,
-            villaId: body.villaId,
-            ...residentLikeRoleFilter,
-            isActive: true,
-            maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-          },
-          select: { id: true },
-        });
-        for (const u of primaryResidents) {
-          await tx.userCyclePayment.upsert({
-            where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-            create: {
-              userId: u.id,
-              cycleId: billingCycle.id,
-              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
-              paymentStatus: payStatus,
-              source: BillingPaymentSource.CASH_MANUAL,
-              manualMarkedByAdminId: adminId,
-              paidAt: new Date(),
-            },
-            update: {
-              amountPaid: new Prisma.Decimal(Number(reconciledSnapshot?.paidAmount ?? 0)),
-              paymentStatus: payStatus,
-              source: BillingPaymentSource.CASH_MANUAL,
-              manualMarkedByAdminId: adminId,
-              paidAt: new Date(),
-            },
-          });
-        }
-      }
 
       return {
         creditApplied,
@@ -1263,75 +1220,13 @@ router.post(
           societyId,
           villaId: body.villaId,
           financialYearId: cycle.financialYearId,
-          throughCycleId: cycle.id,
         });
 
-        // Sync UserCyclePayment for affected cycles so mobile app reflects
-        // the updated status (same pattern as apply-credit).
-        const walkedCycles = await tx.maintenanceCollectionCycle.findMany({
-          where: { societyId, financialYearId: cycle.financialYearId },
-          orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-          select: { id: true, periodMonth: true, periodYear: true, periodKey: true },
+        await syncVillaBillingCyclesFromSnapshots(tx, {
+          societyId,
+          villaId: body.villaId,
+          source: BillingPaymentSource.CASH_MANUAL,
         });
-        const throughIdx = walkedCycles.findIndex((c) => c.id === cycle.id);
-        const cyclesToSync = throughIdx >= 0 ? walkedCycles.slice(0, throughIdx + 1) : walkedCycles;
-
-        for (const wc of cyclesToSync) {
-          const snap = await tx.villaMaintenanceSnapshot.findUnique({
-            where: { cycleId_villaId: { cycleId: wc.id, villaId: body.villaId } },
-            select: { paidAmount: true, status: true },
-          });
-          if (!snap) continue;
-
-          const billingCycle = await tx.billingCycle.findFirst({
-            where: { societyId, financialYearId: cycle.financialYearId, cycleKey: wc.periodKey },
-            select: { id: true },
-          });
-          if (!billingCycle) continue;
-
-          await clearExcludedResidentsUserCyclePayments(tx, {
-            societyId,
-            villaId: body.villaId,
-            billingCycleId: billingCycle.id,
-          });
-
-          const snapStatus = snap.status;
-          const payStatus =
-            snapStatus === "PAID" || snapStatus === "WAIVED"
-              ? BillingUserPaymentStatus.SUCCESS
-              : BillingUserPaymentStatus.PENDING;
-          const primaryResidents = await tx.user.findMany({
-            where: {
-              societyId,
-              villaId: body.villaId,
-              role: { in: [UserRole.RESIDENT, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
-              isActive: true,
-              maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-            },
-            select: { id: true },
-          });
-          for (const u of primaryResidents) {
-            await tx.userCyclePayment.upsert({
-              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-              create: {
-                userId: u.id,
-                cycleId: billingCycle.id,
-                amountPaid: new Prisma.Decimal(Number(snap.paidAmount)),
-                paymentStatus: payStatus,
-                source: BillingPaymentSource.CASH_MANUAL,
-                manualMarkedByAdminId: adminId,
-                paidAt: new Date(),
-              },
-              update: {
-                amountPaid: new Prisma.Decimal(Number(snap.paidAmount)),
-                paymentStatus: payStatus,
-                source: BillingPaymentSource.CASH_MANUAL,
-                manualMarkedByAdminId: adminId,
-                paidAt: new Date(),
-              },
-            });
-          }
-        }
 
         // Read credit balance after reconciliation
         const { creditPool } = await getVillaCreditBalance(tx, {
@@ -1342,6 +1237,7 @@ router.post(
         return { creditPool };
       }, { timeout: 15000 });
 
+      invalidateReconcileCache(body.villaId);
       invalidateMoneySnapshotCache(societyId);
       auditFromRequest(req, {
         societyId,

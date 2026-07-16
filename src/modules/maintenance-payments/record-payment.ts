@@ -1,14 +1,10 @@
 import {
   BillingPaymentSource,
-  BillingUserPaymentStatus,
-  MaintenanceBillingRole,
   PaymentMode,
   Prisma,
 } from "@prisma/client";
-import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
-import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { findLikelyDuplicateMaintenancePayment } from "../../lib/paymentDuplicateGuard";
-import { ensureVillaLedgersAligned } from "../billing-cycle/billing-collection-link";
+import { ensureVillaLedgersAligned, syncVillaBillingCyclesFromSnapshots } from "../billing-cycle/billing-collection-link";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 
 type Tx = Prisma.TransactionClient;
@@ -170,88 +166,19 @@ export async function recordPaymentAndSyncLedgers(
       include: paymentInclude,
     }));
 
-  // 5. Run credit walker to reconcile snapshot from MP ledger
+  // 5. Run credit walker + sync billing across all FYs/cycles
   if (mcc) {
     await applyVillaCreditAcrossSnapshots(tx, {
       societyId,
       villaId,
       financialYearId: mcc.financialYearId,
-      // When walkAllCycles is set (e.g. "Pay All" multi-month payments),
-      // let the walker process every cycle so overpayment credit flows
-      // forward to settle subsequent unpaid cycles.
-      throughCycleId: params.walkAllCycles ? undefined : mcc.id,
     });
 
-    // 6. Sync UserCyclePayment so resident billing screens reflect the new payment.
-    //    When walkAllCycles is set, sync ALL cycles in the financial year
-    //    (not just the payment's cycle) since the walker may have updated many.
-    const cyclesToSync = params.walkAllCycles
-      ? await tx.maintenanceCollectionCycle.findMany({
-          where: { societyId, financialYearId: mcc.financialYearId },
-          orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
-          select: { id: true, periodKey: true },
-        })
-      : [{ id: mcc.id, periodKey: mcc.periodKey }];
-
-    const primaryResidents = await tx.user.findMany({
-      where: {
-        societyId,
-        villaId,
-        ...residentLikeRoleFilter,
-        isActive: true,
-        maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-      },
-      select: { id: true },
+    await syncVillaBillingCyclesFromSnapshots(tx, {
+      societyId,
+      villaId,
+      source: billingSource,
     });
-
-    for (const cycleToSync of cyclesToSync) {
-      const billingCycle = await tx.billingCycle.findFirst({
-        where: { societyId, financialYearId: mcc.financialYearId, cycleKey: cycleToSync.periodKey },
-        select: { id: true },
-      });
-      if (!billingCycle) continue;
-
-      await clearExcludedResidentsUserCyclePayments(tx, {
-        societyId,
-        villaId,
-        billingCycleId: billingCycle.id,
-      });
-
-      const reconciledSnap = await tx.villaMaintenanceSnapshot.findUnique({
-        where: { cycleId_villaId: { cycleId: cycleToSync.id, villaId } },
-        select: { paidAmount: true, status: true },
-      });
-      const snapStatus = reconciledSnap?.status ?? "PENDING";
-      const paidAmt = Number(reconciledSnap?.paidAmount ?? 0);
-
-      const payStatus =
-        snapStatus === "PAID" || snapStatus === "WAIVED"
-          ? BillingUserPaymentStatus.SUCCESS
-          : BillingUserPaymentStatus.PENDING;
-      for (const u of primaryResidents) {
-        await tx.userCyclePayment.upsert({
-          where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-          create: {
-            userId: u.id,
-            cycleId: billingCycle.id,
-            amountPaid: new Prisma.Decimal(paidAmt),
-            paymentStatus: payStatus,
-            source: billingSource,
-            manualMarkedByAdminId:
-              billingSource === BillingPaymentSource.CASH_MANUAL ? recordedByUserId : null,
-            paidAt: new Date(paymentDate),
-          },
-          update: {
-            amountPaid: new Prisma.Decimal(paidAmt),
-            paymentStatus: payStatus,
-            source: billingSource,
-            manualMarkedByAdminId:
-              billingSource === BillingPaymentSource.CASH_MANUAL ? recordedByUserId : null,
-            paidAt: new Date(paymentDate),
-          },
-        });
-      }
-    }
 
     const paymentMonthBillingCycle = await tx.billingCycle.findFirst({
       where: { societyId, financialYearId: mcc.financialYearId, cycleKey: mcc.periodKey },

@@ -33,8 +33,9 @@ const snapWalkSelect = {
  *
  * The walk is **global** — it traverses ALL cycles across ALL financial years
  * chronologically so that credit accumulated in FY1 carries forward into FY2.
- * Only snapshots within the target `financialYearId` (and up to
- * `throughCycleId` when set) are actually written.
+ * Snapshots for **every** walked cycle are written (including cross-FY spillover).
+ * `financialYearId` is retained for API compatibility; `throughCycleId` no longer
+ * truncates the walk (credit must propagate to all later cycles).
  *
  * Walk semantics:
  *   1. List ALL the society's cycles in chronological order (period year/month).
@@ -48,8 +49,7 @@ const snapWalkSelect = {
  *   6. `WAIVED` snapshots are left alone — they were intentionally zeroed
  *      out and don't consume credit.
  *
- * @param params.throughCycleId  When set, the walker only reconciles
- *   cycles up to and including this cycle (within the target FY).
+ * @param params.throughCycleId  Deprecated — kept for callers; walk always covers all cycles.
  */
 export async function applyVillaCreditAcrossSnapshots(
   tx: Tx,
@@ -72,19 +72,11 @@ export async function applyVillaCreditAcrossSnapshots(
 
   const billingCtx = await loadCreditWalkBillingContext(tx, societyId, [villaId]);
 
-  const targetFyCycleIds = new Set<string>();
-  for (const c of allCycles) {
-    if (c.financialYearId !== financialYearId) continue;
-    targetFyCycleIds.add(c.id);
-    if (c.id === throughCycleId) break;
-  }
-
-  let walkCycles = allCycles;
-  if (throughCycleId) {
-    const idx = allCycles.findIndex((c) => c.id === throughCycleId);
-    if (idx >= 0) walkCycles = allCycles.slice(0, idx + 1);
-  }
-
+  // Credit is global — always walk and persist every chronological cycle so
+  // overpayments / manual ADJ in FY1 update snapshots in FY2 (e.g. May→June).
+  void financialYearId;
+  void throughCycleId;
+  const walkCycles = allCycles;
   const walkCycleIds = walkCycles.map((c) => c.id);
 
   const [snapshots, cashAgg, unlinkedRows] = await Promise.all([
@@ -132,8 +124,6 @@ export async function applyVillaCreditAcrossSnapshots(
     const step = advanceCreditWalkStep(expected, cashThis, creditPool);
     const applied = step.applied;
     creditPool = step.creditPool;
-
-    if (!targetFyCycleIds.has(cycle.id)) continue;
 
     const newStatus = refreshSnapshotStatus(expected, applied, cycle.dueDate);
     const paidUnchanged = Math.abs(applied - Number(snap.paidAmount)) < 0.005;

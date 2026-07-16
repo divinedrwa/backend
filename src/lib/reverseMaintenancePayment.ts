@@ -1,16 +1,14 @@
 import {
   BillingPaymentSource,
-  BillingUserPaymentStatus,
   MaintenanceBillingRole,
   PaymentMode,
   Prisma,
 } from "@prisma/client";
 import crypto from "node:crypto";
-import { clearExcludedResidentsUserCyclePayments } from "./maintenanceBillingRole";
 import { residentLikeRoleFilter } from "./residentLike";
 import { attemptGatewayRefund, type GatewayRefundResult } from "./gatewayRefund";
 import { applyVillaCreditAcrossSnapshots } from "../modules/maintenance-management/credit-walker";
-import { syncBillingUserCyclePaymentsFromSnapshot } from "../modules/billing-cycle/billing-collection-link";
+import { syncVillaBillingCyclesFromSnapshots } from "../modules/billing-cycle/billing-collection-link";
 import { invalidateMoneySnapshotCache } from "./societyFinance";
 
 type Tx = Prisma.TransactionClient;
@@ -113,7 +111,16 @@ export async function reverseMaintenancePayment(
       societyId: params.societyId,
       villaId: payment.villaId,
       financialYearId: payment.financialYearId,
-      throughCycleId: payment.maintenanceCollectionCycleId,
+    });
+
+    await syncVillaBillingCyclesFromSnapshots(tx, {
+      societyId: params.societyId,
+      villaId: payment.villaId,
+      source:
+        payment.paymentMode === PaymentMode.ONLINE ||
+        payment.paymentMode === PaymentMode.PHONEPE
+          ? BillingPaymentSource.GATEWAY
+          : BillingPaymentSource.CASH_MANUAL,
     });
 
     const snap = await tx.villaMaintenanceSnapshot.findUnique({
@@ -157,27 +164,7 @@ export async function reverseMaintenancePayment(
           },
           select: { id: true },
         });
-        if (billingCycle) {
-          const paidAmt = Number(snap.paidAmount);
-          await clearExcludedResidentsUserCyclePayments(tx, {
-            societyId: params.societyId,
-            villaId: payment.villaId,
-            billingCycleId: billingCycle.id,
-          });
-          await syncBillingUserCyclePaymentsFromSnapshot(tx, {
-            societyId: params.societyId,
-            villaId: payment.villaId,
-            billingCycleId: billingCycle.id,
-            paidAmount: paidAmt,
-            snapStatus: snap.status,
-            source:
-              payment.paymentMode === PaymentMode.ONLINE ||
-              payment.paymentMode === PaymentMode.PHONEPE
-                ? BillingPaymentSource.GATEWAY
-                : BillingPaymentSource.CASH_MANUAL,
-            cashPaidAmount: paidAmt,
-          });
-
+        if (billingCycle && snap.status !== "PAID" && snap.status !== "WAIVED") {
           const primaryResidents = await tx.user.findMany({
             where: {
               societyId: params.societyId,
@@ -188,21 +175,15 @@ export async function reverseMaintenancePayment(
             },
             select: { id: true },
           });
-          const payStatus =
-            snap.status === "PAID" || snap.status === "WAIVED"
-              ? BillingUserPaymentStatus.SUCCESS
-              : BillingUserPaymentStatus.PENDING;
           for (const u of primaryResidents) {
-            if (payStatus === BillingUserPaymentStatus.PENDING) {
-              await tx.userCyclePayment.updateMany({
-                where: { userId: u.id, cycleId: billingCycle.id },
-                data: {
-                  paymentGatewayOrderId: null,
-                  paymentGatewayPaymentId: null,
-                  idempotencyKey: null,
-                },
-              });
-            }
+            await tx.userCyclePayment.updateMany({
+              where: { userId: u.id, cycleId: billingCycle.id },
+              data: {
+                paymentGatewayOrderId: null,
+                paymentGatewayPaymentId: null,
+                idempotencyKey: null,
+              },
+            });
           }
         }
       }

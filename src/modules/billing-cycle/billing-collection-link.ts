@@ -250,6 +250,65 @@ export async function refreshUnpaidSnapshotsForBillingCycleAmount(
 }
 
 /**
+ * After a global credit walk, align every billing UserCyclePayment row for a
+ * villa across all financial years. Uses real cycle cash only on amountPaid
+ * (never snapshot total, which includes applied credit).
+ */
+export async function syncVillaBillingCyclesFromSnapshots(
+  tx: Prisma.TransactionClient,
+  params: {
+    societyId: string;
+    villaId: string;
+    source?: BillingPaymentSource;
+  },
+): Promise<void> {
+  const mcCycles = await tx.maintenanceCollectionCycle.findMany({
+    where: { societyId: params.societyId },
+    orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+    select: { id: true, periodKey: true, financialYearId: true },
+  });
+
+  for (const mc of mcCycles) {
+    const snap = await tx.villaMaintenanceSnapshot.findUnique({
+      where: { cycleId_villaId: { cycleId: mc.id, villaId: params.villaId } },
+      select: { paidAmount: true, status: true },
+    });
+    if (!snap) continue;
+
+    const billingCycle = await tx.billingCycle.findFirst({
+      where: {
+        societyId: params.societyId,
+        financialYearId: mc.financialYearId,
+        cycleKey: mc.periodKey,
+      },
+      select: { id: true },
+    });
+    if (!billingCycle) continue;
+
+    const cashAgg = await tx.maintenancePayment.aggregate({
+      where: {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        maintenanceCollectionCycleId: mc.id,
+        reversedAt: null,
+      },
+      _sum: { amount: true },
+    });
+    const realCash = Math.max(0, Number(cashAgg._sum.amount ?? 0));
+
+    await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      billingCycleId: billingCycle.id,
+      paidAmount: Number(snap.paidAmount),
+      snapStatus: snap.status,
+      source: params.source ?? BillingPaymentSource.CASH_MANUAL,
+      cashPaidAmount: realCash,
+    });
+  }
+}
+
+/**
  * After snapshot/ledger update, align UserCyclePayment rows for primary residents
  * so Maintenance Billing admin matches maintenance-management.
  */
