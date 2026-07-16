@@ -17,6 +17,7 @@ import { requireAuth, requireRole, invalidateAuthCache } from "../../middlewares
 import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
+import { loadEarlyCycleExpensesPreview } from "./expense-early-cycle-preview";
 
 const updateProfileSchema = z.object({
   name: z.string().trim().min(2).optional(),
@@ -250,6 +251,8 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         ? Math.min(100, (collectedForRate / money.expectedAllTime) * 100)
         : 0;
 
+    const earlyCycleExpenses = await loadEarlyCycleExpensesPreview(prisma, societyId);
+
     res.setHeader("Cache-Control", "no-store");
     return res.json({
       user: {
@@ -283,6 +286,7 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
         pendingDues,
         projectedBalance,
         collectionRate: Math.round(collectionRate * 10) / 10,
+        earlyCycleExpenses,
       },
       timestamp: new Date(),
     });
