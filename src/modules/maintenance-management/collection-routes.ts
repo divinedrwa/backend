@@ -19,6 +19,7 @@ import {
 } from "../billing-cycle/billing-collection-link";
 import {
   loadBillingCyclePeriodKeys,
+  loadAppVisibleBillingCyclePeriodKeys,
   maintenanceCollectionBackedByBillingCycleWhere,
 } from "../billing-cycle/billing-collection-scope";
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
@@ -232,7 +233,7 @@ router.get("/financial-years/:fyId/cycles", async (req, res, next) => {
     const cycles = await prisma.maintenanceCollectionCycle.findMany({
       where: maintenanceCollectionBackedByBillingCycleWhere(
         societyId,
-        await loadBillingCyclePeriodKeys(prisma, societyId, fyId),
+        await loadAppVisibleBillingCyclePeriodKeys(prisma, societyId, fyId),
         { financialYearId: fyId },
       ),
       orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],

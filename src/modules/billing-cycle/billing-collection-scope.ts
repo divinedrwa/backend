@@ -1,5 +1,6 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { isAppVisibleBillingCycle } from "./domain/cycleStatus";
 
 type DbClient = typeof prisma | Prisma.TransactionClient;
 
@@ -33,6 +34,31 @@ export function maintenanceCollectionBackedByBillingCycleWhere(
     periodKey: { in: periodKeys },
     ...extra,
   };
+}
+
+/** BillingCycle.cycleKey values visible on mobile (published OPEN/CLOSED). */
+export async function loadAppVisibleBillingCyclePeriodKeys(
+  db: DbClient,
+  societyId: string,
+  financialYearId?: string | null,
+  nowUtc = new Date(),
+): Promise<string[]> {
+  const rows = await db.billingCycle.findMany({
+    where: {
+      societyId,
+      ...(financialYearId ? { financialYearId } : {}),
+      publishedAt: { not: null },
+    },
+    select: {
+      cycleKey: true,
+      publishedAt: true,
+      paymentStartDate: true,
+      paymentEndDate: true,
+    },
+  });
+  return rows
+    .filter((r) => isAppVisibleBillingCycle(nowUtc, r))
+    .map((r) => r.cycleKey);
 }
 
 /** True when a BillingCycle row still exists for this collection periodKey. */

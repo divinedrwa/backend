@@ -5,6 +5,7 @@ import { logger } from "../../lib/logger";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { MaintenanceBillingRole, UserRole } from "@prisma/client";
 import { computeUserBillingLedger, publishedBillingCycleFilter } from "../billing-cycle/services/cycle-service";
+import { isAppVisibleBillingCycle } from "../billing-cycle/domain/cycleStatus";
 import { reconcileVillaLedgersForRecentCycles } from "../billing-cycle/services/resident-pending-dues";
 import {
   loadPerCycleLateFeeContext,
@@ -12,7 +13,7 @@ import {
 } from "../billing-cycle/services/per-cycle-late-fee-context";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 import {
-  loadBillingCyclePeriodKeys,
+  loadAppVisibleBillingCyclePeriodKeys,
   maintenanceCollectionBackedByBillingCycleWhere,
 } from "../billing-cycle/billing-collection-scope";
 
@@ -104,6 +105,7 @@ function parseCycleMonthYear(cycleKey: string, dueDate: Date | null): { month: n
 }
 
 async function buildResidentLedgerRows(societyId: string, userId: string): Promise<ResidentLedgerRow[]> {
+  const now = new Date();
   const [ledger, cycles] = await Promise.all([
     computeUserBillingLedger(societyId, userId),
     prisma.billingCycle.findMany({
@@ -112,15 +114,22 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
         id: true,
         cycleKey: true,
         title: true,
+        paymentStartDate: true,
         paymentEndDate: true,
+        publishedAt: true,
       },
     }),
   ]);
 
-  const cycleById = new Map(cycles.map((cycle) => [cycle.id, cycle]));
-  const now = new Date();
+  const cycleById = new Map(
+    cycles
+      .filter((c) => isAppVisibleBillingCycle(now, c))
+      .map((cycle) => [cycle.id, cycle]),
+  );
 
-  return ledger.cycles.map((row) => {
+  return ledger.cycles
+    .filter((row) => cycleById.has(row.cycleId))
+    .map((row) => {
     const cycle = cycleById.get(row.cycleId);
     const dueDate = cycle?.paymentEndDate ?? null;
     const { month, year } = parseCycleMonthYear(row.cycleKey, dueDate);
@@ -676,6 +685,7 @@ router.get("/maintenance-summary", requireRole(UserRole.RESIDENT, UserRole.ADMIN
 router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { userId, societyId } = req.auth!;
+    const now = new Date();
     const { month, year } = parseMonthYear(req.query);
     const billingCycleId = typeof req.query.billingCycleId === "string" ? req.query.billingCycleId.trim() : "";
 
@@ -937,7 +947,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
     const yearCollectionCycles = await prisma.maintenanceCollectionCycle.findMany({
       where: maintenanceCollectionBackedByBillingCycleWhere(
         societyId,
-        await loadBillingCyclePeriodKeys(prisma, societyId),
+        await loadAppVisibleBillingCyclePeriodKeys(prisma, societyId),
         { periodYear: year },
       ),
       select: {
@@ -973,18 +983,23 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
 
     // Phase 2: Fallback — enrich with BillingCycle data for months that have
     // neither old Maintenance records nor MaintenanceCollectionCycle snapshots.
-    const yearBillingCycles = await prisma.billingCycle.findMany({
+    const yearBillingCycles = (
+      await prisma.billingCycle.findMany({
       where: { societyId, cycleKey: { startsWith: `${year}-` }, ...publishedBillingCycleFilter },
       select: {
         id: true,
         cycleKey: true,
         amount: true,
+        paymentStartDate: true,
+        paymentEndDate: true,
+        publishedAt: true,
         payments: {
           where: { paymentStatus: "SUCCESS" },
           select: { amountPaid: true, userId: true },
         },
       },
-    });
+    })
+    ).filter((bc) => isAppVisibleBillingCycle(now, bc));
     for (const bc of yearBillingCycles) {
       const parts = bc.cycleKey.split("-");
       const monthNo = parseInt(parts[1], 10);

@@ -7,7 +7,7 @@ import {
 } from "@prisma/client";
 import { logger } from "../../../lib/logger";
 import { prisma } from "../../../lib/prisma";
-import { deriveCycleStatusUtc } from "../domain/cycleStatus";
+import { deriveCycleStatusUtc, isAppVisibleBillingCycle } from "../domain/cycleStatus";
 import { resolvePerCycleExpectedTotal, resolveLedgerCycleExpected } from "../domain/amountDue";
 import { billingCacheGet, billingCacheSet, billingCacheDel } from "./billing-cache";
 import { notifySocietyRoles, notifyUser } from "../../../services/notification.service";
@@ -45,44 +45,46 @@ export type BillingLedgerCycleRow = {
 /**
  * Pick the display cycle for the resident maintenance screen.
  *
- * Rule: show the **latest cycleKey** within the active financial year
- * that covers today's date, regardless of whether the cycle is OPEN,
- * UPCOMING, or CLOSED. When multiple FYs are ACTIVE, the one whose
- * startDate–endDate range contains today wins. Falls back to the most
- * recent active FY, then to the latest cycleKey across all cycles.
+ * Rule: latest published cycle in the active FY whose payment window is OPEN
+ * or CLOSED (UPCOMING and draft cycles stay hidden on the app).
  */
 async function resolveDisplayCycleRows(societyId: string, nowUtc: Date): Promise<BillingCycle | null> {
-  // 1. Try: latest cycle in the active FY whose date range contains today.
-  //    When multiple FYs are ACTIVE (e.g. old FY not yet closed and new FY
-  //    just created) prefer the one that covers the current date so the
-  //    resident sees the latest relevant cycle (Apr 2026 in FY 2026-27)
-  //    instead of the last cycle of the previous FY (Mar 2026 in FY 2025-26).
   const activeFYs = await prisma.financialYear.findMany({
     where: { societyId, status: "ACTIVE" },
     orderBy: { startDate: "desc" },
     select: { id: true, startDate: true, endDate: true },
   });
 
-  // Pick the FY that contains today; fall back to the most recent one.
   const currentFY =
     activeFYs.find((fy) => nowUtc >= fy.startDate && nowUtc <= fy.endDate) ??
     activeFYs[0] ??
     null;
 
+  const pickVisible = (rows: BillingCycle[]): BillingCycle | null => {
+    const visible = rows.filter((c) => isAppVisibleBillingCycle(nowUtc, c));
+    if (visible.length === 0) return null;
+    const open = visible.find(
+      (c) =>
+        deriveCycleStatusUtc(nowUtc, c.paymentStartDate, c.paymentEndDate) ===
+        BillingCycleStatus.OPEN,
+    );
+    return open ?? visible[0]!;
+  };
+
   if (currentFY) {
-    const latest = await prisma.billingCycle.findFirst({
-      where: { societyId, financialYearId: currentFY.id, publishedAt: { not: null } },
+    const candidates = await prisma.billingCycle.findMany({
+      where: { societyId, financialYearId: currentFY.id, ...publishedBillingCycleFilter },
       orderBy: { cycleKey: "desc" },
     });
-    if (latest) return latest;
+    const picked = pickVisible(candidates);
+    if (picked) return picked;
   }
 
-  // 2. Fallback: latest published cycle in the society (no FY filter)
-  const fallback = await prisma.billingCycle.findFirst({
-    where: { societyId, publishedAt: { not: null } },
+  const fallbackCandidates = await prisma.billingCycle.findMany({
+    where: { societyId, ...publishedBillingCycleFilter },
     orderBy: { cycleKey: "desc" },
   });
-  return fallback ?? null;
+  return pickVisible(fallbackCandidates);
 }
 
 const DISPLAY_CYCLE_KEY_PREFIX = "billing:dcid:";
@@ -97,7 +99,7 @@ export async function findDisplayCycle(societyId: string, nowUtc = new Date()): 
   const cachedId = await billingCacheGet(k);
   if (cachedId) {
     const c = await prisma.billingCycle.findUnique({ where: { id: cachedId } });
-    if (c && c.societyId === societyId && c.publishedAt) {
+    if (c && c.societyId === societyId && isAppVisibleBillingCycle(nowUtc, c)) {
       return c;
     }
   }
@@ -159,6 +161,9 @@ export async function buildCurrentCycleResponse(input: {
       },
     });
     if (!cycle) {
+      throw new Error("BILLING_CYCLE_NOT_FOUND");
+    }
+    if (!isAppVisibleBillingCycle(nowUtc, cycle)) {
       throw new Error("BILLING_CYCLE_NOT_FOUND");
     }
   } else {

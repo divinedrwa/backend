@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   BillingPaymentSource,
   BillingUserPaymentStatus,
+  BillingCycleStatus,
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
@@ -15,6 +16,7 @@ import {
   isPhonePeConfiguredForSociety,
 } from "../../services/phonepe-billing";
 import { computeGatewayCheckoutQuoteForCycle, computeGatewayPayAllCheckoutQuote } from "./services/gateway-pay-all";
+import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { ensureMaintenanceCollectionForBillingCycle, settleBillingCycleFromAdvanceCredit } from "./billing-collection-link";
 import { isGatewayLedgerSynced, reconcilePhonePeFromPoll } from "./gateway-payment-settle";
 import { checkOnlineGatewayCaptureAllowed } from "../../lib/sandboxSociety";
@@ -143,6 +145,13 @@ router.post(
       }
       if (!cycle.publishedAt) {
         res.status(400).json({ message: "Billing cycle is not published yet", code: "CYCLE_NOT_PUBLISHED" });
+        return;
+      }
+      if (
+        deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate) ===
+        BillingCycleStatus.UPCOMING
+      ) {
+        res.status(400).json({ message: "Payment window has not opened yet", code: "CYCLE_NOT_OPEN" });
         return;
       }
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 import {
   BillingPaymentSource,
   BillingUserPaymentStatus,
+  BillingCycleStatus,
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
@@ -19,6 +20,7 @@ import {
   isRazorpayConfiguredForSociety,
 } from "./services/razorpay-billing";
 import { ensureMaintenanceCollectionForBillingCycle, settleBillingCycleFromAdvanceCredit } from "./billing-collection-link";
+import { deriveCycleStatusUtc } from "./domain/cycleStatus";
 import { isGatewayLedgerSynced, reconcileRazorpayFromPoll } from "./gateway-payment-settle";
 import { checkRazorpayOrderStatus } from "./services/razorpay-billing";
 import { mergeRazorpayStatusWithLocal } from "../../services/razorpay-status";
@@ -196,6 +198,13 @@ router.post(
       }
       if (!cycle.publishedAt) {
         res.status(400).json({ message: "Billing cycle is not published yet", code: "CYCLE_NOT_PUBLISHED" });
+        return;
+      }
+      if (
+        deriveCycleStatusUtc(new Date(), cycle.paymentStartDate, cycle.paymentEndDate) ===
+        BillingCycleStatus.UPCOMING
+      ) {
+        res.status(400).json({ message: "Payment window has not opened yet", code: "CYCLE_NOT_OPEN" });
         return;
       }
 

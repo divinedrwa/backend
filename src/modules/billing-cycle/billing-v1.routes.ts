@@ -25,7 +25,7 @@ import {
   postMarkCashToMaintenanceLedger,
 } from "./billing-collection-link";
 import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
-import { deriveCycleStatusUtc } from "./domain/cycleStatus";
+import { deriveCycleStatusUtc, isAppVisibleBillingCycle } from "./domain/cycleStatus";
 import {
   buildCurrentCycleResponse,
   computeUserBillingLedger,
@@ -611,12 +611,12 @@ router.get(
         res.status(404).json({ message: "Financial year not found" });
         return;
       }
-      // Residents only see published cycles; admins see drafts for management.
+      // App pickers (mobile + expense month options): published OPEN/CLOSED only.
       const cycles = await prisma.billingCycle.findMany({
         where: {
           societyId: auth.societyId,
           financialYearId,
-          ...(auth.role === UserRole.RESIDENT ? publishedBillingCycleFilter : {}),
+          ...publishedBillingCycleFilter,
         },
         orderBy: { cycleKey: "asc" },
         select: {
@@ -632,7 +632,9 @@ router.get(
         },
       });
       const nowUtc = new Date();
-      const rows = cycles.map((c) => ({
+      const rows = cycles
+        .filter((c) => isAppVisibleBillingCycle(nowUtc, c))
+        .map((c) => ({
         id: c.id,
         cycleKey: c.cycleKey,
         title: c.title,
@@ -675,17 +677,24 @@ router.get(
         where: {
           id: billingCycleId,
           societyId: auth.societyId,
-          ...(auth.role === UserRole.RESIDENT ? publishedBillingCycleFilter : {}),
+          ...publishedBillingCycleFilter,
         },
         select: {
           id: true,
           cycleKey: true,
           title: true,
           financialYearId: true,
+          paymentStartDate: true,
+          paymentEndDate: true,
+          publishedAt: true,
           financialYear: { select: { id: true, label: true } },
         },
       });
-      if (!cycle?.financialYearId || !cycle.financialYear) {
+      if (
+        !cycle?.financialYearId ||
+        !cycle.financialYear ||
+        !isAppVisibleBillingCycle(new Date(), cycle)
+      ) {
         res.status(404).json({ message: "Billing cycle not found" });
         return;
       }

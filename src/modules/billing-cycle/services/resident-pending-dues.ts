@@ -1,6 +1,6 @@
 import { MaintenanceBillingRole } from "@prisma/client";
 import { prisma } from "../../../lib/prisma";
-import { deriveCycleStatusUtc } from "../domain/cycleStatus";
+import { deriveCycleStatusUtc, isAppVisibleBillingCycle } from "../domain/cycleStatus";
 import { ensureVillaLedgersAligned } from "../billing-collection-link";
 import { computeUserBillingLedger, publishedBillingCycleFilter } from "./cycle-service";
 
@@ -112,11 +112,16 @@ export async function buildPendingDuesFromLedger(
         paymentStartDate: true,
         paymentEndDate: true,
         gracePeriodDays: true,
+        publishedAt: true,
       },
     }),
   ]);
 
-  const cycleById = new Map(cycles.map((c) => [c.id, c]));
+  const cycleById = new Map(
+    cycles
+      .filter((c) => isAppVisibleBillingCycle(nowUtc, c))
+      .map((c) => [c.id, c]),
+  );
   const rows: UserPendingDueRow[] = [];
 
   for (const row of ledger.cycles) {

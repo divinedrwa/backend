@@ -15,3 +15,17 @@ export function deriveCycleStatusUtc(
   if (n <= e) return BillingCycleStatus.OPEN;
   return BillingCycleStatus.CLOSED;
 }
+
+/** Mobile/resident pickers: published cycles whose payment window has opened or closed. */
+export function isAppVisibleBillingCycle(
+  nowUtc: Date,
+  cycle: {
+    publishedAt?: Date | null;
+    paymentStartDate: Date;
+    paymentEndDate: Date;
+  },
+): boolean {
+  if (!cycle.publishedAt) return false;
+  const status = deriveCycleStatusUtc(nowUtc, cycle.paymentStartDate, cycle.paymentEndDate);
+  return status === BillingCycleStatus.OPEN || status === BillingCycleStatus.CLOSED;
+}
