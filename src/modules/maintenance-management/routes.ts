@@ -38,6 +38,10 @@ import {
 import { notifyUsers } from "../../services/notification.service";
 import { auditFromRequest } from "../../services/audit.service";
 import { reverseMaintenancePayment } from "../../lib/reverseMaintenancePayment";
+import {
+  recordCreditMarkerPayment,
+  recordPaymentAndSyncLedgers,
+} from "../../lib/ledgerWrites";
 
 const router = Router();
 
@@ -369,13 +373,11 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
         return res.status(400).json({ message: "Villa is excluded from this cycle. Re-include it first." });
       }
 
-      const receiptNumber = `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
 
       try {
       const { payment, maintenance } = await prisma.$transaction(async (tx) => {
         // Re-read snapshot inside transaction with row-level lock to
         // prevent concurrent mark-paid calls from double-counting.
-        // Timeout raised for Neon cold-start latency + credit-walker queries.
         const [snapshot] = await tx.$queryRawUnsafe<
           { id: string; expectedAmount: string; paidAmount: string }[]
         >(
@@ -386,76 +388,23 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
           throw new Error("Snapshot disappeared during transaction");
         }
 
-        const expected = Number(snapshot.expectedAmount);
-        const paidSoFar = Number(snapshot.paidAmount);
-        const _remaining = Math.round((expected - paidSoFar) * 100) / 100;
-        const maintenanceRow = await tx.maintenance.upsert({
-          where: {
-            villaId_month_year: { villaId: body.villaId, month: body.month, year: body.year },
-          },
-          create: {
-            societyId,
-            villaId: body.villaId,
-            month: body.month,
-            year: body.year,
-            amount: snapshot.expectedAmount,
-            dueDate: cycle.dueDate,
-            status: "PENDING",
-          },
-          update: {
-            amount: snapshot.expectedAmount,
-            dueDate: cycle.dueDate,
-          },
-        });
-
-        const paymentRow = await tx.maintenancePayment.create({
-          data: {
-            societyId,
-            villaId: body.villaId,
-            maintenanceId: maintenanceRow.id,
-            month: body.month,
-            year: body.year,
-            amount: body.amount,
-            paymentDate: new Date(body.paymentDate),
-            paymentMode: body.paymentMode,
-            transactionId: body.transactionId,
-            receiptNumber,
-            bankAccountId: body.bankAccountId,
-            remarks: body.remarks,
-            idempotencyKey: body.idempotencyKey,
-            maintenanceCollectionCycleId: cycle.id,
-            villaMaintenanceSnapshotId: snapshot.id,
-          },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                ownerName: true,
-              },
-            },
-          },
-        });
-
-        // Don't increment snapshot.paidAmount inline — the credit walker
-        // re-derives it from the cash ledger across the whole FY so any
-        // Reconcile snapshots up to this cycle only. Any overpayment
-        // stays as available advance credit — the admin must explicitly
-        // apply it to a subsequent cycle via "Apply credit".
-        await applyVillaCreditAcrossSnapshots(tx, {
+        const result = await recordPaymentAndSyncLedgers(tx, {
           societyId,
           villaId: body.villaId,
-          financialYearId: cycle.financialYearId,
+          month: body.month,
+          year: body.year,
+          amount: body.amount,
+          paymentDate: body.paymentDate,
+          paymentMode: body.paymentMode,
+          transactionId: body.transactionId,
+          bankAccountId: body.bankAccountId,
+          remarks: body.remarks,
+          idempotencyKey: body.idempotencyKey,
+          recordedByUserId: adminId,
+          auditAction: "MARK_PAID",
+          maintenanceCollectionCycleId: cycle.id,
           throughCycleId: cycle.id,
         });
-
-        // Read back the (possibly cap-adjusted) status so the rest of this
-        // handler — which writes legacy UserCyclePayment rows — uses the
-        // reconciled value.
-        const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({
-          where: { id: snapshot.id },
-          select: { status: true, paidAmount: true },
-        });
-        const snapStatus = reconciledSnapshot?.status ?? "PENDING";
 
         const billingCycle = await tx.billingCycle.findFirst({
           where: {
@@ -471,55 +420,14 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
             villaId: body.villaId,
             billingCycleId: billingCycle.id,
           });
-          const primaryResidents = await tx.user.findMany({
-            where: {
-              societyId,
-              villaId: body.villaId,
-              role: { in: [UserRole.RESIDENT, UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] },
-              isActive: true,
-              maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-            },
-            select: { id: true },
+          await ensureVillaLedgersAligned(tx, {
+            societyId,
+            villaId: body.villaId,
+            billingCycleId: billingCycle.id,
           });
-          const payStatus =
-            snapStatus === "PAID" || snapStatus === "WAIVED"
-              ? BillingUserPaymentStatus.SUCCESS
-              : BillingUserPaymentStatus.PENDING;
-          const paidAt = new Date(body.paymentDate);
-          for (const u of primaryResidents) {
-            // userCyclePayment.amountPaid is synced from the reconciled
-            // snapshot so it stays consistent with the villa-level ledger.
-            const updatedAmount = Number(reconciledSnapshot?.paidAmount ?? 0);
-            await tx.userCyclePayment.upsert({
-              where: { userId_cycleId: { userId: u.id, cycleId: billingCycle.id } },
-              create: {
-                userId: u.id,
-                cycleId: billingCycle.id,
-                amountPaid: new Prisma.Decimal(updatedAmount),
-                paymentStatus: payStatus,
-                source: BillingPaymentSource.CASH_MANUAL,
-                manualMarkedByAdminId: adminId,
-                paidAt,
-              },
-              update: {
-                amountPaid: new Prisma.Decimal(updatedAmount),
-                paymentStatus: payStatus,
-                source: BillingPaymentSource.CASH_MANUAL,
-                manualMarkedByAdminId: adminId,
-                paidAt,
-              },
-            });
-          }
-          if (billingCycle) {
-            await ensureVillaLedgersAligned(tx, {
-              societyId,
-              villaId: body.villaId,
-              billingCycleId: billingCycle.id,
-            });
-          }
         }
 
-        return { payment: paymentRow, maintenance: maintenanceRow };
+        return result;
       }, { timeout: 15000 });
 
       invalidateReconcileCache(body.villaId);
@@ -605,105 +513,24 @@ router.post("/mark-paid", validateBody(markPaidSchema), async (req, res, next) =
     }
 
     // ── Non-cycle path (legacy, no billing cycle selected) ──
-    // Find or create maintenance record
-    let maintenance = await prisma.maintenance.findFirst({
-      where: {
+    const adminIdLegacy = req.auth!.userId;
+    const { payment, maintenance } = await prisma.$transaction(async (tx) =>
+      recordPaymentAndSyncLedgers(tx, {
         societyId,
         villaId: body.villaId,
-        year: body.year,
         month: body.month,
-      },
-    });
-
-    if (!maintenance) {
-      // Create maintenance record if it doesn't exist
-      const dueDate = new Date(body.year, body.month - 1, 5);
-      maintenance = await prisma.maintenance.create({
-        data: {
-          societyId,
-          villaId: body.villaId,
-          year: body.year,
-          month: body.month,
-          amount: body.amount,
-          dueDate,
-          status: "PAID",
-        },
-      });
-    } else {
-      // Update existing maintenance to PAID
-      maintenance = await prisma.maintenance.update({
-        where: { id: maintenance.id },
-        data: { status: "PAID" },
-      });
-    }
-
-    const existingPayment = await prisma.maintenancePayment.findFirst({
-      where: {
-        societyId,
-        villaId: body.villaId,
         year: body.year,
-        month: body.month,
-      },
-      orderBy: { paymentDate: "desc" },
-      select: { id: true, receiptNumber: true },
-    });
-
-    const receiptNumber = existingPayment?.receiptNumber ?? `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
-
-    // Legacy path: always create a new payment record (append-only) to avoid
-    // overwriting previous partial payments. Existing payment is only used for
-    // receipt-number reuse.
-    const payment = existingPayment
-      ? await prisma.maintenancePayment.create({
-          data: {
-            societyId,
-            villaId: body.villaId,
-            maintenanceId: maintenance.id,
-            amount: body.amount,
-            month: body.month,
-            year: body.year,
-            paymentDate: new Date(body.paymentDate),
-            paymentMode: body.paymentMode,
-            transactionId: body.transactionId,
-            receiptNumber: `RCP-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-            bankAccountId: body.bankAccountId,
-            remarks: body.remarks,
-            idempotencyKey: body.idempotencyKey,
-          },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                ownerName: true,
-              },
-            },
-          },
-        })
-      : await prisma.maintenancePayment.create({
-          data: {
-            societyId,
-            villaId: body.villaId,
-            maintenanceId: maintenance.id,
-            amount: body.amount,
-            month: body.month,
-            year: body.year,
-            paymentDate: new Date(body.paymentDate),
-            paymentMode: body.paymentMode,
-            transactionId: body.transactionId,
-            receiptNumber,
-            bankAccountId: body.bankAccountId,
-            remarks: body.remarks,
-            idempotencyKey: body.idempotencyKey,
-          },
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-                ownerName: true,
-              },
-            },
-          },
-        });
+        amount: body.amount,
+        paymentDate: body.paymentDate,
+        paymentMode: body.paymentMode,
+        transactionId: body.transactionId,
+        bankAccountId: body.bankAccountId,
+        remarks: body.remarks,
+        idempotencyKey: body.idempotencyKey,
+        recordedByUserId: adminIdLegacy,
+        auditAction: "MARK_PAID_LEGACY",
+      }),
+    );
 
     // Notify villa residents about payment recorded (legacy path)
     void (async () => {
@@ -786,115 +613,40 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
       return res.status(400).json({ message: "No billing snapshot for this villa." });
     }
 
-    // Count existing payments to guard against no-op reversals
-    const paymentCount = await prisma.maintenancePayment.count({
+    const paymentsToReverse = await prisma.maintenancePayment.findMany({
       where: {
         societyId,
         villaId: body.villaId,
         maintenanceCollectionCycleId: cycle.id,
+        reversalOfPaymentId: null,
+        reversedAt: null,
+        amount: { gt: 0 },
       },
+      select: { id: true },
     });
-    if (paymentCount === 0) {
+    if (paymentsToReverse.length === 0) {
       return res.status(400).json({ message: "No payments found to reverse for this billing cycle" });
     }
 
-    await prisma.$transaction(async (tx) => {
-      // Lock the snapshot row to prevent concurrent modifications
+    const reversed = await prisma.$transaction(async (tx) => {
       await tx.$queryRawUnsafe<{ id: string }[]>(
         `SELECT id FROM "VillaMaintenanceSnapshot" WHERE id = $1 FOR UPDATE`,
         snapshotCheck.id,
       );
 
-      // Delete all payments linked to this cycle + villa
-      await tx.maintenancePayment.deleteMany({
-        where: {
-          societyId,
-          villaId: body.villaId,
-          maintenanceCollectionCycleId: cycle.id,
-        },
-      });
-
-      // Re-derive snapshot via credit walker (paidAmount → 0)
-      await applyVillaCreditAcrossSnapshots(tx, {
-        societyId,
-        villaId: body.villaId,
-        financialYearId: cycle.financialYearId,
-        throughCycleId: cycle.id,
-      });
-
-      // Admin reversed all cash payments for this cycle — do not leave advance
-      // credit from other months applied here (walker would re-mark as paid).
-      const dueDateUtc = new Date(
-        Date.UTC(
-          cycle.dueDate.getUTCFullYear(),
-          cycle.dueDate.getUTCMonth(),
-          cycle.dueDate.getUTCDate(),
-        ),
-      );
-      const nowUtc = new Date();
-      const snapStatus = dueDateUtc.getTime() < nowUtc.getTime() ? "OVERDUE" : "PENDING";
-
-      await tx.villaMaintenanceSnapshot.update({
-        where: { id: snapshotCheck.id },
-        data: {
-          paidAmount: new Prisma.Decimal(0),
-          status: snapStatus,
-          lateFeeAmount: 0,
-          lateFeeAppliedAt: null,
-        },
-      });
-
-      await tx.maintenance.updateMany({
-        where: {
-          societyId,
-          villaId: body.villaId,
-          month: cycle.periodMonth,
-          year: cycle.periodYear,
-        },
-        data: { status: snapStatus === "OVERDUE" ? "OVERDUE" : "PENDING" },
-      });
-
-      // Sync UserCyclePayment
-      const billingCycle = await tx.billingCycle.findFirst({
-        where: { societyId, financialYearId: cycle.financialYearId, cycleKey: cycle.periodKey },
-        select: { id: true },
-      });
-      if (billingCycle) {
-        await clearExcludedResidentsUserCyclePayments(tx, {
-          societyId,
-          villaId: body.villaId,
-          billingCycleId: billingCycle.id,
-        });
-        await syncBillingUserCyclePaymentsFromSnapshot(tx, {
-          societyId,
-          villaId: body.villaId,
-          billingCycleId: billingCycle.id,
-          paidAmount: 0,
-          snapStatus,
-          source: BillingPaymentSource.CASH_MANUAL,
-        });
-        const primaryResidents = await tx.user.findMany({
-          where: {
+      const results = [];
+      for (const row of paymentsToReverse) {
+        results.push(
+          await reverseMaintenancePayment(tx, {
+            paymentId: row.id,
             societyId,
-            villaId: body.villaId,
-            ...residentLikeRoleFilter,
-            isActive: true,
-            maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
-          },
-          select: { id: true },
-        });
-        for (const u of primaryResidents) {
-          await tx.userCyclePayment.updateMany({
-            where: { userId: u.id, cycleId: billingCycle.id },
-            data: {
-              paymentGatewayOrderId: null,
-              paymentGatewayPaymentId: null,
-              idempotencyKey: null,
-            },
-          });
-        }
+            reversedByUserId: adminId,
+            reason: body.reason,
+          }),
+        );
       }
-    }, { timeout: 15000 });
+      return results;
+    }, { timeout: 30_000 });
 
     invalidateMoneySnapshotCache(societyId);
 
@@ -911,7 +663,8 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
         periodMonth: cycle.periodMonth,
         periodYear: cycle.periodYear,
         reason: body.reason || undefined,
-        paymentsDeleted: paymentCount,
+        paymentsReversed: reversed.length,
+        offsetReceipts: reversed.map((r) => r.receiptNumber),
       },
     });
 
@@ -941,7 +694,8 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
 
     return res.status(200).json({
       message: `Payment reversed for Villa ${villa.villaNumber}`,
-      paymentsDeleted: paymentCount,
+      paymentsReversed: reversed.length,
+      offsets: reversed,
     });
   } catch (error) {
     next(error);
@@ -951,7 +705,6 @@ router.post("/reverse-payment", validateBody(reversePaymentSchema), async (req, 
 /**
  * POST /api/maintenance-management/payments/:paymentId/reverse
  * Reverse one maintenance payment (L1 offset row + ledger resync).
- * Does not change the legacy cycle-wide deleteMany reverse-payment endpoint above.
  */
 const reverseSinglePaymentSchema = z.object({
   reason: z.string().trim().max(500).optional(),
@@ -1062,36 +815,17 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
         update: {},
       });
 
-      // Create a ₹0 audit marker payment so the credit application is visible
-      // in the payment ledger.
-      await tx.maintenancePayment.create({
-        data: {
-          societyId,
-          villaId: body.villaId,
-          maintenanceId: maintenanceRow.id,
-          month: cycle.periodMonth,
-          year: cycle.periodYear,
-          amount: 0,
-          paymentDate: new Date(),
-          paymentMode: "CASH",
-          receiptNumber: `CRD-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`,
-          remarks: `Advance credit adjustment (₹${creditApplied} applied)`,
-          maintenanceCollectionCycleId: cycle.id,
-          villaMaintenanceSnapshotId: snapshot.id,
-        },
-      });
-
-      // Global credit walk + billing sync (all FYs / cycles).
-      await applyVillaCreditAcrossSnapshots(tx, {
+      await recordCreditMarkerPayment(tx, {
         societyId,
         villaId: body.villaId,
+        maintenanceId: maintenanceRow.id,
+        month: cycle.periodMonth,
+        year: cycle.periodYear,
+        maintenanceCollectionCycleId: cycle.id,
+        villaMaintenanceSnapshotId: snapshot.id,
         financialYearId: cycle.financialYearId,
-      });
-
-      await syncVillaBillingCyclesFromSnapshots(tx, {
-        societyId,
-        villaId: body.villaId,
-        source: BillingPaymentSource.CASH_MANUAL,
+        creditApplied,
+        recordedByUserId: adminId,
       });
 
       const reconciledSnapshot = await tx.villaMaintenanceSnapshot.findUnique({

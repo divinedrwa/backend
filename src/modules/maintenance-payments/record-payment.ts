@@ -3,6 +3,7 @@ import {
   PaymentMode,
   Prisma,
 } from "@prisma/client";
+import crypto from "node:crypto";
 import { findLikelyDuplicateMaintenancePayment } from "../../lib/paymentDuplicateGuard";
 import { ensureVillaLedgersAligned, syncVillaBillingCyclesFromSnapshots } from "../billing-cycle/billing-collection-link";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
@@ -33,6 +34,10 @@ export interface RecordPaymentParams {
   walkAllCycles?: boolean;
   /** Source stamped on synced UserCyclePayment rows (defaults to manual cash). */
   billingSource?: BillingPaymentSource;
+  /** Limit credit walker to cycles up to this collection cycle (mark-paid partial path). */
+  throughCycleId?: string;
+  /** Pre-linked collection cycle (skips month/year lookup when set). */
+  maintenanceCollectionCycleId?: string;
 }
 
 /**
@@ -61,6 +66,8 @@ export async function recordPaymentAndSyncLedgers(
     recordedByUserId,
     auditAction = "RECORD_PAYMENT",
     billingSource = BillingPaymentSource.CASH_MANUAL,
+    throughCycleId,
+    maintenanceCollectionCycleId: explicitCycleId,
   } = params;
 
   // 1. Find or create maintenance record
@@ -93,10 +100,15 @@ export async function recordPaymentAndSyncLedgers(
   const receiptNumber = `RCP${year}${String(month).padStart(2, "0")}${Date.now().toString().slice(-6)}`;
 
   // 3. Resolve matching MaintenanceCollectionCycle
-  const mcc = await tx.maintenanceCollectionCycle.findFirst({
-    where: { societyId, periodMonth: month, periodYear: year },
-    select: { id: true, financialYearId: true, periodKey: true, dueDate: true },
-  });
+  const mcc = explicitCycleId
+    ? await tx.maintenanceCollectionCycle.findFirst({
+        where: { id: explicitCycleId, societyId },
+        select: { id: true, financialYearId: true, periodKey: true, dueDate: true },
+      })
+    : await tx.maintenanceCollectionCycle.findFirst({
+        where: { societyId, periodMonth: month, periodYear: year },
+        select: { id: true, financialYearId: true, periodKey: true, dueDate: true },
+      });
 
   const snapshot = mcc
     ? await tx.villaMaintenanceSnapshot.findUnique({
@@ -172,6 +184,7 @@ export async function recordPaymentAndSyncLedgers(
       societyId,
       villaId,
       financialYearId: mcc.financialYearId,
+      ...(throughCycleId ? { throughCycleId } : {}),
     });
 
     await syncVillaBillingCyclesFromSnapshots(tx, {
@@ -217,4 +230,72 @@ export async function recordPaymentAndSyncLedgers(
   }
 
   return { maintenance, payment };
+}
+
+export interface CreditMarkerParams {
+  societyId: string;
+  villaId: string;
+  maintenanceId: string;
+  month: number;
+  year: number;
+  maintenanceCollectionCycleId: string;
+  villaMaintenanceSnapshotId: string;
+  financialYearId: string;
+  creditApplied: number;
+  recordedByUserId: string;
+}
+
+/**
+ * ₹0 audit marker when advance credit is applied to a cycle (A1 canonical credit path).
+ */
+export async function recordCreditMarkerPayment(
+  tx: Tx,
+  params: CreditMarkerParams,
+): Promise<void> {
+  const receiptNumber = `CRD-${Date.now()}-${crypto.randomUUID().slice(0, 8)}`;
+
+  await tx.maintenancePayment.create({
+    data: {
+      societyId: params.societyId,
+      villaId: params.villaId,
+      maintenanceId: params.maintenanceId,
+      month: params.month,
+      year: params.year,
+      amount: 0,
+      paymentDate: new Date(),
+      paymentMode: "CASH",
+      receiptNumber,
+      remarks: `Advance credit adjustment (₹${params.creditApplied} applied)`,
+      maintenanceCollectionCycleId: params.maintenanceCollectionCycleId,
+      villaMaintenanceSnapshotId: params.villaMaintenanceSnapshotId,
+    },
+  });
+
+  await applyVillaCreditAcrossSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    financialYearId: params.financialYearId,
+  });
+
+  await syncVillaBillingCyclesFromSnapshots(tx, {
+    societyId: params.societyId,
+    villaId: params.villaId,
+    source: BillingPaymentSource.CASH_MANUAL,
+  });
+
+  await tx.adminAuditLog.create({
+    data: {
+      adminId: params.recordedByUserId,
+      societyId: params.societyId,
+      action: "CREDIT_MARKER",
+      entityType: "MaintenancePayment",
+      entityId: params.villaMaintenanceSnapshotId,
+      metadata: {
+        villaId: params.villaId,
+        creditApplied: params.creditApplied.toString(),
+        cycleId: params.maintenanceCollectionCycleId,
+        timestamp: new Date().toISOString(),
+      },
+    },
+  });
 }

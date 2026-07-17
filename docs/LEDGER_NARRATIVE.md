@@ -12,10 +12,13 @@ Single source of truth for **what updates which table** when money moves.
 
 ## Write paths (canonical)
 
-1. **Admin mark-paid / bulk-mark-paid** → `MaintenancePayment.create` → `applyVillaCreditAcrossSnapshots` → sync `UserCyclePayment` from snapshot.
-2. **Gateway (Razorpay / PhonePe)** → webhook/poll settle → `recordPaymentAndSyncLedgers` with `billingSource: GATEWAY` → same walker + UCP sync.
-3. **UPI submission verify** → `recordPaymentAndSyncLedgers` (manual).
-4. **Credit-only / apply credit** → walker + UCP sync; may create ₹0 audit `MaintenancePayment` row.
+**Import from `src/lib/ledgerWrites.ts` only** — do not create `MaintenancePayment` rows in route handlers.
+
+1. **Admin mark-paid / bulk / legacy** → `recordPaymentAndSyncLedgers`
+2. **Gateway (Razorpay / PhonePe)** → `recordPaymentAndSyncLedgers` via `gateway-payment-settle`
+3. **UPI verify** → `recordPaymentAndSyncLedgers`
+4. **Apply advance credit** → `recordCreditMarkerPayment`
+5. **Reverse payment (L1)** → `reverseMaintenancePayment` (offset row, never deleteMany)
 
 **Rule:** Never increment `VillaMaintenanceSnapshot.paidAmount` inline in handlers — always re-derive via credit walker from `MaintenancePayment` sum.
 

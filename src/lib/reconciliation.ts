@@ -8,6 +8,7 @@
 import { Prisma } from '@prisma/client';
 import { logger } from './logger';
 import { prisma } from './prisma';
+import { productionSocietyWhere } from './sandboxSociety';
 import { computeSocietyMoneySnapshot } from './societyFinance';
 
 type Db = Prisma.TransactionClient | typeof prisma;
@@ -375,7 +376,7 @@ export async function reconcileAllSocieties(): Promise<{
   totalAlerts: number;
 }> {
   const societies = await prisma.society.findMany({
-    where: { status: 'ACTIVE' },
+    where: await productionSocietyWhere(),
     select: { id: true, name: true },
   });
 

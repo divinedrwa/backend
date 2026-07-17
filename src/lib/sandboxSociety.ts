@@ -1,4 +1,4 @@
-import { PaymentMethodType } from "@prisma/client";
+import { PaymentMethodType, Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 
 let isSandboxColumnKnown: boolean | null = null;
@@ -33,6 +33,25 @@ export async function isSandboxSociety(societyId: string): Promise<boolean> {
     select: { isSandbox: true },
   });
   return row?.isSandbox === true;
+}
+
+/** Cron / batch jobs: active societies excluding QA sandbox rows when column exists. */
+export function withProductionOnlyFilter(
+  where: Prisma.SocietyWhereInput,
+  sandboxColumnExists: boolean,
+): Prisma.SocietyWhereInput {
+  if (!sandboxColumnExists) return where;
+  return { ...where, isSandbox: false };
+}
+
+export async function productionSocietyWhere(
+  extra: Prisma.SocietyWhereInput = {},
+): Promise<Prisma.SocietyWhereInput> {
+  const hasSandbox = await societyIsSandboxColumnExists();
+  return withProductionOnlyFilter(
+    { status: "ACTIVE", archivedAt: null, ...extra },
+    hasSandbox,
+  );
 }
 
 /** Razorpay test keys start with `rzp_test_`; live keys with `rzp_live_`. */

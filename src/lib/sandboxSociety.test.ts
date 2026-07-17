@@ -6,6 +6,7 @@ import {
   isRazorpayTestKeyId,
   parsePhonePeEnvironment,
   validateGatewayConfigForSandbox,
+  withProductionOnlyFilter,
 } from "./sandboxSociety";
 
 describe("sandboxSociety gateway config", () => {
@@ -49,5 +50,18 @@ describe("sandboxSociety gateway config", () => {
       vpa: "society@upi",
     });
     assert.equal(issue, null);
+  });
+});
+
+describe("productionSocietyWhere filter", () => {
+  it("excludes sandbox when column exists", () => {
+    const where = withProductionOnlyFilter({ status: "ACTIVE" }, true);
+    assert.equal(where.isSandbox, false);
+    assert.equal(where.status, "ACTIVE");
+  });
+
+  it("leaves filter unchanged when column missing", () => {
+    const where = withProductionOnlyFilter({ status: "ACTIVE" }, false);
+    assert.equal(where.isSandbox, undefined);
   });
 });
