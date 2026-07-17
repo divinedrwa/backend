@@ -66,10 +66,21 @@ async function main(): Promise<void> {
   }
 
   const envSocietyId = process.env.SMOKE_SOCIETY_ID?.trim();
-  const adminUser = process.env.SMOKE_ADMIN_USERNAME?.trim();
-  const adminPass = process.env.SMOKE_ADMIN_PASSWORD?.trim();
+  const superUser = process.env.SMOKE_SUPER_USERNAME?.trim();
+  const superPass = process.env.SMOKE_SUPER_PASSWORD?.trim();
+  const tenantUser =
+    process.env.SMOKE_TENANT_ADMIN_USERNAME?.trim() ??
+    (process.env.SMOKE_ADMIN_USERNAME?.trim() &&
+    process.env.SMOKE_ADMIN_USERNAME.trim() !== superUser
+      ? process.env.SMOKE_ADMIN_USERNAME.trim()
+      : undefined);
+  const tenantPass =
+    process.env.SMOKE_TENANT_ADMIN_PASSWORD?.trim() ??
+    (tenantUser && process.env.SMOKE_ADMIN_PASSWORD?.trim() !== superPass
+      ? process.env.SMOKE_ADMIN_PASSWORD?.trim()
+      : undefined);
 
-  if (adminUser && adminPass) {
+  if (tenantUser && tenantPass) {
     const attemptIds =
       envSocietyId ?
         [envSocietyId]
@@ -89,8 +100,8 @@ async function main(): Promise<void> {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           societyId: sid,
-          username: adminUser,
-          password: adminPass,
+          username: tenantUser,
+          password: tenantPass,
         }),
       });
       lastStatus = r.status;
@@ -106,23 +117,26 @@ async function main(): Promise<void> {
     }
 
     if (!ok) {
-      throw new Error(
-        `POST /api/auth/admin/login: no matching society (${attemptIds.length} tried). Last status=${lastStatus} body=${lastBody.slice(0, 260)}`,
-      );
+      if (superUser && superPass) {
+        console.log(
+          `  · skip tenant admin/login (${attemptIds.length} tried) — will use super-admin check`,
+        );
+      } else {
+        throw new Error(
+          `POST /api/auth/admin/login: no matching society (${attemptIds.length} tried). Last status=${lastStatus} body=${lastBody.slice(0, 260)}`,
+        );
+      }
+    } else {
+      if (!envSocietyId && attemptIds.length > 1) {
+        console.log(`  · admin/login matched societyId=${ok.societyId} (among ${attemptIds.length} ACTIVE societies)`);
+      }
+      console.log(`  ✓ POST /api/auth/admin/login (${ok.role})`);
     }
-
-    if (!envSocietyId && attemptIds.length > 1) {
-      console.log(`  · admin/login matched societyId=${ok.societyId} (among ${attemptIds.length} ACTIVE societies)`);
-    }
-    console.log(`  ✓ POST /api/auth/admin/login (${ok.role})`);
   } else {
     console.log(
-      "  · skip admin/login (set SMOKE_ADMIN_USERNAME + SMOKE_ADMIN_PASSWORD; optional SMOKE_SOCIETY_ID)",
+      "  · skip tenant admin/login (set SMOKE_TENANT_ADMIN_* or SMOKE_ADMIN_* distinct from super)",
     );
   }
-
-  const superUser = process.env.SMOKE_SUPER_USERNAME?.trim();
-  const superPass = process.env.SMOKE_SUPER_PASSWORD?.trim();
 
   if (superUser && superPass) {
     const r = await fetch(new URL("/api/auth/super-admin/login", base).toString(), {

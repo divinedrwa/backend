@@ -117,6 +117,13 @@ async function main(): Promise<void> {
 
   const hasAnyToken = Boolean(tokens.resident || tokens.guard || tokens.admin);
   if (!hasAnyToken) {
+    if (process.env.LIVE_SMOKE_SAFE === "1" || process.env.MOBILE_SMOKE_READ_ONLY === "1") {
+      console.warn(
+        "\nNo tenant logins (often live rate limit) — skipping mobile GET smoke.\n" +
+          "Deep live coverage: npm run smoke:live:villa25\n",
+      );
+      process.exit(0);
+    }
     console.error(
       "\nNo tenant logins succeeded — authenticated API cases were skipped.\n" +
         "Run: npm run sync:qa-credentials   (or set MOBILE_SMOKE_*_USER/PASS env vars)\n",
@@ -150,13 +157,24 @@ async function main(): Promise<void> {
     }
   }
 
-  console.log(`\nMutation smoke (${MOBILE_API_MUTATION_CASES.length} cases)…`);
-  for (const apiCase of MOBILE_API_MUTATION_CASES) {
-    if (apiCase.name.includes("logout")) continue;
-    for (const role of apiCase.roles) {
-      const r = await runApiCase(baseUrl, ctx, apiCase, role);
-      results.push(r);
-      printResult(r);
+  const readOnly =
+    env("MOBILE_SMOKE_READ_ONLY") === "1" ||
+    env("LIVE_SMOKE_SAFE") === "1" ||
+    env("HTTP_SMOKE_READ_ONLY") === "1";
+
+  if (readOnly) {
+    console.log(
+      `\nMutation smoke: SKIPPED (read-only — no parcel/visitor/payment writes on live)`,
+    );
+  } else {
+    console.log(`\nMutation smoke (${MOBILE_API_MUTATION_CASES.length} cases)…`);
+    for (const apiCase of MOBILE_API_MUTATION_CASES) {
+      if (apiCase.name.includes("logout")) continue;
+      for (const role of apiCase.roles) {
+        const r = await runApiCase(baseUrl, ctx, apiCase, role);
+        results.push(r);
+        printResult(r);
+      }
     }
   }
 

@@ -2,7 +2,8 @@
 /**
  * Safe live smoke for Divine Residency — villa 25 only.
  *
- * Read-only (except login + optional super→tenant session which writes one audit row).
+ * Read-only: GETs only. Uses tenant admin login when SMOKE_TENANT_ADMIN_* is set (no DB writes).
+ * Fallback: super-admin tenant-session writes one AdminAuditLog row only when tenant creds absent.
  * Skips: payments, parcels, visitors, ledger writes, mutations.
  *
  * Usage (from backend/):
@@ -18,8 +19,14 @@ const base = (process.env.HTTP_SMOKE_BASE ?? process.env.LIVE_API_ORIGIN ?? "htt
 const societyId =
   process.env.SMOKE_SOCIETY_ID?.trim() || "cmp32fto40001qout5koygcqu";
 const villaNumber = (process.env.SMOKE_VILLA_NUMBER ?? "25").trim();
-const superUser = process.env.SMOKE_SUPER_USERNAME?.trim() || process.env.SMOKE_ADMIN_USERNAME?.trim();
-const superPass = process.env.SMOKE_SUPER_PASSWORD?.trim() || process.env.SMOKE_ADMIN_PASSWORD?.trim();
+const superUser = process.env.SMOKE_SUPER_USERNAME?.trim();
+const superPass = process.env.SMOKE_SUPER_PASSWORD?.trim();
+const tenantAdminUser =
+  process.env.SMOKE_TENANT_ADMIN_USERNAME?.trim() ||
+  process.env.SMOKE_ADMIN_USERNAME?.trim();
+const tenantAdminPass =
+  process.env.SMOKE_TENANT_ADMIN_PASSWORD?.trim() ||
+  process.env.SMOKE_ADMIN_PASSWORD?.trim();
 const residentUser =
   process.env.MOBILE_SMOKE_RESIDENT_USER?.trim() || process.env.SMOKE_RESIDENT_USERNAME?.trim();
 const residentPass =
@@ -60,8 +67,10 @@ async function main(): Promise<void> {
   console.log(`Villa scope: ${villaNumber} only (read-only; no mutations)`);
   console.log("");
 
-  if (!superUser || !superPass) {
-    throw new Error("Set SMOKE_SUPER_USERNAME + SMOKE_SUPER_PASSWORD (or SMOKE_ADMIN_*)");
+  if (!superUser && !superPass && !tenantAdminUser && !tenantAdminPass) {
+    throw new Error(
+      "Set SMOKE_SUPER_* and/or SMOKE_TENANT_ADMIN_* (or SMOKE_ADMIN_* for society admin)",
+    );
   }
 
   // Truncated ID guard (user typo without trailing u)
@@ -87,7 +96,7 @@ async function main(): Promise<void> {
   }
 
   let superToken = "";
-  {
+  if (superUser && superPass) {
     const r = await fetch(`${base}/api/auth/super-admin/login`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -101,24 +110,49 @@ async function main(): Promise<void> {
     }
     superToken = j.token;
     console.log("  ✓ super-admin login (platform)");
-  }
 
-  {
-    const r = await fetch(`${base}/api/super/societies/${societyId}`, {
+    const r2 = await fetch(`${base}/api/super/societies/${societyId}`, {
       headers: { Authorization: `Bearer ${superToken}` },
     });
-    const body = await mustStatus("GET /api/super/societies/:id", r, [200]);
-    const j = JSON.parse(body) as { society?: { name?: string; counts?: { villas?: number } } };
+    const body2 = await mustStatus("GET /api/super/societies/:id", r2, [200]);
+    const j2 = JSON.parse(body2) as { society?: { name?: string; counts?: { villas?: number } } };
     console.log(
-      `  ✓ society detail (${j.society?.name ?? "?"}, villas=${j.society?.counts?.villas ?? "?"})`,
+      `  ✓ society detail (${j2.society?.name ?? "?"}, villas=${j2.society?.counts?.villas ?? "?"})`,
     );
+  } else {
+    console.log("  ○ skip super-admin block (no SMOKE_SUPER_* — using tenant admin only)");
   }
 
-  // Impersonate society ADMIN for tenant reads only.
-  // Side effect: one AdminAuditLog row (IMPERSONATE_TENANT) — no ledger/payment/visitor writes.
+  // Tenant ADMIN reads — prefer direct login (zero DB writes). Fallback: super tenant-session (audit log only).
   let adminToken = "";
   let adminUsername = "";
-  {
+  let usedTenantSession = false;
+
+  async function tryTenantLogin(username: string, password: string): Promise<boolean> {
+    for (const path of ["/api/auth/admin/login", "/api/auth/login"] as const) {
+      const r = await fetch(`${base}${path}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ societyId, username, password }),
+      });
+      if (r.status !== 200) continue;
+      const body = await r.text();
+      const j = JSON.parse(body) as {
+        token?: string;
+        user?: { username?: string; role?: string };
+      };
+      if (!j.token || j.user?.role !== "ADMIN") continue;
+      adminToken = j.token;
+      adminUsername = j.user?.username ?? username;
+      console.log(`  ✓ tenant admin login via ${path} (${adminUsername}) [read-only, no audit row]`);
+      return true;
+    }
+    return false;
+  }
+
+  if (tenantAdminUser && tenantAdminPass && (await tryTenantLogin(tenantAdminUser, tenantAdminPass))) {
+    // ok — no writes
+  } else if (superToken) {
     const r = await fetch(`${base}/api/super/societies/${societyId}/tenant-session`, {
       method: "POST",
       headers: {
@@ -135,7 +169,12 @@ async function main(): Promise<void> {
     if (!j.token) throw new Error("tenant-session: missing token");
     adminToken = j.token;
     adminUsername = j.user?.username ?? "?";
-    console.log(`  ✓ tenant-session as society ADMIN (${adminUsername}) [audit log only]`);
+    usedTenantSession = true;
+    console.log(
+      `  ✓ tenant-session as society ADMIN (${adminUsername}) [1 audit log row — set SMOKE_TENANT_ADMIN_* to avoid]`,
+    );
+  } else {
+    throw new Error("No tenant admin login and no super token for tenant-session fallback");
   }
 
   const tenantHeaders = {
@@ -302,6 +341,11 @@ async function main(): Promise<void> {
   console.log("  • full mobile-api mutation suite");
   console.log("");
   console.log("Safe live smoke PASSED (villa " + villaNumber + " read-only).");
+  if (usedTenantSession) {
+    console.log("  · side effect: 1 AdminAuditLog (IMPERSONATE_TENANT) — no ledger/visitor/payment rows");
+  } else {
+    console.log("  · side effects: none (login tokens only)");
+  }
 }
 
 main().catch((e) => {

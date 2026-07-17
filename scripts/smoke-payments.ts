@@ -24,6 +24,33 @@ async function mustStatus(label: string, res: Response, codes: number[]): Promis
   return res;
 }
 
+async function tenantLoginToken(
+  societyId: string,
+  username: string,
+  password: string,
+): Promise<string | null> {
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const loginRes = await fetch(new URL("/api/auth/login", base).toString(), {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ username, password, societyId }),
+    });
+    if (loginRes.status === 429) {
+      if (process.env.LIVE_SMOKE_SAFE === "1" && attempt >= 1) {
+        console.log("  ○ skip tenant login (429 rate limit on live — use smoke:live:villa25)");
+        return null;
+      }
+      await new Promise((r) => setTimeout(r, 12_000));
+      continue;
+    }
+    await mustStatus("POST /api/auth/login", loginRes, [200]);
+    const loginJson = (await loginRes.json()) as { token?: string };
+    if (!loginJson.token) throw new Error("login: missing token");
+    return loginJson.token;
+  }
+  return null;
+}
+
 async function main(): Promise<void> {
   console.log(`Payment smoke → ${base}`);
 
@@ -35,8 +62,14 @@ async function main(): Promise<void> {
     console.log("  ✓ GET /health");
   }
 
-  const adminUser = process.env.SMOKE_ADMIN_USERNAME?.trim() ?? "sandbox_admin";
-  const adminPass = process.env.SMOKE_ADMIN_PASSWORD?.trim() ?? "Sandbox123!";
+  const tenantUser =
+    process.env.SMOKE_TENANT_ADMIN_USERNAME?.trim() ??
+    process.env.SMOKE_ADMIN_USERNAME?.trim() ??
+    "sandbox_admin";
+  const tenantPass =
+    process.env.SMOKE_TENANT_ADMIN_PASSWORD?.trim() ??
+    process.env.SMOKE_ADMIN_PASSWORD?.trim() ??
+    "Sandbox123!";
 
   const societiesRes = await fetch(new URL("/api/public/societies", base).toString());
   await mustStatus("GET /api/public/societies", societiesRes, [200]);
@@ -47,24 +80,17 @@ async function main(): Promise<void> {
   const sandbox = societies.find((s) => s.name?.toLowerCase().includes("sandbox")) ?? societies[0];
   const societyId = process.env.SMOKE_SOCIETY_ID?.trim() ?? sandbox!.id;
 
-  const loginRes = await fetch(new URL("/api/auth/login", base).toString(), {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      username: adminUser,
-      password: adminPass,
-      societyId,
-    }),
-  });
-  await mustStatus("POST /api/auth/login", loginRes, [200]);
-  const loginJson = (await loginRes.json()) as { token?: string };
-  if (!loginJson.token) throw new Error("login: missing token");
+  const token = await tenantLoginToken(societyId, tenantUser, tenantPass);
+  if (!token) {
+    console.log("\nPayment smoke skipped (live rate limit — no DB changes attempted).");
+    return;
+  }
   const headers = {
-    Authorization: `Bearer ${loginJson.token}`,
+    Authorization: `Bearer ${token}`,
     "X-Society-Id": societyId,
     "Content-Type": "application/json",
   };
-  console.log(`  ✓ admin login (${adminUser}, society ${societyId.slice(0, 8)}…)`);
+  console.log(`  ✓ admin login (${tenantUser}, society ${societyId.slice(0, 8)}…)`);
 
   {
     const r = await fetch(new URL("/api/reconciliation/summary", base).toString(), { headers });
