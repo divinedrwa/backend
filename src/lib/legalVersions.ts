@@ -15,9 +15,9 @@
  * working exactly as before (historical implicit acceptance); only updated clients gate on it.
  */
 
-export const CURRENT_TERMS_VERSION = process.env.LEGAL_TERMS_VERSION?.trim() || "2026-07-07";
+export const CURRENT_TERMS_VERSION = process.env.LEGAL_TERMS_VERSION?.trim() || "2026-07-18";
 export const CURRENT_PRIVACY_VERSION =
-  process.env.LEGAL_PRIVACY_VERSION?.trim() || "2026-07-07";
+  process.env.LEGAL_PRIVACY_VERSION?.trim() || "2026-07-18";
 
 /** Public URLs for the hosted docs, if configured (mirrors the mobile app's dart-defines). */
 export const TERMS_URL = process.env.TERMS_AND_CONDITIONS_URL?.trim() || null;
