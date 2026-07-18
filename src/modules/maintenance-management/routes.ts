@@ -792,7 +792,7 @@ router.post("/apply-credit", validateBody(applyCreditSchema), async (req, res, n
       const { creditPool } = await getVillaCreditBalance(tx, {
         societyId,
         villaId: body.villaId,
-        financialYearId: cycle.financialYearId,
+        beforePeriod: { year: cycle.periodYear, month: cycle.periodMonth },
       });
       if (creditPool <= 0) {
         throw { statusCode: 400, message: "No advance credit available for this villa" };
@@ -919,7 +919,6 @@ router.post(
           const { creditPool } = await getVillaCreditBalance(tx, {
             societyId,
             villaId: body.villaId,
-            financialYearId: cycle.financialYearId,
           });
           if (creditPool < Math.abs(body.amount)) {
             throw { statusCode: 400, message: `Cannot deduct more than available credit (₹${creditPool.toLocaleString("en-IN")})` };
@@ -962,11 +961,10 @@ router.post(
           source: BillingPaymentSource.CASH_MANUAL,
         });
 
-        // Read credit balance after reconciliation
+        // Read credit balance after reconciliation (full wallet, not cycle-scoped).
         const { creditPool } = await getVillaCreditBalance(tx, {
           societyId,
           villaId: body.villaId,
-          financialYearId: cycle.financialYearId,
         });
         return { creditPool };
       }, { timeout: 15000 });

@@ -27,7 +27,7 @@ import {
   notifySocietyMaintenanceLedgerUpdate,
   notifyVillaMaintenanceLedgerUpdate,
 } from "../../lib/maintenanceLedgerNotify";
-import { applyVillaCreditAcrossSnapshots, getVillaCreditBalancesBulk } from "./credit-walker";
+import { applyVillaCreditAcrossSnapshots, getVillaCreditForCycleDisplayBulk } from "./credit-walker";
 import { refreshSnapshotStatus } from "./snapshot-helpers";
 
 const router = Router();
@@ -1203,10 +1203,13 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       if (!lastPayByVilla.has(p.villaId)) lastPayByVilla.set(p.villaId, p);
     }
 
-    // Compute per-villa advance credit balances for the financial year
-    const creditBalances = await getVillaCreditBalancesBulk(prisma, {
+    // Per-villa advance credit for THIS cycle (not drained by future snapshots).
+    const creditBalances = await getVillaCreditForCycleDisplayBulk(prisma, {
       societyId,
-      financialYearId: cycle.financialYearId,
+      cycleId: cycle.id,
+      periodMonth: cycle.periodMonth,
+      periodYear: cycle.periodYear,
+      cycleSnapByVilla: new Map(snapshotsRows.map((s) => [s.villaId, s])),
     });
 
     // Sum actual cash payments per villa for this cycle (excludes credit-applied portion)

@@ -240,20 +240,30 @@ export async function getVillaCreditBalance(
  * Bulk variant: returns the remaining advance-credit pool for every villa
  * by walking ALL cycles globally (credit carries across FY boundaries).
  * The `financialYearId` parameter is kept for API compatibility.
+ *
+ * Optional `throughCycleId`: stop after that cycle (inclusive). Use for
+ * per-cycle admin display so future draft/upcoming snapshots do not drain
+ * credit shown on the current billing period.
  */
 export async function getVillaCreditBalancesBulk(
   db: ReadDb,
-  params: { societyId: string; financialYearId?: string },
+  params: { societyId: string; financialYearId?: string; throughCycleId?: string },
 ): Promise<Map<string, number>> {
-  const { societyId } = params;
+  const { societyId, throughCycleId } = params;
   const nowUtc = new Date();
 
-  const cycles = await db.maintenanceCollectionCycle.findMany({
+  const allCycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
     select: mcCycleSelect,
   });
-  if (cycles.length === 0) return new Map();
+  if (allCycles.length === 0) return new Map();
+
+  let cycles = allCycles;
+  if (throughCycleId) {
+    const idx = allCycles.findIndex((c) => c.id === throughCycleId);
+    if (idx >= 0) cycles = allCycles.slice(0, idx + 1);
+  }
 
   const cycleIds = cycles.map((c) => c.id);
 
@@ -314,6 +324,173 @@ export async function getVillaCreditBalancesBulk(
       creditPool = advanceCreditWalkStep(expected, cash, creditPool).creditPool;
     }
     result.set(villaId, creditPool);
+  }
+
+  return result;
+}
+
+/**
+ * Bulk variant of {@link getVillaCreditBalance} with `beforePeriod` — credit
+ * pool entering a billing period (available to apply to that cycle).
+ */
+export async function getVillaCreditBalancesBeforePeriod(
+  db: ReadDb,
+  params: {
+    societyId: string;
+    beforePeriod: { year: number; month: number };
+  },
+): Promise<Map<string, number>> {
+  const { societyId, beforePeriod } = params;
+  const nowUtc = new Date();
+
+  const allCycles = await db.maintenanceCollectionCycle.findMany({
+    where: { societyId },
+    orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
+    select: mcCycleSelect,
+  });
+  const cycles = allCycles.filter(
+    (c) =>
+      c.periodYear < beforePeriod.year ||
+      (c.periodYear === beforePeriod.year && c.periodMonth < beforePeriod.month),
+  );
+
+  const cycleIds = cycles.map((c) => c.id);
+
+  const snapshots =
+    cycleIds.length > 0
+      ? await db.villaMaintenanceSnapshot.findMany({
+          where: { cycleId: { in: cycleIds } },
+          select: { villaId: true, ...snapWalkSelect },
+        })
+      : [];
+
+  const villaIds = [...new Set(snapshots.map((s) => s.villaId))];
+  const billingCtx = await loadCreditWalkBillingContext(db, societyId, villaIds);
+
+  const [cashAgg, unlinkedRows] = await Promise.all([
+    cycleIds.length > 0
+      ? db.maintenancePayment.groupBy({
+          by: ["villaId", "maintenanceCollectionCycleId"],
+          where: { societyId, maintenanceCollectionCycleId: { in: cycleIds } },
+          _sum: { amount: true },
+        })
+      : Promise.resolve([]),
+    db.maintenancePayment.groupBy({
+      by: ["villaId", "month", "year"],
+      where: { societyId, maintenanceCollectionCycleId: null },
+      _sum: { amount: true },
+    }),
+  ]);
+
+  const villaSnaps = new Map<string, Map<string, (typeof snapshots)[number]>>();
+  for (const s of snapshots) {
+    let m = villaSnaps.get(s.villaId);
+    if (!m) {
+      m = new Map();
+      villaSnaps.set(s.villaId, m);
+    }
+    m.set(s.cycleId, s);
+  }
+
+  const cashKey = (vid: string, cid: string) => `${vid}|${cid}`;
+  const cashMap = new Map<string, number>();
+  for (const row of cashAgg) {
+    if (row.maintenanceCollectionCycleId) {
+      cashMap.set(
+        cashKey(row.villaId, row.maintenanceCollectionCycleId),
+        Number(row._sum.amount || 0),
+      );
+    }
+  }
+  const unlinkedByVillaPeriod = new Map<string, number>();
+  for (const row of unlinkedRows) {
+    const val = Number(row._sum.amount || 0);
+    if (Math.abs(val) > 0.005) {
+      unlinkedByVillaPeriod.set(`${row.villaId}:${row.month}:${row.year}`, val);
+    }
+  }
+
+  const result = new Map<string, number>();
+  const villaIdSet = new Set([
+    ...villaSnaps.keys(),
+    ...unlinkedRows.map((r) => r.villaId),
+  ]);
+
+  for (const villaId of villaIdSet) {
+    let creditPool = 0;
+    const snapsPerCycle = villaSnaps.get(villaId) ?? new Map();
+    for (const cycle of cycles) {
+      creditPool +=
+        unlinkedByVillaPeriod.get(`${villaId}:${cycle.periodMonth}:${cycle.periodYear}`) ?? 0;
+      const snap = snapsPerCycle.get(cycle.id);
+      if (!snap) continue;
+      if (snap.status === "WAIVED") continue;
+      const expected = resolveWalkExpectedForCycle(billingCtx, cycle, snap, nowUtc);
+      const cash = cashMap.get(cashKey(villaId, cycle.id)) ?? 0;
+      creditPool = advanceCreditWalkStep(expected, cash, creditPool).creditPool;
+    }
+    creditPool +=
+      unlinkedByVillaPeriod.get(`${villaId}:${beforePeriod.month}:${beforePeriod.year}`) ?? 0;
+    result.set(villaId, Math.max(0, creditPool));
+  }
+
+  return result;
+}
+
+function isCycleUnpaidForCreditDisplay(snap: {
+  expectedAmount: unknown;
+  paidAmount?: unknown;
+  status?: string;
+} | null | undefined): boolean {
+  if (!snap || snap.status === "WAIVED" || snap.status === "PAID") return false;
+  const expected = Number(snap.expectedAmount);
+  const paid = Number(snap.paidAmount ?? 0);
+  return paid < expected - 0.005;
+}
+
+/**
+ * Per-villa advance credit for admin cycle grid / financial dashboard.
+ * - Unpaid cycle: pool entering the period (available to apply this month).
+ * - Paid/waived cycle: pool after walking through this period (surplus carried forward).
+ * Does not walk future cycles beyond the selected one.
+ */
+export async function getVillaCreditForCycleDisplayBulk(
+  db: ReadDb,
+  params: {
+    societyId: string;
+    cycleId: string;
+    periodMonth: number;
+    periodYear: number;
+    cycleSnapByVilla: Map<
+      string,
+      { expectedAmount: unknown; paidAmount?: unknown; status?: string } | undefined
+    >;
+  },
+): Promise<Map<string, number>> {
+  const [afterPool, beforePool] = await Promise.all([
+    getVillaCreditBalancesBulk(db, {
+      societyId: params.societyId,
+      throughCycleId: params.cycleId,
+    }),
+    getVillaCreditBalancesBeforePeriod(db, {
+      societyId: params.societyId,
+      beforePeriod: { year: params.periodYear, month: params.periodMonth },
+    }),
+  ]);
+
+  const result = new Map<string, number>();
+  const villaIds = new Set([
+    ...params.cycleSnapByVilla.keys(),
+    ...afterPool.keys(),
+    ...beforePool.keys(),
+  ]);
+
+  for (const villaId of villaIds) {
+    const snap = params.cycleSnapByVilla.get(villaId);
+    const pool = isCycleUnpaidForCreditDisplay(snap)
+      ? (beforePool.get(villaId) ?? 0)
+      : (afterPool.get(villaId) ?? 0);
+    if (pool > 0.005) result.set(villaId, pool);
   }
 
   return result;

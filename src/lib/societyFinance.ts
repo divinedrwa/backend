@@ -1,5 +1,5 @@
 import { Prisma } from "@prisma/client";
-import { getVillaCreditBalancesBulk } from "../modules/maintenance-management/credit-walker";
+import { getVillaCreditForCycleDisplayBulk } from "../modules/maintenance-management/credit-walker";
 import { loadBillingCyclePeriodKeys } from "../modules/billing-cycle/billing-collection-scope";
 import { prisma as defaultPrisma } from "./prisma";
 
@@ -324,15 +324,39 @@ export async function computeSocietyMoneySnapshot(
     );
   }
 
-  // Advance credit pool — use the shared credit walker (includes billing late
-  // fees and unlinked manual adjustments) so society fund UI matches per-villa
-  // admin/resident credit balances. The walk is global across ALL financial
-  // years, so it must not be gated on an ACTIVE FY existing — a society
-  // between FYs still holds villa credit.
+  // Advance credit — per-villa pools for the current billing month (display
+  // semantics). Walking ALL future cycles pre-consumes credit against unpaid
+  // upcoming snapshots and wrongly shows ₹0 on Society Finances / admin grid.
   let totalAdvanceCredit = 0;
-  const creditBalances = await getVillaCreditBalancesBulk(db, { societyId });
-  for (const pool of creditBalances.values()) {
-    totalAdvanceCredit += pool;
+  if (maintenanceCycles.length > 0) {
+    const now = new Date();
+    const cm = now.getMonth() + 1;
+    const cy = now.getFullYear();
+    let displayCycle = maintenanceCycles[maintenanceCycles.length - 1]!;
+    for (const c of maintenanceCycles) {
+      if (c.periodYear < cy || (c.periodYear === cy && c.periodMonth <= cm)) {
+        displayCycle = c;
+      }
+    }
+    const cycleSnapByVilla = new Map<
+      string,
+      { expectedAmount: unknown; paidAmount?: unknown; status?: string }
+    >();
+    for (const s of snapshots) {
+      if (s.cycleId === displayCycle.id) {
+        cycleSnapByVilla.set(s.villaId, s);
+      }
+    }
+    const creditBalances = await getVillaCreditForCycleDisplayBulk(db, {
+      societyId,
+      cycleId: displayCycle.id,
+      periodMonth: displayCycle.periodMonth,
+      periodYear: displayCycle.periodYear,
+      cycleSnapByVilla,
+    });
+    for (const pool of creditBalances.values()) {
+      totalAdvanceCredit += pool;
+    }
   }
 
   // Additional funds + expenses.

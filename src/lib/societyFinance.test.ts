@@ -368,4 +368,42 @@ describe("computeSocietyMoneySnapshot", () => {
     assert.equal(m.expensesAllTime, 500);
     assert.equal(m.currentFundBalance, -500);
   });
+
+  it("does not zero society advance credit when future billing snapshots exist", async () => {
+    const now = new Date();
+    const cy = now.getFullYear();
+    const cm = now.getMonth() + 1;
+    const prevMonth = cm === 1 ? 12 : cm - 1;
+    const prevYear = cm === 1 ? cy - 1 : cy;
+    const nextMonth = cm === 12 ? 1 : cm + 1;
+    const nextYear = cm === 12 ? cy + 1 : cy;
+    const pkPrev = `${prevYear}-${String(prevMonth).padStart(2, "0")}`;
+    const pkCur = `${cy}-${String(cm).padStart(2, "0")}`;
+    const pkNext = `${nextYear}-${String(nextMonth).padStart(2, "0")}`;
+
+    const db = fakePrisma({
+      snapshots: [
+        { villaId: "v1", cycleId: "mc-prev", expectedAmount: 1100, paidAmount: 1100, status: "PAID" },
+        { villaId: "v1", cycleId: "mc-cur", expectedAmount: 1100, paidAmount: 0, status: "UNPAID" },
+        { villaId: "v1", cycleId: "mc-next", expectedAmount: 1100, paidAmount: 0, status: "UNPAID" },
+      ],
+      maintenancePayments: [
+        {
+          villaId: "v1",
+          maintenanceCollectionCycleId: "mc-prev",
+          amount: 1300,
+          paymentDate: new Date(prevYear, prevMonth - 1, 15),
+          month: prevMonth,
+          year: prevYear,
+        },
+      ],
+      maintenanceCycles: [
+        { id: "mc-prev", financialYearId: "fy1", periodKey: pkPrev, periodMonth: prevMonth, periodYear: prevYear },
+        { id: "mc-cur", financialYearId: "fy1", periodKey: pkCur, periodMonth: cm, periodYear: cy },
+        { id: "mc-next", financialYearId: "fy1", periodKey: pkNext, periodMonth: nextMonth, periodYear: nextYear },
+      ],
+    });
+    const m = await computeSocietyMoneySnapshot(db, "s1");
+    assert.equal(m.totalAdvanceCredit, 200);
+  });
 });

@@ -1,6 +1,6 @@
 import { BillingUserPaymentStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { getVillaCreditBalancesBulk } from "./credit-walker";
+import { getVillaCreditForCycleDisplayBulk } from "./credit-walker";
 
 export const FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR =
   "No billing snapshots for this period. Configure a rule and generate snapshots first.";
@@ -151,10 +151,13 @@ export async function buildCycleFinancialDashboardCore(
     }
   }
 
-  // Compute per-villa advance credit balances
-  const creditBalances = await getVillaCreditBalancesBulk(prisma, {
+  // Per-villa advance credit for THIS cycle (not drained by future snapshots).
+  const creditBalances = await getVillaCreditForCycleDisplayBulk(prisma, {
     societyId,
-    financialYearId: cycle.financialYearId,
+    cycleId,
+    periodMonth: cycle.periodMonth,
+    periodYear: cycle.periodYear,
+    cycleSnapByVilla: snapByVilla,
   });
 
   // Sum actual cash payments per villa for this cycle
