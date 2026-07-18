@@ -50,6 +50,7 @@
     "phase4:safety-proof": "tsx scripts/phase4-sandbox-charge-head-trial.ts",
     "phase4:sandbox-trial:local": "tsx scripts/phase4-sandbox-charge-head-local-trial.ts",
     "k5:live": "bash scripts/k5-live-gate.sh",
+    "stability:daily": "bash scripts/stability-daily-check.sh",
     "phase0:gate": "bash ../scripts/phase0-local-gate.sh",
     "phase0:gate:live": "bash ../scripts/phase0-live-gate.sh",
     "reset:sandbox-ledger": "tsx scripts/guard-local-db.ts && tsx scripts/reset-sandbox-ledger.ts",
