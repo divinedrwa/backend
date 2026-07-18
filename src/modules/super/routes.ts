@@ -15,7 +15,7 @@ import {
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole, invalidateAuthCacheForSociety } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { signAuthToken } from "../../utils/jwt";
+import { mintTenantAuthForUser } from "../../lib/mintTenantAuth";
 import { passwordSchema } from "../../lib/passwordSchema";
 import { auditFromRequest } from "../../services/audit.service";
 import { compareSemver } from "../../lib/semver";
@@ -199,12 +199,11 @@ router.post("/societies/:societyId/tenant-session", async (req, res, next) => {
       return;
     }
 
-    const token = signAuthToken({
-      userId: adminUser.id,
-      role: UserRole.ADMIN,
-      societyId: adminUser.societyId,
-      villaId: adminUser.villaId,
-    });
+    const authBody = await mintTenantAuthForUser(adminUser.id, res);
+    if (!authBody) {
+      res.status(400).json({ message: "Could not mint tenant session" });
+      return;
+    }
 
     auditFromRequest(req, {
       adminId: req.auth!.userId,
@@ -218,7 +217,7 @@ router.post("/societies/:societyId/tenant-session", async (req, res, next) => {
       },
     });
 
-    res.json({ token, user: adminUser });
+    res.json({ token: authBody.token, refreshToken: authBody.refreshToken, user: adminUser });
   } catch (e) {
     next(e);
   }
