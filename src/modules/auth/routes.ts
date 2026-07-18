@@ -12,7 +12,13 @@ import {
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { getLegalConsentStatus } from "../../lib/legalVersions";
-import { setTenantAuthCookies, clearTenantAuthCookies } from "../../lib/tenantAuthCookie";
+import {
+  setTenantAuthCookies,
+  clearTenantAuthCookies,
+  readRefreshTokenFromCookie,
+  readBearerOrCookieToken,
+} from "../../lib/tenantAuthCookie";
+import { invalidateAuthCache } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import crypto from "crypto";
 import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
@@ -263,14 +269,17 @@ const logoutSchema = z
 
 router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
   try {
-    // Best-effort: extract userId from the Authorization header if present.
+    // Best-effort: extract userId from Bearer or HttpOnly access cookie.
     let userId: string | null = null;
-    const authHeader = req.headers.authorization;
-    if (authHeader?.startsWith("Bearer ")) {
+    const accessToken = readBearerOrCookieToken(
+      req.headers.authorization,
+      req.headers.cookie,
+    );
+    if (accessToken) {
       try {
         const jwt = await import("jsonwebtoken");
         const { env } = await import("../../config/env");
-        const payload = jwt.default.verify(authHeader.slice(7), env.JWT_SECRET) as { userId?: string } | null;
+        const payload = jwt.default.verify(accessToken, env.JWT_SECRET) as { userId?: string } | null;
         userId = payload?.userId ?? null;
       } catch {
         // Token may be expired or invalid — that's fine, we still try.
@@ -278,10 +287,13 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
     }
 
     const body = (req.body ?? {}) as { refreshToken?: string };
+    const cookieRefresh = readRefreshTokenFromCookie(req.headers.cookie);
 
-    if (body.refreshToken) {
+    const refreshRaw = body.refreshToken ?? cookieRefresh ?? undefined;
+
+    if (refreshRaw) {
       // Revoke the specific refresh token.
-      const hashed = hashRefreshToken(body.refreshToken);
+      const hashed = hashRefreshToken(refreshRaw);
       await prisma.refreshToken.updateMany({
         where: { token: hashed, revoked: false },
         data: { revoked: true },
@@ -292,6 +304,10 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
         where: { userId, revoked: false },
         data: { revoked: true },
       });
+    }
+
+    if (userId) {
+      invalidateAuthCache(userId);
     }
 
     clearTenantAuthCookies(res);
@@ -678,12 +694,18 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
 /**
  * POST /auth/refresh — exchange a valid refresh token for a new access + refresh token pair.
  * The old refresh token is revoked (rotation).
+ * Body refreshToken optional when TENANT_HTTPONLY_AUTH uses tenant_refresh cookie.
  */
-const refreshSchema = z.object({ refreshToken: z.string().min(1) });
+const refreshSchema = z.object({ refreshToken: z.string().min(1).optional() });
 
 router.post("/refresh", refreshRateLimiter, validateBody(refreshSchema), async (req, res, next) => {
   try {
-    const { refreshToken: rawToken } = req.body as z.infer<typeof refreshSchema>;
+    const body = req.body as z.infer<typeof refreshSchema>;
+    const rawToken =
+      body.refreshToken ?? readRefreshTokenFromCookie(req.headers.cookie) ?? undefined;
+    if (!rawToken) {
+      return res.status(401).json({ message: "Invalid or expired refresh token" });
+    }
     const hashed = hashRefreshToken(rawToken);
 
     const stored = await prisma.refreshToken.findUnique({
@@ -709,8 +731,12 @@ router.post("/refresh", refreshRateLimiter, validateBody(refreshSchema), async (
       data: { revoked: true },
     });
 
-    // Issue new tokens
-    return res.json(await serializeAuthUser(stored.user));
+    const authBody = await serializeAuthUser(stored.user);
+    setTenantAuthCookies(res, {
+      token: authBody.token,
+      refreshToken: authBody.refreshToken,
+    });
+    return res.json(authBody);
   } catch (error) {
     next(error);
   }

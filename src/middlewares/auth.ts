@@ -7,10 +7,9 @@ import { readBearerOrCookieToken } from "../lib/tenantAuthCookie";
 // ── Auth user cache ─────────────────────────────────────────────────
 // Short-lived in-memory cache for the per-request user+society lookup.
 // Saves a DB round-trip + JOIN on every authenticated request (~50-200ms
-// on serverless Postgres). TTL is 30s — role/status changes propagate
-// within half a minute, which is acceptable since deactivation and
-// role changes are rare admin actions.
-const AUTH_CACHE_TTL_MS = 30_000;
+// on serverless Postgres). E2: 5s TTL — invalidateAuthCache on role/disable is primary;
+// short TTL bounds stale permissions if a handler forgets to evict.
+const AUTH_CACHE_TTL_MS = 5_000;
 type AuthCacheEntry = {
   expiresAt: number;
   user: {

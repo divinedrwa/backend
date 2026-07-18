@@ -87,8 +87,8 @@ Guided UI from `GO_LIVE_CHECKLIST.md` (villas → gates → payment methods → 
 |------|--------|
 | **G4** `GET /residents/maintenance-statement/pdf?financialYearId=` — FY PDF (cycles + payments) | ✅ |
 | **G5** `PaymentDispute` model + resident create/list + admin list/update | ✅ |
-| Admin web UI for disputes | 📋 follow-up |
-| Mobile dispute + FY PDF buttons | 📋 follow-up |
+| Admin web UI for disputes | ✅ `/payment-disputes` |
+| Mobile dispute + FY PDF buttons | ✅ Report payment issue on maintenance hub; G4 API ready |
 
 **G4 example:** `GET /api/residents/maintenance-statement/pdf?financialYearId=<fyId>`
 

@@ -4,11 +4,14 @@
 import type { Response } from "express";
 
 const TENANT_TOKEN_COOKIE = "tenant_token";
-const TENANT_REFRESH_COOKIE = "tenant_refresh";
+export const TENANT_REFRESH_COOKIE = "tenant_refresh";
 const MAX_AGE_SEC = 60 * 60 * 24 * 7;
 
 export function isHttpOnlyTenantAuthEnabled(): boolean {
-  return process.env.TENANT_HTTPONLY_AUTH === "true";
+  if (process.env.TENANT_HTTPONLY_AUTH === "false") return false;
+  return (
+    process.env.TENANT_HTTPONLY_AUTH === "true" || process.env.NODE_ENV === "production"
+  );
 }
 
 export function setTenantAuthCookies(
@@ -56,4 +59,10 @@ export function readBearerOrCookieToken(
   if (!isHttpOnlyTenantAuthEnabled()) return null;
   const cookies = parseCookieHeader(cookieHeader);
   return cookies[TENANT_TOKEN_COOKIE] ?? null;
+}
+
+export function readRefreshTokenFromCookie(cookieHeader: string | undefined): string | null {
+  if (!isHttpOnlyTenantAuthEnabled()) return null;
+  const cookies = parseCookieHeader(cookieHeader);
+  return cookies[TENANT_REFRESH_COOKIE] ?? null;
 }
