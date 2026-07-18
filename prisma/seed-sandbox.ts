@@ -17,7 +17,9 @@ import bcrypt from "bcryptjs";
 import { societyIsSandboxColumnExists } from "../src/lib/sandboxSociety";
 
 dotenv.config();
-dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
+if (process.env.SKIP_ENV_LOCAL !== "1") {
+  dotenv.config({ path: path.resolve(process.cwd(), ".env.local"), override: true });
+}
 
 const prisma = new PrismaClient();
 

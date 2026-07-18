@@ -44,15 +44,34 @@
 5. **Invoice PDF:** line items when lines exist ✅
 6. **Mobile:** `chargeLines[]` on resident maintenance API ✅
 
-**Live verified 2026-07-18:** K5 green; Divine Residency `useChargeHeads=false`, 0 charge heads, reconciliation healthy.
+**Live verified 2026-07-18:** K5 green; Divine Residency `useChargeHeads=false`, 0 charge heads, reconciliation healthy. **Live API sandbox trial** (`qa-sandbox-society`): 2 charge heads → publish → `expectedAmount=₹1200` = line sum → reconciliation clean; Divine unchanged.
 
 Societies with **zero charge heads** → current single-line behavior.
 
 ---
 
-### Slice 2 — A10 ad-hoc invoices (P2)
+### Slice 2 — A10 ad-hoc invoices (P2) — shipped via Special Projects ✅
 
-One-time charges outside cycles (event fees, penalties). Consider extending `SpecialProject` vs new `AdHocInvoice` model.
+**Decision:** Reuse existing `SpecialProject` / `ProjectContribution` — no new ledger model. Keeps maintenance reconciliation isolated; ad-hoc dues are a separate collection track (already in admin web + Flutter).
+
+| Task | Status |
+|------|--------|
+| Multi-villa assessments (projects UI + mobile) | ✅ pre-existing |
+| `POST /special-projects/ad-hoc-charge` — single-villa penalty / event fee shortcut | ✅ |
+| Resident maintenance API surfaces `specialProjectDues` + `grandTotalDue` | ✅ |
+| Payment recording on contributions (cash/UPI) | ✅ pre-existing |
+
+**API examples:**
+
+```http
+POST /api/special-projects/ad-hoc-charge
+{ "title": "Parking penalty", "villaId": "…", "amount": 500, "type": "OTHER" }
+
+POST /api/special-projects/ad-hoc-charge
+{ "title": "Diwali event", "charges": [{ "villaId": "…", "amount": 200 }] }
+```
+
+Resident `GET /residents/maintenance-pending` and `maintenance-dashboard` now include `specialProjectDues[]`, `specialProjectDueTotal`, and `grandTotalDue` (maintenance + ad-hoc).
 
 ---
 
@@ -78,10 +97,11 @@ UTR auto-verify, bank CSV import — external integrations.
 ## Phase 4 gate (definition of done)
 
 - [x] Slice 0: SQFT publish produces per-villa amounts on staging/local sandbox
-- [ ] Slice 1: One society on charge heads; invoice shows breakdown; reconciliation still clean
+- [x] Slice 1: One society on charge heads; invoice shows breakdown; reconciliation still clean *(local + live sandbox trial 2026-07-18; Divine unchanged)*
+- [x] Slice 2: Ad-hoc charges via Special Projects + maintenance API integration *(2026-07-18)*
 - [ ] G2 aging buckets (optional enhancement)
-- [ ] K5 live pass after each deploy
-- [ ] No regression on Divine Residency FIXED billing
+- [x] K5 live pass after each deploy *(live-20260718)*
+- [x] No regression on Divine Residency FIXED billing
 
 ---
 

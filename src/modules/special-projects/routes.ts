@@ -13,6 +13,10 @@ import {
   isCloudinaryConfigured,
   uploadExpenseAttachmentBuffer,
 } from "../../services/cloudinaryExpenseAttachment";
+import {
+  createSpecialProjectWithContributions,
+  type CreateSpecialProjectInput,
+} from "../../lib/specialProjectDues";
 
 const router = Router();
 router.use(requireAuth);
@@ -53,6 +57,68 @@ const recordPaymentSchema = z.object({
   idempotencyKey: z.string().min(10).max(255).optional(),
 });
 
+const adHocChargeSchema = z.object({
+  title: z.string().trim().min(1).max(200),
+  description: z.string().trim().max(2000).optional(),
+  type: z.enum(["REPAIR", "UPGRADE", "PURCHASE", "EVENT", "OTHER"]).default("OTHER"),
+  dueDate: z.string().datetime().optional(),
+  /** Single-villa shortcut (event fee / penalty). */
+  villaId: z.string().min(1).optional(),
+  amount: z.number().positive().optional(),
+  /** Multi-villa ad-hoc charge (same as create project contributions). */
+  charges: z.array(contributionItemSchema).min(1).max(500).optional(),
+}).superRefine((body, ctx) => {
+  const hasShortcut = body.villaId && body.amount != null;
+  const hasCharges = (body.charges?.length ?? 0) > 0;
+  if (hasShortcut === hasCharges) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "Provide either villaId+amount or charges[], not both",
+    });
+  }
+});
+
+async function assertVillasInSociety(
+  societyId: string,
+  contributions: Array<{ villaId: string; amount: number; dueDate?: string }>,
+): Promise<void> {
+  const villaIds = contributions.map((c) => c.villaId);
+  const villas = await prisma.villa.findMany({
+    where: { id: { in: villaIds }, societyId },
+    select: { id: true },
+  });
+  const validIds = new Set(villas.map((v) => v.id));
+  const invalid = villaIds.filter((id) => !validIds.has(id));
+  if (invalid.length > 0) {
+    const err = new Error("Invalid villa IDs") as Error & { invalidVillaIds?: string[] };
+    err.invalidVillaIds = invalid;
+    throw err;
+  }
+}
+
+async function createProjectForSociety(
+  societyId: string,
+  userId: string,
+  input: Omit<CreateSpecialProjectInput, "societyId" | "createdById">,
+) {
+  await assertVillasInSociety(
+    societyId,
+    input.contributions.map((c) => ({
+      villaId: c.villaId,
+      amount: c.amount,
+      dueDate: c.dueDate?.toISOString(),
+    })),
+  );
+
+  return prisma.$transaction(async (tx) =>
+    createSpecialProjectWithContributions(tx, {
+      societyId,
+      createdById: userId,
+      ...input,
+    }),
+  );
+}
+
 const addExpenseSchema = z.object({
   description: z.string().trim().min(1).max(500),
   amount: z.number().positive(),
@@ -90,42 +156,16 @@ router.post(
       const userId = req.auth!.userId;
       const { title, description, type, targetAmount, contributions } = req.body as z.infer<typeof createProjectSchema>;
 
-      // Verify all villas belong to this society
-      const villaIds = contributions.map((c) => c.villaId);
-      const villas = await prisma.villa.findMany({
-        where: { id: { in: villaIds }, societyId },
-        select: { id: true },
-      });
-      const validIds = new Set(villas.map((v) => v.id));
-      const invalid = villaIds.filter((id) => !validIds.has(id));
-      if (invalid.length > 0) {
-        return res.status(400).json({ message: "Invalid villa IDs", invalidVillaIds: invalid });
-      }
-
-      const project = await prisma.$transaction(async (tx) => {
-        const proj = await tx.specialProject.create({
-          data: {
-            societyId,
-            title,
-            description,
-            type,
-            targetAmount,
-            createdById: userId,
-            contributions: {
-              create: contributions.map((c) => ({
-                villaId: c.villaId,
-                amount: c.amount,
-                dueDate: c.dueDate ? new Date(c.dueDate) : null,
-              })),
-            },
-          },
-          include: {
-            contributions: {
-              include: { villa: { select: { id: true, villaNumber: true, ownerName: true } } },
-            },
-          },
-        });
-        return proj;
+      const project = await createProjectForSociety(societyId, userId, {
+        title,
+        description,
+        type,
+        targetAmount,
+        contributions: contributions.map((c) => ({
+          villaId: c.villaId,
+          amount: c.amount,
+          dueDate: c.dueDate ? new Date(c.dueDate) : null,
+        })),
       });
 
       // Fire-and-forget notification
@@ -142,6 +182,76 @@ router.post(
 
       res.status(201).json({ project });
     } catch (error) {
+      if (error instanceof Error && "invalidVillaIds" in error) {
+        return res.status(400).json({
+          message: error.message,
+          invalidVillaIds: (error as Error & { invalidVillaIds: string[] }).invalidVillaIds,
+        });
+      }
+      next(error);
+    }
+  },
+);
+
+// ─── POST /ad-hoc-charge
+
+router.post(
+  "/ad-hoc-charge",
+  validateBody(adHocChargeSchema),
+  async (req, res, next) => {
+    try {
+      const societyId = req.auth!.societyId;
+      const userId = req.auth!.userId;
+      const body = req.body as z.infer<typeof adHocChargeSchema>;
+
+      const contributions =
+        body.charges?.map((c) => ({
+          villaId: c.villaId,
+          amount: c.amount,
+          dueDate: c.dueDate ? new Date(c.dueDate) : body.dueDate ? new Date(body.dueDate) : null,
+        })) ?? [
+          {
+            villaId: body.villaId!,
+            amount: body.amount!,
+            dueDate: body.dueDate ? new Date(body.dueDate) : null,
+          },
+        ];
+
+      const targetAmount = contributions.reduce((sum, c) => sum + c.amount, 0);
+
+      const project = await createProjectForSociety(societyId, userId, {
+        title: body.title,
+        description: body.description,
+        type: body.type,
+        targetAmount,
+        contributions,
+      });
+
+      const villaIds = [...new Set(contributions.map((c) => c.villaId))];
+      const residents = await prisma.user.findMany({
+        where: { villaId: { in: villaIds }, ...residentLikeRoleFilter, isActive: true },
+        select: { id: true },
+      });
+      if (residents.length > 0) {
+        notifyUsers(
+          residents.map((r) => r.id),
+          {
+            title: "New charge",
+            body: `"${body.title}" — please review and pay your share.`,
+            data: { type: "SPECIAL_PROJECT_CREATED", projectId: project.id },
+          },
+          { category: "PROJECT" },
+        ).catch((err) => logger.error(err, "Failed to send ad-hoc charge notification"));
+      }
+
+      res.status(201).json({ project, adHoc: true });
+    } catch (error) {
+      if (error instanceof Error && "invalidVillaIds" in error) {
+        return res.status(400).json({
+          message: error.message,
+          invalidVillaIds: (error as Error & { invalidVillaIds: string[] }).invalidVillaIds,
+        });
+      }
       next(error);
     }
   },

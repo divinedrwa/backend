@@ -17,6 +17,10 @@ import {
   loadAppVisibleBillingCyclePeriodKeys,
   maintenanceCollectionBackedByBillingCycleWhere,
 } from "../billing-cycle/billing-collection-scope";
+import {
+  loadSpecialProjectDuesForVilla,
+  sumSpecialProjectRemaining,
+} from "../../lib/specialProjectDues";
 
 const router = Router();
 
@@ -475,6 +479,12 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
     }
 
     const totalDue = pending.reduce((sum, m) => sum + Number(m.remainingDue), 0);
+    const specialProjectDues = await loadSpecialProjectDuesForVilla(
+      prisma,
+      societyId!,
+      user.villaId,
+    );
+    const specialProjectDueTotal = sumSpecialProjectRemaining(specialProjectDues);
 
     // Check if any are overdue
     const now = new Date();
@@ -520,6 +530,9 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
         };
       }),
       totalDue,
+      specialProjectDues,
+      specialProjectDueTotal,
+      grandTotalDue: Math.round((totalDue + specialProjectDueTotal) * 100) / 100,
       pendingCount: pending.length,
       overdueCount: overdue.length,
       overdue: overdue.map((m) => ({
@@ -1105,6 +1118,16 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
         ? ((monthlyExpenseSummary?.categoryBreakdown ?? {}) as Record<string, unknown>)
         : {};
 
+    const specialProjectDues = await loadSpecialProjectDuesForVilla(
+      prisma,
+      societyId,
+      user.villaId,
+    );
+    const specialProjectDueTotal = sumSpecialProjectRemaining(specialProjectDues);
+    const maintenancePendingTotal = ledgerRows
+      .filter((row) => row.remainingDue > 0.005)
+      .reduce((sum, row) => sum + row.remainingDue, 0);
+
     return res.json({
       filter: { month, year },
       userSummary: {
@@ -1125,6 +1148,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
         remainingDue: currentLedgerRow?.remainingDue ?? 0,
         previousDue: currentLedgerRow?.previousDue ?? 0,
         carryForwardBalance: currentLedgerRow?.carryForwardBalance ?? 0,
+        specialProjectDueTotal,
+        grandTotalDue:
+          Math.round((maintenancePendingTotal + specialProjectDueTotal) * 100) / 100,
         ...(chargeLinesForApi(currentLedgerRow?.chargeLines ?? [])
           ? { chargeLines: chargeLinesForApi(currentLedgerRow!.chargeLines) }
           : {}),
@@ -1144,6 +1170,7 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
             }
           : null,
       },
+      specialProjectDues,
       paymentHistory: ledgerRows
         .filter((row) => row.cashPaidAmount > 0.005 || row.creditApplied > 0.005 || row.remainingDue > 0.005)
         .sort((a, b) => (b.year - a.year) || (b.month - a.month))
