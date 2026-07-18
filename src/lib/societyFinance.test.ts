@@ -384,8 +384,8 @@ describe("computeSocietyMoneySnapshot", () => {
     const db = fakePrisma({
       snapshots: [
         { villaId: "v1", cycleId: "mc-prev", expectedAmount: 1100, paidAmount: 1100, status: "PAID" },
-        { villaId: "v1", cycleId: "mc-cur", expectedAmount: 1100, paidAmount: 0, status: "UNPAID" },
-        { villaId: "v1", cycleId: "mc-next", expectedAmount: 1100, paidAmount: 0, status: "UNPAID" },
+        { villaId: "v1", cycleId: "mc-cur", expectedAmount: 1100, paidAmount: 0, status: "PENDING" },
+        { villaId: "v1", cycleId: "mc-next", expectedAmount: 1100, paidAmount: 0, status: "PENDING" },
       ],
       maintenancePayments: [
         {
