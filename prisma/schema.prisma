@@ -64,6 +64,12 @@ enum MaintenanceBillingMode {
   SQFT
 }
 
+/// A8 — per-head amount type on society charge heads (opt-in multi-line bills).
+enum ChargeHeadAmountType {
+  FIXED
+  PER_SQFT
+}
+
 enum VillaMaintenanceSnapshotStatus {
   PENDING
   PARTIAL
@@ -243,7 +249,10 @@ model Society {
   maintenanceBillingMode MaintenanceBillingMode @default(FIXED)
   maintenanceFixedAmount Decimal? @db.Decimal(12, 2)
   maintenanceSqftRate    Decimal? @db.Decimal(12, 4)
+  /// A8: when true and active charge heads exist, snapshots sum per-head lines.
+  useChargeHeads         Boolean  @default(false)
 
+  chargeHeads         SocietyChargeHead[]
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
@@ -690,10 +699,48 @@ model VillaMaintenanceSnapshot {
   updatedAt      DateTime                       @updatedAt
 
   payments MaintenancePayment[]
+  chargeLines VillaCycleChargeLine[]
 
   @@unique([cycleId, villaId])
   @@index([villaId])
   @@index([cycleId, status])
+}
+
+/// A8 — configurable bill line (maintenance, sinking fund, parking, etc.) per society.
+model SocietyChargeHead {
+  id          String               @id @default(cuid())
+  societyId   String
+  society     Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  code        String
+  label       String
+  amountType  ChargeHeadAmountType @default(FIXED)
+  fixedAmount Decimal?             @db.Decimal(12, 2)
+  perSqftRate Decimal?             @db.Decimal(12, 4)
+  sortOrder   Int                  @default(0)
+  isActive    Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  chargeLines VillaCycleChargeLine[]
+
+  @@unique([societyId, code])
+  @@index([societyId, isActive])
+}
+
+/// A8 — one line on a villa's maintenance snapshot (denormalized label at bill time).
+model VillaCycleChargeLine {
+  id           String                   @id @default(cuid())
+  snapshotId   String
+  snapshot     VillaMaintenanceSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  chargeHeadId String
+  chargeHead   SocietyChargeHead        @relation(fields: [chargeHeadId], references: [id], onDelete: Restrict)
+  label        String
+  amount       Decimal                  @db.Decimal(12, 2)
+  sortOrder    Int                      @default(0)
+  createdAt    DateTime                 @default(now())
+
+  @@unique([snapshotId, chargeHeadId])
+  @@index([snapshotId])
 }
 
 model CycleVillaExclusion {

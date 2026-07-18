@@ -46,6 +46,7 @@ const societySettingsSelectBase = {
   maintenanceBillingMode: true,
   maintenanceFixedAmount: true,
   maintenanceSqftRate: true,
+  useChargeHeads: true,
 } as const;
 
 async function fetchSocietySettings(societyId: string) {
@@ -321,6 +322,7 @@ const maintenanceBillingPatchSchema = z
     maintenanceBillingMode: z.enum(["FIXED", "SQFT"]).optional(),
     maintenanceFixedAmount: z.number().positive().optional(),
     maintenanceSqftRate: z.number().positive().optional(),
+    useChargeHeads: z.boolean().optional(),
   })
   .refine((body) => Object.keys(body).length > 0, {
     message: "Send at least one field to update",
@@ -345,6 +347,9 @@ router.patch(
       if (body.maintenanceSqftRate !== undefined) {
         data.maintenanceSqftRate = new Prisma.Decimal(body.maintenanceSqftRate);
       }
+      if (body.useChargeHeads !== undefined) {
+        data.useChargeHeads = body.useChargeHeads;
+      }
 
       await prisma.society.updateMany({ where: { id: societyId }, data });
 
@@ -354,6 +359,7 @@ router.patch(
           maintenanceBillingMode: true,
           maintenanceFixedAmount: true,
           maintenanceSqftRate: true,
+          useChargeHeads: true,
         },
       });
 
@@ -365,6 +371,206 @@ router.patch(
     }
   },
 );
+
+const chargeHeadCodeSchema = z
+  .string()
+  .min(2)
+  .max(32)
+  .regex(/^[a-z][a-z0-9_]*$/, "Code must be lowercase letters, numbers, underscores");
+
+const chargeHeadBodySchema = z
+  .object({
+    code: chargeHeadCodeSchema,
+    label: z.string().min(1).max(80),
+    amountType: z.enum(["FIXED", "PER_SQFT"]),
+    fixedAmount: z.number().nonnegative().optional(),
+    perSqftRate: z.number().nonnegative().optional(),
+    sortOrder: z.number().int().min(0).optional(),
+  })
+  .superRefine((body, ctx) => {
+    if (body.amountType === "FIXED" && (body.fixedAmount == null || body.fixedAmount <= 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "fixedAmount is required and must be positive for FIXED charge heads",
+        path: ["fixedAmount"],
+      });
+    }
+    if (body.amountType === "PER_SQFT" && (body.perSqftRate == null || body.perSqftRate <= 0)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "perSqftRate is required and must be positive for PER_SQFT charge heads",
+        path: ["perSqftRate"],
+      });
+    }
+  });
+
+const chargeHeadPatchSchema = z
+  .object({
+    label: z.string().min(1).max(80).optional(),
+    amountType: z.enum(["FIXED", "PER_SQFT"]).optional(),
+    fixedAmount: z.number().nonnegative().optional(),
+    perSqftRate: z.number().nonnegative().optional(),
+    sortOrder: z.number().int().min(0).optional(),
+    isActive: z.boolean().optional(),
+  })
+  .refine((body) => Object.keys(body).length > 0, {
+    message: "Send at least one field to update",
+  });
+
+/**
+ * GET /api/society-settings/charge-heads — list configured bill line items (ADMIN).
+ */
+router.get("/charge-heads", requireRole(UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const heads = await prisma.societyChargeHead.findMany({
+      where: { societyId },
+      orderBy: [{ sortOrder: "asc" }, { createdAt: "asc" }],
+    });
+    return res.json({ chargeHeads: heads });
+  } catch (error) {
+    next(error);
+  }
+});
+
+/**
+ * POST /api/society-settings/charge-heads — add a bill line item (ADMIN).
+ */
+router.post(
+  "/charge-heads",
+  requireRole(UserRole.ADMIN),
+  validateBody(chargeHeadBodySchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const body = req.body as z.infer<typeof chargeHeadBodySchema>;
+
+      const maxSort = await prisma.societyChargeHead.aggregate({
+        where: { societyId },
+        _max: { sortOrder: true },
+      });
+      const sortOrder = body.sortOrder ?? (maxSort._max.sortOrder ?? -1) + 1;
+
+      const head = await prisma.societyChargeHead.create({
+        data: {
+          societyId,
+          code: body.code,
+          label: body.label,
+          amountType: body.amountType,
+          fixedAmount:
+            body.amountType === "FIXED" && body.fixedAmount != null
+              ? new Prisma.Decimal(body.fixedAmount)
+              : null,
+          perSqftRate:
+            body.amountType === "PER_SQFT" && body.perSqftRate != null
+              ? new Prisma.Decimal(body.perSqftRate)
+              : null,
+          sortOrder,
+        },
+      });
+
+      await bustSocietySettingsCache(societyId);
+      return res.status(201).json({ chargeHead: head });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * PATCH /api/society-settings/charge-heads/:id — update a bill line item (ADMIN).
+ */
+router.patch(
+  "/charge-heads/:id",
+  requireRole(UserRole.ADMIN),
+  validateBody(chargeHeadPatchSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const { id } = req.params;
+      const body = req.body as z.infer<typeof chargeHeadPatchSchema>;
+
+      const existing = await prisma.societyChargeHead.findFirst({
+        where: { id, societyId },
+      });
+      if (!existing) {
+        return res.status(404).json({ message: "Charge head not found" });
+      }
+
+      const amountType = body.amountType ?? existing.amountType;
+      const data: Prisma.SocietyChargeHeadUpdateInput = {};
+      if (body.label !== undefined) data.label = body.label;
+      if (body.amountType !== undefined) data.amountType = body.amountType;
+      if (body.sortOrder !== undefined) data.sortOrder = body.sortOrder;
+      if (body.isActive !== undefined) data.isActive = body.isActive;
+      if (body.fixedAmount !== undefined) {
+        data.fixedAmount = new Prisma.Decimal(body.fixedAmount);
+      }
+      if (body.perSqftRate !== undefined) {
+        data.perSqftRate = new Prisma.Decimal(body.perSqftRate);
+      }
+      if (amountType === "FIXED" && body.fixedAmount === undefined && existing.fixedAmount == null) {
+        return res.status(400).json({ message: "fixedAmount is required for FIXED charge heads" });
+      }
+      if (
+        amountType === "PER_SQFT" &&
+        body.perSqftRate === undefined &&
+        existing.perSqftRate == null
+      ) {
+        return res.status(400).json({ message: "perSqftRate is required for PER_SQFT charge heads" });
+      }
+      if (amountType === "FIXED") {
+        data.perSqftRate = null;
+      } else if (amountType === "PER_SQFT") {
+        data.fixedAmount = null;
+      }
+
+      const head = await prisma.societyChargeHead.update({
+        where: { id },
+        data,
+      });
+
+      await bustSocietySettingsCache(societyId);
+      return res.json({ chargeHead: head });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+/**
+ * DELETE /api/society-settings/charge-heads/:id — deactivate or remove (ADMIN).
+ */
+router.delete("/charge-heads/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const { id } = req.params;
+
+    const existing = await prisma.societyChargeHead.findFirst({
+      where: { id, societyId },
+      select: { id: true },
+    });
+    if (!existing) {
+      return res.status(404).json({ message: "Charge head not found" });
+    }
+
+    const used = await prisma.villaCycleChargeLine.count({ where: { chargeHeadId: id } });
+    if (used > 0) {
+      await prisma.societyChargeHead.update({
+        where: { id },
+        data: { isActive: false },
+      });
+      await bustSocietySettingsCache(societyId);
+      return res.json({ message: "Charge head deactivated (used on past bills)" });
+    }
+
+    await prisma.societyChargeHead.delete({ where: { id } });
+    await bustSocietySettingsCache(societyId);
+    return res.json({ message: "Charge head deleted" });
+  } catch (error) {
+    next(error);
+  }
+});
 
 /**
  * POST /api/society-settings/upload-qr — upload a custom UPI QR code image (ADMIN).

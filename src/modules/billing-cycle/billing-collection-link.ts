@@ -7,6 +7,19 @@ import {
   Prisma,
 } from "@prisma/client";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
+import {
+  chargeHeadBreakdownToJson,
+  computeChargeHeadBreakdown,
+  type ChargeHeadRow,
+  type ChargeLineResult,
+} from "../../lib/chargeHeads.js";
+import {
+  computeExpectedForVilla,
+  maintenanceCycleRuleFromConfig,
+  parseSocietyBillingConfig,
+  type CycleRuleInput,
+  type VillaAmountInput,
+} from "../../lib/maintenanceAmount.js";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { applyVillaCreditAcrossSnapshots } from "../maintenance-management/credit-walker";
 import { refreshSnapshotStatus } from "../maintenance-management/snapshot-helpers";
@@ -40,6 +53,13 @@ export async function ensureMaintenanceCollectionForBillingCycle(
       paymentEndDate: true,
       status: true,
       financialYearId: true,
+      society: {
+        select: {
+          maintenanceBillingMode: true,
+          maintenanceFixedAmount: true,
+          maintenanceSqftRate: true,
+        },
+      },
     },
   });
 
@@ -94,20 +114,69 @@ export async function ensureMaintenanceCollectionForBillingCycle(
   });
 
   const cycleBaseAmount = Number(billingCycle.amount);
+  const billingConfig = parseSocietyBillingConfig(billingCycle.society, cycleBaseAmount);
+  const ruleShape = maintenanceCycleRuleFromConfig(billingConfig);
   await tx.maintenanceCycleRule.upsert({
     where: { cycleId: maintenanceCycle.id },
     create: {
       cycleId: maintenanceCycle.id,
-      ruleType: "CUSTOM",
-      baseAmount: new Prisma.Decimal(cycleBaseAmount),
+      ruleType: ruleShape.ruleType,
+      baseAmount: ruleShape.baseAmount,
+      perSqftRate: ruleShape.perSqftRate,
       customAmounts: {},
     },
     update: {
-      baseAmount: new Prisma.Decimal(cycleBaseAmount),
+      ruleType: ruleShape.ruleType,
+      baseAmount: ruleShape.baseAmount,
+      perSqftRate: ruleShape.perSqftRate,
     },
   });
 
   return { maintenanceCycleId: maintenanceCycle.id, periodKey, dueDate };
+}
+
+function resolveVillaSnapshotBilling(params: {
+  cycleRule: CycleRuleInput;
+  villa: VillaAmountInput;
+  useChargeHeads: boolean;
+  chargeHeads: ChargeHeadRow[];
+}): { expected: number; breakdown: Record<string, unknown>; chargeLines: ChargeLineResult[] | null } {
+  const sqft = params.villa.area != null ? Number(params.villa.area) : 0;
+  const headBreakdown = computeChargeHeadBreakdown(
+    params.chargeHeads,
+    sqft,
+    params.useChargeHeads,
+  );
+  if (headBreakdown) {
+    return {
+      expected: headBreakdown.totalAmount,
+      breakdown: {
+        ...chargeHeadBreakdownToJson(headBreakdown),
+        billingSource: "chargeHeads",
+      },
+      chargeLines: headBreakdown.chargeLines,
+    };
+  }
+  const { expected, breakdown } = computeExpectedForVilla(params.cycleRule, params.villa);
+  return { expected, breakdown, chargeLines: null };
+}
+
+async function persistSnapshotChargeLines(
+  tx: Prisma.TransactionClient,
+  snapshotId: string,
+  chargeLines: ChargeLineResult[] | null | undefined,
+): Promise<void> {
+  await tx.villaCycleChargeLine.deleteMany({ where: { snapshotId } });
+  if (!chargeLines?.length) return;
+  await tx.villaCycleChargeLine.createMany({
+    data: chargeLines.map((l) => ({
+      snapshotId,
+      chargeHeadId: l.chargeHeadId,
+      label: l.label,
+      amount: new Prisma.Decimal(l.amount),
+      sortOrder: l.sortOrder,
+    })),
+  });
 }
 
 /** Remove the linked maintenance collection cycle when a draft billing cycle is deleted. */
@@ -148,6 +217,8 @@ export async function ensureVillaSnapshotForMaintenanceCycle(
     villaId: string;
     fallbackExpected: number;
     dueDate: Date;
+    breakdown?: Record<string, unknown>;
+    chargeLines?: ChargeLineResult[] | null;
   },
 ): Promise<{ snapshotId: string; expectedAmount: number }> {
   const existing = await tx.villaMaintenanceSnapshot.findUnique({
@@ -169,10 +240,11 @@ export async function ensureVillaSnapshotForMaintenanceCycle(
       expectedAmount: new Prisma.Decimal(expected),
       paidAmount: new Prisma.Decimal(0),
       status,
-      breakdown: { gatewayBootstrap: true } as Prisma.InputJsonValue,
+      breakdown: (params.breakdown ?? { gatewayBootstrap: true }) as Prisma.InputJsonValue,
     },
     select: { id: true },
   });
+  await persistSnapshotChargeLines(tx, created.id, params.chargeLines);
   return { snapshotId: created.id, expectedAmount: expected };
 }
 
@@ -191,6 +263,9 @@ export async function generateSnapshotsForBillingCycle(
     tx,
     params.billingCycleId,
   );
+  const rule = await tx.maintenanceCycleRule.findUnique({
+    where: { cycleId: maintenanceCycleId },
+  });
   const occupants = await tx.user.findMany({
     where: {
       societyId: params.societyId,
@@ -208,12 +283,60 @@ export async function generateSnapshotsForBillingCycle(
         .filter((v): v is string => typeof v === "string" && v.length > 0),
     ),
   ];
+  const villas = await tx.villa.findMany({
+    where: { societyId: params.societyId, id: { in: villaIds } },
+    select: { id: true, area: true, monthlyMaintenance: true },
+  });
+  const villaById = new Map(villas.map((v) => [v.id, v]));
+  const cycleRule = rule ?? {
+    ruleType: "FIXED_PER_FLAT" as const,
+    baseAmount: new Prisma.Decimal(params.cycleAmount),
+    perSqftRate: null,
+    customAmounts: null,
+  };
+
+  const society = await tx.society.findUnique({
+    where: { id: params.societyId },
+    select: {
+      useChargeHeads: true,
+      chargeHeads: {
+        where: { isActive: true },
+        orderBy: { sortOrder: "asc" },
+        select: {
+          id: true,
+          code: true,
+          label: true,
+          amountType: true,
+          fixedAmount: true,
+          perSqftRate: true,
+          sortOrder: true,
+          isActive: true,
+        },
+      },
+    },
+  });
+  const chargeHeads = society?.chargeHeads ?? [];
+  const useChargeHeads = society?.useChargeHeads ?? false;
+
   for (const villaId of villaIds) {
+    const villa = villaById.get(villaId) ?? {
+      id: villaId,
+      area: null,
+      monthlyMaintenance: new Prisma.Decimal(params.cycleAmount),
+    };
+    const { expected, breakdown, chargeLines } = resolveVillaSnapshotBilling({
+      cycleRule,
+      villa,
+      useChargeHeads,
+      chargeHeads,
+    });
     await ensureVillaSnapshotForMaintenanceCycle(tx, {
       maintenanceCycleId,
       villaId,
-      fallbackExpected: params.cycleAmount,
+      fallbackExpected: expected,
       dueDate,
+      breakdown,
+      chargeLines,
     });
   }
   return villaIds.length;
@@ -224,19 +347,75 @@ export async function refreshUnpaidSnapshotsForBillingCycleAmount(
   tx: Prisma.TransactionClient,
   params: { billingCycleId: string; cycleAmount: number; dueDate: Date },
 ): Promise<void> {
+  const billingCycle = await tx.billingCycle.findUnique({
+    where: { id: params.billingCycleId },
+    select: { societyId: true },
+  });
+  if (!billingCycle) return;
+
   const { maintenanceCycleId } = await ensureMaintenanceCollectionForBillingCycle(
     tx,
     params.billingCycleId,
   );
+  const rule = await tx.maintenanceCycleRule.findUnique({
+    where: { cycleId: maintenanceCycleId },
+  });
+  const cycleRule = rule ?? {
+    ruleType: "FIXED_PER_FLAT" as const,
+    baseAmount: new Prisma.Decimal(params.cycleAmount),
+    perSqftRate: null,
+    customAmounts: null,
+  };
   const snaps = await tx.villaMaintenanceSnapshot.findMany({
     where: {
       cycleId: maintenanceCycleId,
       status: { in: ["PENDING", "OVERDUE", "PARTIAL"] },
     },
-    select: { id: true, paidAmount: true },
+    select: { id: true, villaId: true, paidAmount: true },
   });
-  const expected = Math.max(0, params.cycleAmount);
+  if (snaps.length === 0) return;
+
+  const villas = await tx.villa.findMany({
+    where: { id: { in: snaps.map((s) => s.villaId) } },
+    select: { id: true, area: true, monthlyMaintenance: true },
+  });
+  const villaById = new Map(villas.map((v) => [v.id, v]));
+
+  const society = await tx.society.findUnique({
+    where: { id: billingCycle.societyId },
+    select: {
+      useChargeHeads: true,
+      chargeHeads: {
+        where: { isActive: true },
+        orderBy: { sortOrder: "asc" },
+        select: {
+          id: true,
+          code: true,
+          label: true,
+          amountType: true,
+          fixedAmount: true,
+          perSqftRate: true,
+          sortOrder: true,
+          isActive: true,
+        },
+      },
+    },
+  });
+  const chargeHeads = society?.chargeHeads ?? [];
+  const useChargeHeads = society?.useChargeHeads ?? false;
+
   for (const snap of snaps) {
+    const villa = villaById.get(snap.villaId) ?? {
+      id: snap.villaId,
+      area: null,
+      monthlyMaintenance: new Prisma.Decimal(params.cycleAmount),
+    };
+    const { expected, breakdown, chargeLines } = resolveVillaSnapshotBilling({
+      cycleRule,
+      villa,
+      useChargeHeads,
+      chargeHeads,
+    });
     const paid = Number(snap.paidAmount);
     const status = refreshSnapshotStatus(expected, paid, params.dueDate);
     await tx.villaMaintenanceSnapshot.update({
@@ -244,8 +423,10 @@ export async function refreshUnpaidSnapshotsForBillingCycleAmount(
       data: {
         expectedAmount: new Prisma.Decimal(expected),
         status,
+        breakdown: breakdown as Prisma.InputJsonValue,
       },
     });
+    await persistSnapshotChargeLines(tx, snap.id, chargeLines);
   }
 }
 

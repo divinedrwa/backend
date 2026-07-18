@@ -45,6 +45,7 @@
     "smoke:mobile-apis": "tsx scripts/mobile-api/run-smoke.ts",
     "smoke:live": "bash scripts/smoke-live-target.sh",
     "smoke:live:villa25": "tsx scripts/smoke-live-villa25-safe.ts",
+    "smoke:live:phase4-billing": "tsx scripts/smoke-live-phase4-billing-readonly.ts",
     "k5:live": "bash scripts/k5-live-gate.sh",
     "phase0:gate": "bash ../scripts/phase0-local-gate.sh",
     "phase0:gate:live": "bash ../scripts/phase0-live-gate.sh",
