@@ -11,6 +11,7 @@ import {
   loadPerCycleLateFeeContext,
   resolveSnapshotCycleTotals,
 } from "../billing-cycle/services/per-cycle-late-fee-context";
+import { loadChargeLinesByBillingCycleIds, type ChargeLineDto } from "../../lib/chargeLineSnapshot";
 import { buildCycleFinancialDashboardCore } from "../maintenance-management/financial-dashboard-cycle";
 import {
   loadAppVisibleBillingCyclePeriodKeys,
@@ -84,6 +85,7 @@ type ResidentLedgerRow = {
   status: "PAID" | "PARTIAL" | "PENDING" | "OVERDUE" | "AUTO_SETTLED";
   isOverdue: boolean;
   paidAt: string | null;
+  chargeLines: ChargeLineDto[];
 };
 
 function parseCycleMonthYear(cycleKey: string, dueDate: Date | null): { month: number; year: number } {
@@ -106,6 +108,12 @@ function parseCycleMonthYear(cycleKey: string, dueDate: Date | null): { month: n
 
 async function buildResidentLedgerRows(societyId: string, userId: string): Promise<ResidentLedgerRow[]> {
   const now = new Date();
+  const user = await prisma.user.findFirst({
+    where: { id: userId, societyId },
+    select: { villaId: true },
+  });
+  const villaId = user?.villaId ?? null;
+
   const [ledger, cycles] = await Promise.all([
     computeUserBillingLedger(societyId, userId),
     prisma.billingCycle.findMany({
@@ -114,12 +122,25 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
         id: true,
         cycleKey: true,
         title: true,
+        financialYearId: true,
         paymentStartDate: true,
         paymentEndDate: true,
         publishedAt: true,
       },
     }),
   ]);
+
+  const chargeLinesByCycleId =
+    villaId != null
+      ? await loadChargeLinesByBillingCycleIds({
+          villaId,
+          cycles: cycles.map((c) => ({
+            id: c.id,
+            financialYearId: c.financialYearId,
+            cycleKey: c.cycleKey,
+          })),
+        })
+      : new Map<string, ChargeLineDto[]>();
 
   const cycleById = new Map(
     cycles
@@ -177,8 +198,13 @@ async function buildResidentLedgerRows(societyId: string, userId: string): Promi
       status,
       isOverdue,
       paidAt: row.paidAt,
+      chargeLines: chargeLinesByCycleId.get(row.cycleId) ?? [],
     };
   });
+}
+
+function chargeLinesForApi(lines: ChargeLineDto[]): ChargeLineDto[] | undefined {
+  return lines.length > 0 ? lines : undefined;
 }
 
 function buildResidentPdfBuffer(params: {
@@ -348,6 +374,9 @@ router.get("/my-maintenance", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
               Object.keys(normalizedBreakdown).length > 0
                 ? normalizedBreakdown
                 : (fallbackExpense?.breakdown ?? {}),
+            ...(chargeLinesForApi(row.chargeLines)
+              ? { chargeLines: chargeLinesForApi(row.chargeLines) }
+              : {}),
           };
         }),
       summary,
@@ -485,6 +514,9 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
             Object.keys(normalizedBreakdown).length > 0
               ? normalizedBreakdown
               : (fallbackExpense?.breakdown ?? {}),
+          ...(chargeLinesForApi(m.chargeLines)
+            ? { chargeLines: chargeLinesForApi(m.chargeLines) }
+            : {}),
         };
       }),
       totalDue,
@@ -508,6 +540,9 @@ router.get("/maintenance-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN
         dueDate: m.dueDate,
         status: m.status,
         isOverdue: true,
+        ...(chargeLinesForApi(m.chargeLines)
+          ? { chargeLines: chargeLinesForApi(m.chargeLines) }
+          : {}),
       })),
     });
   } catch (error) {
@@ -1090,6 +1125,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
         remainingDue: currentLedgerRow?.remainingDue ?? 0,
         previousDue: currentLedgerRow?.previousDue ?? 0,
         carryForwardBalance: currentLedgerRow?.carryForwardBalance ?? 0,
+        ...(chargeLinesForApi(currentLedgerRow?.chargeLines ?? [])
+          ? { chargeLines: chargeLinesForApi(currentLedgerRow!.chargeLines) }
+          : {}),
         lastPayment: latestLedgerCashPayment
           ? {
               amount: latestLedgerCashPayment.cashPaidAmount,
@@ -1130,6 +1168,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
           transactionId: null,
           status: row.status,
           dueDate: row.dueDate,
+          ...(chargeLinesForApi(row.chargeLines)
+            ? { chargeLines: chargeLinesForApi(row.chargeLines) }
+            : {}),
         })),
       pendingDues: ledgerRows
         .filter((row) => row.remainingDue > 0.005)
@@ -1150,6 +1191,9 @@ router.get("/maintenance-dashboard", requireRole(UserRole.RESIDENT, UserRole.ADM
           dueDate: row.dueDate,
           status: row.status,
           isOverdue: row.isOverdue,
+          ...(chargeLinesForApi(row.chargeLines)
+            ? { chargeLines: chargeLinesForApi(row.chargeLines) }
+            : {}),
         })),
       monthlyExpenseBreakdown: {
         month,

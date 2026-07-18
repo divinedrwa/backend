@@ -33,16 +33,18 @@
 
 ---
 
-### Slice 1 — A8 charge heads (P1) — in progress
+### Slice 1 — A8 charge heads (P1) — deployed core ✅
 
 **Goal:** Maintenance + sinking + parking on one invoice (opt-in).
 
-1. **Schema:** `SocietyChargeHead`, `VillaCycleChargeLine` ✅
+1. **Schema:** `SocietyChargeHead`, `VillaCycleChargeLine` ✅ deployed live
 2. **API:** CRUD charge heads under `/society-settings/charge-heads` ✅
 3. **Snapshots:** `expectedAmount` = sum(lines); keep payment/reconciliation unchanged ✅
-4. **UI:** Society settings → Billing tab charge heads section ✅
-5. **Invoice PDF:** line items when lines exist — pending
-6. **Mobile:** `chargeLines[]` on resident maintenance API — pending
+4. **UI:** Society settings → Billing tab charge heads section ✅ deployed Vercel
+5. **Invoice PDF:** line items when lines exist ✅
+6. **Mobile:** `chargeLines[]` on resident maintenance API ✅
+
+**Live verified 2026-07-18:** K5 green; Divine Residency `useChargeHeads=false`, 0 charge heads, reconciliation healthy.
 
 Societies with **zero charge heads** → current single-line behavior.
 

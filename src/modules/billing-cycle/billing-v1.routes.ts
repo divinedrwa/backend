@@ -9,6 +9,8 @@ import {
   UserRole,
 } from "@prisma/client";
 import PDFDocument from "pdfkit";
+import { loadChargeLinesForBillingCycle } from "../../lib/chargeLineSnapshot";
+import type { ChargeLineDto } from "../../lib/chargeLineSnapshot";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
@@ -1339,7 +1341,7 @@ async function fetchPaymentForReceipt(where: Prisma.UserCyclePaymentWhereInput) 
       },
       user: {
         include: {
-          villa: { select: { villaNumber: true, ownerName: true, block: true } },
+          villa: { select: { id: true, villaNumber: true, ownerName: true, block: true } },
         },
       },
     },
@@ -1404,6 +1406,7 @@ interface ReceiptData {
   transactionId: string;
   paidAt: string;
   status: string;
+  chargeLines?: ChargeLineDto[];
 }
 
 function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.prototype {
@@ -1559,11 +1562,15 @@ function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.p
     .text("DETAILS / AMOUNT", valCol, cy + 11, { width: valW - 16, align: "right" });
   cy += rowH;
 
-  // Build rows
-  const tableRows: [string, string][] = [
-    ["Amount Due", fmtInr(data.amountDue)],
-    ["Amount Paid", fmtInr(data.amountPaid)],
-  ];
+  // Build rows — charge head lines first when present (A8 multi-line bills)
+  const tableRows: [string, string][] = [];
+  if (data.chargeLines?.length) {
+    for (const line of data.chargeLines) {
+      tableRows.push([line.label, fmtInr(line.amount)]);
+    }
+  }
+  tableRows.push(["Amount Due", fmtInr(data.amountDue)]);
+  tableRows.push(["Amount Paid", fmtInr(data.amountPaid)]);
   if (data.creditApplied > 0) {
     tableRows.push(["Advance Credit Applied", `+ ${fmtInr(data.creditApplied)}`]);
   }
@@ -1655,6 +1662,21 @@ function buildPaymentReceiptPdfFromData(data: ReceiptData): typeof PDFDocument.p
   doc.rect(0, pageH - 5, pageW, 5).fill(accent);
 
   return doc;
+}
+
+async function attachChargeLinesToReceipt(
+  data: ReceiptData,
+  params: { villaId: string | null | undefined; cycleId: string },
+): Promise<ReceiptData> {
+  if (!params.villaId) return data;
+  const cycle = await prisma.billingCycle.findFirst({
+    where: { id: params.cycleId },
+    select: { id: true, financialYearId: true, cycleKey: true },
+  });
+  if (!cycle) return data;
+  const chargeLines = await loadChargeLinesForBillingCycle(params.villaId, cycle);
+  if (chargeLines.length === 0) return data;
+  return { ...data, chargeLines };
 }
 
 /** Build ReceiptData from a UserCyclePayment record. */
@@ -1782,6 +1804,15 @@ router.get(
         filename = `receipt-${cycle.cycleKey}-${villa?.villaNumber ?? "unit"}.pdf`;
       }
 
+      const billingUser = await prisma.user.findFirst({
+        where: { id: userId, societyId: auth.societyId },
+        select: { villaId: true },
+      });
+      data = await attachChargeLinesToReceipt(data, {
+        villaId: billingUser?.villaId,
+        cycleId,
+      });
+
       const doc = buildPaymentReceiptPdfFromData(data);
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
@@ -1816,7 +1847,12 @@ router.get(
       const invoiceNumber = await ensureInvoiceNumber(payment.id, payment.cycle.cycleKey);
       payment.invoiceNumber = invoiceNumber;
 
-      const data = receiptDataFromPayment(payment);
+      let data = receiptDataFromPayment(payment);
+      data = await attachChargeLinesToReceipt(data, {
+        villaId: payment.user?.villa?.id,
+        cycleId: payment.cycleId,
+      });
+
       const doc = buildPaymentReceiptPdfFromData(data);
       const filename = `invoice-${paymentId}.pdf`;
       res.setHeader("Content-Type", "application/pdf");
