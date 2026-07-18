@@ -21,6 +21,10 @@ import {
   loadSpecialProjectDuesForVilla,
   sumSpecialProjectRemaining,
 } from "../../lib/specialProjectDues";
+import {
+  buildFyMaintenanceStatementPdf,
+  monthYearWithinFinancialYear,
+} from "../../lib/maintenanceStatementPdf";
 
 const router = Router();
 
@@ -1354,6 +1358,109 @@ router.get("/maintenance-dashboard/report-pdf", requireRole(UserRole.RESIDENT, U
     next(error);
   }
 });
+
+// GET /api/residents/maintenance-statement/pdf — G4 FY payment statement
+router.get(
+  "/maintenance-statement/pdf",
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { userId, societyId } = req.auth!;
+      const financialYearId =
+        typeof req.query.financialYearId === "string" ? req.query.financialYearId.trim() : "";
+      if (!financialYearId) {
+        return res.status(400).json({ message: "financialYearId is required" });
+      }
+
+      const [user, fy, society] = await Promise.all([
+        prisma.user.findFirst({
+          where: { id: userId, societyId },
+          select: {
+            villaId: true,
+            villa: { select: { villaNumber: true, ownerName: true } },
+            maintenanceBillingRole: true,
+          },
+        }),
+        prisma.financialYear.findFirst({
+          where: { id: financialYearId, societyId },
+          select: { id: true, label: true, startDate: true, endDate: true },
+        }),
+        prisma.society.findUnique({
+          where: { id: societyId },
+          select: { name: true },
+        }),
+      ]);
+
+      if (!user?.villaId || !user.villa) {
+        return res.status(404).json({ message: "Villa not assigned" });
+      }
+      if (user.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED) {
+        return res.status(403).json({ message: "Billing excluded for this account" });
+      }
+      if (!fy) {
+        return res.status(404).json({ message: "Financial year not found" });
+      }
+
+      const ledgerRows = (await buildResidentLedgerRows(societyId, userId)).filter((row) =>
+        monthYearWithinFinancialYear(row.month, row.year, fy.startDate, fy.endDate),
+      );
+
+      const payments = await prisma.maintenancePayment.findMany({
+        where: {
+          societyId,
+          villaId: user.villaId,
+          paymentDate: { gte: fy.startDate, lte: fy.endDate },
+        },
+        orderBy: { paymentDate: "asc" },
+        select: {
+          amount: true,
+          paymentDate: true,
+          paymentMode: true,
+          receiptNumber: true,
+          maintenanceCollectionCycle: {
+            select: { periodKey: true },
+          },
+        },
+      });
+
+      const pdfBuffer = await buildFyMaintenanceStatementPdf({
+        societyName: society?.name ?? "Society",
+        villaNumber: user.villa.villaNumber,
+        ownerName: user.villa.ownerName,
+        financialYearLabel: fy.label,
+        periodStart: fy.startDate,
+        periodEnd: fy.endDate,
+        cycles: ledgerRows.map((row) => ({
+          cycleKey: row.cycleKey,
+          title: row.title,
+          month: row.month,
+          year: row.year,
+          expectedAmount: row.expectedAmount,
+          paidAmount: row.paidAmount,
+          remainingDue: row.remainingDue,
+          status: row.status,
+        })),
+        payments: payments.map((p) => ({
+          paymentDate: p.paymentDate,
+          amount: Number(p.amount),
+          paymentMode: p.paymentMode,
+          receiptNumber: p.receiptNumber,
+          cycleKey: p.maintenanceCollectionCycle?.periodKey ?? null,
+        })),
+      });
+
+      const safeLabel = fy.label.replace(/[^a-zA-Z0-9_-]+/g, "_");
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename="maintenance_statement_${safeLabel}_villa_${user.villa.villaNumber}.pdf"`,
+      );
+      return res.send(pdfBuffer);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // GET /api/residents/outstanding-dues
 // All villas with any pending maintenance payment across all cycles (society-wide).

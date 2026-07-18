@@ -55,6 +55,7 @@ import adminOpsRoutes from "../modules/admin-ops/system-health.routes";
 import upiPaymentAdminRoutes from "../modules/upi-payments/admin-routes";
 import upiPaymentResidentRoutes from "../modules/upi-payments/resident-routes";
 import specialProjectRoutes from "../modules/special-projects/routes";
+import paymentDisputeRoutes from "../modules/payment-disputes/routes";
 import paymentMethodRoutes, { residentPaymentMethodsRouter } from "../modules/payment-methods/routes";
 import auditLogRoutes from "../modules/audit-log/routes";
 import vendorContractRoutes from "../modules/vendor-contracts/routes";
@@ -73,6 +74,7 @@ import residentVehicleRoutes from "../modules/residents/vehicles";
 import residentStaffRoutes from "../modules/residents/staff";
 import residentExpenseRoutes from "../modules/residents/expenses";
 import residentSpecialProjectRoutes from "../modules/residents/special-projects";
+import residentPaymentDisputeRoutes from "../modules/residents/payment-disputes";
 import residentWaterRequestRoutes from "../modules/residents/water-requests";
 
 // NEW: Guard Mobile APIs
@@ -109,6 +111,7 @@ router.use("/garbage-collection", garbageCollectionRoutes);
 
 // Complaints & Vendors
 router.use("/complaints", complaintRoutes);
+router.use("/payment-disputes", paymentDisputeRoutes);
 router.use("/complaint-analytics", complaintAnalyticsRoutes);
 router.use("/vendors", vendorRoutes);
 
@@ -204,6 +207,7 @@ router.use("/residents", residentVehicleRoutes); // Vehicles
 router.use("/residents", residentStaffRoutes); // Domestic staff
 router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
 router.use("/residents", residentSpecialProjectRoutes); // Special projects
+router.use("/residents", residentPaymentDisputeRoutes); // Payment disputes (G5)
 router.use("/residents", residentWaterRequestRoutes); // Water supply requests
 router.use("/residents", residentPaymentMethodsRouter); // Payment methods
 

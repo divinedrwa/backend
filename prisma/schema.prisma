@@ -171,6 +171,7 @@ model Society {
   maintenance           Maintenance[]
   maintenancePayments   MaintenancePayment[]
   complaints            Complaint[]
+  paymentDisputes       PaymentDispute[]
   vendors               Vendor[]
   notices               Notice[]
   visitors              Visitor[]
@@ -418,6 +419,8 @@ model User {
   sosCheckpoints    SOSCheckpoint[]      @relation("SOSCheckpointActor")
   assignedGate      Gate?                @relation("GuardAssignment")
   complaints        Complaint[]          @relation("ResidentComplaints")
+  paymentDisputes     PaymentDispute[]     @relation("PaymentDisputeResident")
+  paymentDisputesResolved PaymentDispute[] @relation("PaymentDisputeResolver")
   familyMembers     FamilyMember[]       @relation("ResidentFamilyMembers")
   emergencyContacts EmergencyContact[]   @relation("ResidentEmergencyContacts")
   approvedVisitors  PreApprovedVisitor[] @relation("ApprovedVisitors")
@@ -485,6 +488,7 @@ model Villa {
   maintenance           Maintenance[]
   maintenancePayments   MaintenancePayment[]
   complaints            Complaint[]
+  paymentDisputes       PaymentDispute[]
   visitorVillas         VisitorVilla[]
   parcels               Parcel[]
   staffAssignments      StaffAssignment[]
@@ -800,6 +804,42 @@ model Complaint {
   @@index([category])
   @@index([societyId, createdAt])
   @@index([slaDeadline])
+}
+
+enum PaymentDisputeStatus {
+  OPEN
+  IN_REVIEW
+  RESOLVED
+  REJECTED
+}
+
+/// G5 — resident flags a payment not reflected; admin resolves.
+model PaymentDispute {
+  id                   String               @id @default(cuid())
+  societyId            String
+  userId               String
+  villaId              String?
+  cycleKey             String?
+  maintenancePaymentId String?
+  amount               Decimal?             @db.Decimal(12, 2)
+  reason               String
+  residentNote         String?              @db.Text
+  adminNote            String?              @db.Text
+  status               PaymentDisputeStatus @default(OPEN)
+  resolvedById         String?
+  resolvedAt           DateTime?
+  createdAt            DateTime             @default(now())
+  updatedAt            DateTime             @updatedAt
+
+  society    Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  user       User    @relation("PaymentDisputeResident", fields: [userId], references: [id], onDelete: Cascade)
+  villa      Villa?  @relation(fields: [villaId], references: [id], onDelete: SetNull)
+  resolvedBy User?   @relation("PaymentDisputeResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@index([societyId, status])
+  @@index([userId])
+  @@index([villaId])
+  @@index([societyId, createdAt])
 }
 
 enum VendorCategory {
