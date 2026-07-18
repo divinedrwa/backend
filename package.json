@@ -51,6 +51,7 @@
     "smoke:live": "bash scripts/smoke-live-target.sh",
     "smoke:live:villa25": "tsx scripts/smoke-live-villa25-safe.ts",
     "smoke:live:phase4-billing": "tsx scripts/smoke-live-phase4-billing-readonly.ts",
+    "smoke:live:deep-review": "tsx scripts/smoke-live-deep-review.ts",
     "phase4:safety-proof": "tsx scripts/phase4-sandbox-charge-head-trial.ts",
     "phase4:sandbox-trial:local": "tsx scripts/phase4-sandbox-charge-head-local-trial.ts",
     "k5:live": "bash scripts/k5-live-gate.sh",
