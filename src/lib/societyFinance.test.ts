@@ -14,6 +14,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { PrismaClient } from "@prisma/client";
 import { computeSocietyMoneySnapshot } from "./societyFinance.js";
+import { isAppVisibleBillingCycle } from "../modules/billing-cycle/domain/cycleStatus.js";
 
 type Snapshot = {
   villaId: string;
@@ -37,6 +38,17 @@ type UserCyclePayment = {
   paidAt: Date | null;
 };
 type MaintenanceCycle = { id: string; financialYearId: string; periodKey: string; periodMonth: number; periodYear: number };
+type BillingCycleRow = {
+  id?: string;
+  financialYearId?: string;
+  cycleKey: string;
+  publishedAt: Date | null;
+  paymentStartDate: Date;
+  paymentEndDate: Date;
+  amount?: number;
+  lateFee?: number;
+  gracePeriodDays?: number;
+};
 type AdditionalFund = { amount: number; receivedDate: Date | null; month: number | null; year: number | null };
 type Expense = {
   amount: number;
@@ -51,6 +63,7 @@ function fakePrisma(opts: {
   maintenancePayments?: MaintenancePayment[];
   userCyclePayments?: UserCyclePayment[];
   maintenanceCycles?: MaintenanceCycle[];
+  billingCycles?: BillingCycleRow[];
   additionalFunds?: AdditionalFund[];
   expenses?: Expense[];
 }): PrismaClient {
@@ -59,9 +72,25 @@ function fakePrisma(opts: {
     maintenancePayments = [],
     userCyclePayments = [],
     maintenanceCycles = [],
+    billingCycles,
     additionalFunds = [],
     expenses = [],
   } = opts;
+
+  const now = new Date();
+  const defaultBillingCycles: BillingCycleRow[] =
+    billingCycles ??
+    maintenanceCycles.map((mc, i) => ({
+      id: `bc-${i + 1}`,
+      financialYearId: mc.financialYearId,
+      cycleKey: mc.periodKey,
+      publishedAt: new Date("2020-01-01"),
+      paymentStartDate: new Date(now.getFullYear(), now.getMonth() - 1, 1),
+      paymentEndDate: new Date(now.getFullYear(), now.getMonth() + 2, 28),
+      amount: 370,
+      lateFee: 0,
+      gracePeriodDays: 0,
+    }));
   // Minimal groupBy fake for the credit walker's two aggregate shapes:
   // by villa+cycle (linked cash) and by villa+month+year (unlinked rows).
   const groupBy = async (args: { by: string[]; where?: Record<string, unknown> }) => {
@@ -98,7 +127,17 @@ function fakePrisma(opts: {
     villaMaintenanceSnapshot: { findMany: async () => snapshots },
     maintenancePayment: { findMany: async () => maintenancePayments, groupBy },
     userCyclePayment: { findMany: async () => userCyclePayments },
-    maintenanceCollectionCycle: { findMany: async () => maintenanceCycles },
+    maintenanceCollectionCycle: {
+      findMany: async (args?: {
+        where?: { societyId?: string; periodKey?: { in?: string[] } };
+      }) => {
+        const keys = args?.where?.periodKey?.in;
+        if (keys && keys.length > 0) {
+          return maintenanceCycles.filter((mc) => keys.includes(mc.periodKey));
+        }
+        return maintenanceCycles;
+      },
+    },
     additionalFund: { findMany: async () => additionalFunds },
     expense: {
       findMany: async (args?: { where?: { deletedAt?: null } }) => {
@@ -109,8 +148,44 @@ function fakePrisma(opts: {
         return rows;
       },
     },
-    // Credit walker's billing context — no billing cycles in these scenarios.
-    billingCycle: { findMany: async () => [] },
+    billingCycle: {
+      findMany: async (args?: {
+        where?: { publishedAt?: { not: null } };
+        select?: Record<string, boolean>;
+      }) => {
+        let rows = defaultBillingCycles;
+        if (args?.where?.publishedAt?.not === null) {
+          rows = rows.filter((r) => r.publishedAt != null);
+        }
+        const select = args?.select ?? {};
+        const appVisibleSelect =
+          select.publishedAt === true && select.paymentStartDate === true;
+        if (appVisibleSelect) {
+          return rows
+            .filter((r) => isAppVisibleBillingCycle(now, r))
+            .map((r) => ({
+              cycleKey: r.cycleKey,
+              publishedAt: r.publishedAt,
+              paymentStartDate: r.paymentStartDate,
+              paymentEndDate: r.paymentEndDate,
+            }));
+        }
+        if (select.id === true) {
+          return rows.map((r, i) => ({
+            id: r.id ?? `bc-${i + 1}`,
+            financialYearId: r.financialYearId ?? "fy1",
+            cycleKey: r.cycleKey,
+            amount: r.amount ?? 370,
+            lateFee: r.lateFee ?? 0,
+            paymentEndDate: r.paymentEndDate,
+            gracePeriodDays: r.gracePeriodDays ?? 0,
+          }));
+        }
+        return rows.map((r) => ({ cycleKey: r.cycleKey }));
+      },
+    },
+    user: { findMany: async () => [] },
+    billingLateFeeWaiver: { findMany: async () => [] },
   } as unknown as PrismaClient;
 }
 
@@ -405,5 +480,54 @@ describe("computeSocietyMoneySnapshot", () => {
     });
     const m = await computeSocietyMoneySnapshot(db, "s1");
     assert.equal(m.totalAdvanceCredit, 200);
+  });
+
+  it("excludes draft (unpublished) billing cycles from outstandingDues", async () => {
+    const now = new Date();
+    const cy = now.getFullYear();
+    const cm = now.getMonth() + 1;
+    const pkPublished = `${cy}-${String(cm).padStart(2, "0")}`;
+    const pkDraft = `${cy}-${String(cm === 12 ? 1 : cm + 1).padStart(2, "0")}`;
+    const draftYear = cm === 12 ? cy + 1 : cy;
+    const draftMonth = cm === 12 ? 1 : cm + 1;
+
+    const db = fakePrisma({
+      snapshots: [
+        { villaId: "v1", cycleId: "mc-pub", expectedAmount: 370, paidAmount: 370, status: "PAID" },
+        { villaId: "v1", cycleId: "mc-draft", expectedAmount: 370, paidAmount: 0, status: "PENDING" },
+        { villaId: "v2", cycleId: "mc-draft", expectedAmount: 370, paidAmount: 0, status: "PENDING" },
+      ],
+      maintenanceCycles: [
+        { id: "mc-pub", financialYearId: "fy1", periodKey: pkPublished, periodMonth: cm, periodYear: cy },
+        { id: "mc-draft", financialYearId: "fy1", periodKey: pkDraft, periodMonth: draftMonth, periodYear: draftYear },
+      ],
+      billingCycles: [
+        {
+          id: "bc-pub",
+          financialYearId: "fy1",
+          cycleKey: pkPublished,
+          publishedAt: new Date("2026-01-01"),
+          paymentStartDate: new Date(cy, cm - 2, 1),
+          paymentEndDate: new Date(cy, cm, 28),
+          amount: 370,
+          lateFee: 0,
+          gracePeriodDays: 0,
+        },
+        {
+          id: "bc-draft",
+          financialYearId: "fy1",
+          cycleKey: pkDraft,
+          publishedAt: null,
+          paymentStartDate: new Date(draftYear, draftMonth - 1, 1),
+          paymentEndDate: new Date(draftYear, draftMonth, 28),
+          amount: 370,
+          lateFee: 0,
+          gracePeriodDays: 0,
+        },
+      ],
+    });
+    const m = await computeSocietyMoneySnapshot(db, "s1");
+    assert.equal(m.outstandingDues, 0);
+    assert.equal(m.expectedAllTime, 370);
   });
 });

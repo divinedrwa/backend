@@ -1463,8 +1463,8 @@ router.get(
 );
 
 // GET /api/residents/outstanding-dues
-// All villas with any pending maintenance payment across all cycles (society-wide).
-// Available to both RESIDENT and ADMIN roles.
+// Society-wide pending maintenance for published, app-visible billing cycles only.
+// Draft/unpublished cycles are excluded so the home card footer matches personal dues.
 router.get(
   "/outstanding-dues",
   requireRole(UserRole.RESIDENT, UserRole.ADMIN),
@@ -1475,9 +1475,11 @@ router.get(
         return res.status(403).json({ message: "Tenant context required" });
       }
 
+      const periodKeys = await loadAppVisibleBillingCyclePeriodKeys(prisma, societyId);
+
       const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
         where: {
-          cycle: { societyId },
+          cycle: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys),
           status: { notIn: ["PAID", "WAIVED"] },
         },
         include: {

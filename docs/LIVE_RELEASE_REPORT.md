@@ -1,7 +1,7 @@
 # Live release report (K5)
 
 - **Version:** live-20260718
-- **Generated:** 2026-07-18T09:00:26Z
+- **Generated:** 2026-07-18T12:20:54Z
 - **API:** https://gatepass-v037.onrender.com
 - **Policy:** Read-only live smokes
 

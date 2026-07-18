@@ -1,6 +1,9 @@
 import { Prisma } from "@prisma/client";
 import { getVillaCreditForCycleDisplayBulk } from "../modules/maintenance-management/credit-walker";
-import { loadBillingCyclePeriodKeys } from "../modules/billing-cycle/billing-collection-scope";
+import {
+  loadAppVisibleBillingCyclePeriodKeys,
+  loadBillingCyclePeriodKeys,
+} from "../modules/billing-cycle/billing-collection-scope";
 import { prisma as defaultPrisma } from "./prisma";
 
 type Db = Prisma.TransactionClient | typeof defaultPrisma;
@@ -193,13 +196,20 @@ export async function computeSocietyMoneySnapshot(
     }),
   ]);
 
-  const billingPeriodKeys = await loadBillingCyclePeriodKeys(db, societyId);
+  const [billingPeriodKeys, appVisiblePeriodKeys] = await Promise.all([
+    loadBillingCyclePeriodKeys(db, societyId),
+    loadAppVisibleBillingCyclePeriodKeys(db, societyId),
+  ]);
 
   const maintenanceCycles = await db.maintenanceCollectionCycle.findMany({
     where: { societyId, periodKey: { in: billingPeriodKeys } },
     select: { id: true, financialYearId: true, periodKey: true, periodMonth: true, periodYear: true },
     orderBy: [{ periodYear: "asc" }, { periodMonth: "asc" }],
   });
+  const appVisiblePeriodKeySet = new Set(appVisiblePeriodKeys);
+  const appVisibleBackedCycleIds = new Set(
+    maintenanceCycles.filter((mc) => appVisiblePeriodKeySet.has(mc.periodKey)).map((mc) => mc.id),
+  );
   const mcByFyKey = new Map<string, string>();
   for (const mc of maintenanceCycles) {
     mcByFyKey.set(`${mc.financialYearId}:${mc.periodKey}`, mc.id);
@@ -390,12 +400,14 @@ export async function computeSocietyMoneySnapshot(
     }
   }
 
-  // Total expected maintenance across every (villa, cycle) snapshot.
+  // Total expected maintenance across published, app-visible billing cycles.
   // Excludes WAIVED cycles — the society chose not to collect those.
+  // Draft/unpublished billing cycles must not inflate resident-facing dues.
   let expectedAllTime = 0;
   let outstandingDues = 0;
   for (const s of snapshots) {
     if (s.status === "WAIVED") continue;
+    if (!appVisibleBackedCycleIds.has(s.cycleId)) continue;
     const expected = Number(s.expectedAmount);
     expectedAllTime += expected;
     const paid = Number(s.paidAmount);
