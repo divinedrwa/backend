@@ -27,6 +27,12 @@ import {
   transitionVisitorState,
   VisitorTransitionType,
 } from "./visitor-state-manager";
+import {
+  fetchGuardVisitorDetail,
+  findGuardClientMutation,
+  GUARD_MUTATION_KINDS,
+  recordGuardClientMutation,
+} from "../../lib/guardClientMutation";
 
 const router = Router();
 
@@ -61,6 +67,8 @@ const checkInSchema = z
     photo: z.string().optional(),
     /** When true, visitor stays pending until resident(s) approve; then guard confirms entry. */
     awaitResidentApproval: z.boolean().optional().default(false),
+    /** Mobile offline sync: UUID sent by the client for idempotent replay. */
+    clientMutationId: z.string().uuid().optional(),
   })
   .refine(
     (d) =>
@@ -71,6 +79,7 @@ const checkInSchema = z
 
 const checkOutSchema = z.object({
   visitorId: z.string(),
+  clientMutationId: z.string().uuid().optional(),
 });
 
 const verifyPreApprovedSchema = z.object({
@@ -123,7 +132,24 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       vehicleNumber,
       photo,
       awaitResidentApproval,
+      clientMutationId,
     } = body;
+
+    if (clientMutationId) {
+      const prior = await findGuardClientMutation(societyId, clientMutationId);
+      if (prior?.visitorId) {
+        const completeVisitor = await fetchGuardVisitorDetail(prior.visitorId);
+        if (completeVisitor) {
+          return res.status(201).json({
+            message: "Visitor checked in successfully",
+            visitor: completeVisitor,
+            awaitResidentApproval: Boolean(awaitResidentApproval),
+            residentApprovalRecipientCount: 0,
+            idempotentReplay: true,
+          });
+        }
+      }
+    }
 
     type VisitRow = { villaId: string; unitId: string; residentUserId: string | null };
     const visitRows: VisitRow[] = [];
@@ -318,27 +344,17 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
     }
 
     // Fetch complete visitor with relations
-    const completeVisitor = await prisma.visitor.findUnique({
-      where: { id: visitor.id },
-      include: {
-        villaVisits: {
-          include: {
-            villa: {
-              select: {
-                villaNumber: true,
-              },
-            },
-            unit: { select: { unitCode: true, label: true } },
-            resident: { select: { id: true, name: true, residentType: true } },
-          },
-        },
-        gate: {
-          select: {
-            name: true,
-          },
-        },
-      },
-    });
+    const completeVisitor = await fetchGuardVisitorDetail(visitor.id);
+
+    if (clientMutationId) {
+      await recordGuardClientMutation({
+        societyId,
+        guardUserId: userId,
+        clientMutationId,
+        kind: GUARD_MUTATION_KINDS.VISITOR_CHECK_IN,
+        visitorId: visitor.id,
+      });
+    }
 
     return res.status(201).json({
       message:
@@ -358,7 +374,19 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(checkOutSchema), async (req, res, next) => {
   try {
     const { societyId, userId } = req.auth!;
-    const { visitorId } = req.body;
+    const { visitorId, clientMutationId } = req.body as z.infer<typeof checkOutSchema>;
+
+    if (clientMutationId) {
+      const prior = await findGuardClientMutation(societyId, clientMutationId);
+      if (prior?.visitorId === visitorId) {
+        const updated = await fetchGuardVisitorDetail(visitorId);
+        return res.json({
+          message: "Visitor checked out successfully",
+          visitor: updated,
+          idempotentReplay: true,
+        });
+      }
+    }
 
     const visitor = await prisma.visitor.findFirst({
       where: { id: visitorId, societyId },
@@ -369,7 +397,12 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
     }
 
     if (visitor.checkOutTime) {
-      return res.status(400).json({ message: "Visitor already checked out" });
+      const updated = await fetchGuardVisitorDetail(visitorId);
+      return res.json({
+        message: "Visitor already checked out",
+        visitor: updated,
+        idempotentReplay: true,
+      });
     }
 
   // Use centralized state manager for checkout
@@ -385,17 +418,17 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
     });
   });
 
-    const updated = await prisma.visitor.findUnique({
-      where: { id: visitorId },
-      include: {
-        villaVisits: {
-          include: {
-            villa: { select: { villaNumber: true } },
-          },
-        },
-        gate: { select: { name: true } },
-      },
-    });
+    const updated = await fetchGuardVisitorDetail(visitorId);
+
+    if (clientMutationId) {
+      await recordGuardClientMutation({
+        societyId,
+        guardUserId: userId,
+        clientMutationId,
+        kind: GUARD_MUTATION_KINDS.VISITOR_CHECK_OUT,
+        visitorId,
+      });
+    }
 
     return res.json({
       message: "Visitor checked out successfully",

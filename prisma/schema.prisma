@@ -175,6 +175,7 @@ model Society {
   vendors               Vendor[]
   notices               Notice[]
   visitors              Visitor[]
+  guardClientMutations  GuardClientMutation[]
   parcels               Parcel[]
   gates                 Gate[]
   guardShifts           GuardShift[]
@@ -442,6 +443,7 @@ model User {
   visitorVillaAsTarget  VisitorVilla[] @relation("VisitorVillaResidentTarget")
   visitorsCheckedIn     Visitor[]      @relation("VisitorCheckedInByGuard")
   visitorsCheckedOut    Visitor[]      @relation("VisitorCheckedOutByGuard")
+  guardClientMutations  GuardClientMutation[] @relation("GuardClientMutations")
   visitorCheckpoints    VisitorCheckpoint[] @relation("VisitorCheckpointActor")
   amenityBookings       AmenityBooking[]
   unit                  Unit?          @relation(fields: [unitId], references: [id], onDelete: Restrict)
@@ -1057,6 +1059,7 @@ model Visitor {
   checkedOutByGuard User?             @relation("VisitorCheckedOutByGuard", fields: [checkedOutByGuardId], references: [id], onDelete: SetNull)
   villaVisits    VisitorVilla[]
   checkpoints    VisitorCheckpoint[]
+  guardClientMutations GuardClientMutation[]
 
   @@index([societyId])
   @@index([gateId])
@@ -1071,6 +1074,25 @@ model Visitor {
   @@index([checkedInByGuardId])
   @@index([checkedOutByGuardId])
   @@index([preApprovedId])
+}
+
+/// Idempotency ledger for guard mobile offline sync (check-in/out replay).
+model GuardClientMutation {
+  id               String   @id @default(cuid())
+  societyId        String
+  guardUserId      String
+  clientMutationId String
+  kind             String
+  visitorId        String?
+  createdAt        DateTime @default(now())
+
+  society Society  @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  guard   User     @relation("GuardClientMutations", fields: [guardUserId], references: [id], onDelete: Cascade)
+  visitor Visitor? @relation(fields: [visitorId], references: [id], onDelete: SetNull)
+
+  @@unique([societyId, clientMutationId])
+  @@index([guardUserId, createdAt])
+  @@index([visitorId])
 }
 
 model VisitorVilla {

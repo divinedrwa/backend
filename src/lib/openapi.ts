@@ -97,6 +97,50 @@ const ErrorResponse = registry.register(
 );
 
 // ---------------------------------------------------------------------------
+// Guard schemas (mobile offline sync + typed clients)
+// ---------------------------------------------------------------------------
+const GuardVisitTarget = z.object({
+  villaId: z.string().min(1),
+  unitId: z.string().optional(),
+  residentUserId: z.string().optional(),
+});
+
+const GuardVisitorCheckInRequest = registry.register(
+  "GuardVisitorCheckInRequest",
+  z.object({
+    name: z.string().trim().min(2),
+    phone: z.string().trim().min(10),
+    visitTargets: z.array(GuardVisitTarget).optional(),
+    villaIds: z.array(z.string()).optional(),
+    visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
+    purpose: z.string().trim().optional(),
+    vehicleNumber: z.string().trim().optional(),
+    photo: z.string().optional(),
+    awaitResidentApproval: z.boolean().optional(),
+    clientMutationId: z.string().uuid().optional(),
+  }),
+);
+
+const GuardVisitorCheckOutRequest = registry.register(
+  "GuardVisitorCheckOutRequest",
+  z.object({
+    visitorId: z.string(),
+    clientMutationId: z.string().uuid().optional(),
+  }),
+);
+
+const GuardVisitorMutationResponse = registry.register(
+  "GuardVisitorMutationResponse",
+  z.object({
+    message: z.string(),
+    visitor: z.record(z.unknown()).optional(),
+    awaitResidentApproval: z.boolean().optional(),
+    residentApprovalRecipientCount: z.number().optional(),
+    idempotentReplay: z.boolean().optional(),
+  }),
+);
+
+// ---------------------------------------------------------------------------
 // Route registrations
 // ---------------------------------------------------------------------------
 
@@ -220,6 +264,73 @@ registry.registerPath({
       billingCycleId: z.string().optional(),
     }),
   },
+  responses: {
+    200: { description: "Dashboard data" },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/guards/visitor-checkin",
+  summary: "Guard walk-in visitor check-in",
+  tags: ["Guard"],
+  security: [{ [bearerAuth.name]: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: GuardVisitorCheckInRequest } },
+    },
+  },
+  responses: {
+    201: {
+      description: "Visitor checked in",
+      content: { "application/json": { schema: GuardVisitorMutationResponse } },
+    },
+    400: { description: "Validation error", content: { "application/json": { schema: ErrorResponse } } },
+    401: { description: "Unauthorized" },
+    409: { description: "Duplicate active check-in" },
+  },
+});
+
+registry.registerPath({
+  method: "post",
+  path: "/api/guards/visitor-checkout",
+  summary: "Guard visitor check-out",
+  tags: ["Guard"],
+  security: [{ [bearerAuth.name]: [] }],
+  request: {
+    body: {
+      content: { "application/json": { schema: GuardVisitorCheckOutRequest } },
+    },
+  },
+  responses: {
+    200: {
+      description: "Visitor checked out (idempotent on replay)",
+      content: { "application/json": { schema: GuardVisitorMutationResponse } },
+    },
+    404: { description: "Visitor not found" },
+    409: { description: "Concurrent state change" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/guards/my-visitors",
+  summary: "Today's visitors for guard",
+  tags: ["Guard"],
+  security: [{ [bearerAuth.name]: [] }],
+  responses: {
+    200: { description: "Visitor list" },
+    401: { description: "Unauthorized" },
+  },
+});
+
+registry.registerPath({
+  method: "get",
+  path: "/api/guards/my-dashboard",
+  summary: "Guard dashboard summary",
+  tags: ["Guard"],
+  security: [{ [bearerAuth.name]: [] }],
   responses: {
     200: { description: "Dashboard data" },
     401: { description: "Unauthorized" },
