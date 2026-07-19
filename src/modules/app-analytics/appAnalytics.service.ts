@@ -244,7 +244,19 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
   const logins = events.filter((e) => e.kind === AppAnalyticsEventKind.LOGIN).length;
   const screenViews = events.filter((e) => e.kind === AppAnalyticsEventKind.SCREEN_VIEW).length;
   const flowEvents = events.filter((e) => e.kind === AppAnalyticsEventKind.FLOW_COMPLETE);
+  const actionEvents = events.filter((e) => e.kind === AppAnalyticsEventKind.ACTION);
   const errors = events.filter((e) => e.kind === AppAnalyticsEventKind.ERROR).length;
+  const monthStart = startOfLocalDayDaysAgo(30);
+  const monthlyActiveUsers = new Set<string>();
+  for (const s of sessions) {
+    if (s.lastSeenAt >= monthStart) monthlyActiveUsers.add(s.userId);
+  }
+  for (const e of events) {
+    if (e.occurredAt >= monthStart) monthlyActiveUsers.add(e.userId);
+  }
+  const mau = monthlyActiveUsers.size;
+  const dau = activeUserIdsToday.size;
+  const stickinessPct = mau > 0 ? Math.round((dau / mau) * 100) : 0;
 
   const byRole: Record<string, number> = {};
   for (const s of sessions) {
@@ -285,10 +297,13 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
       logins,
       screenViews,
       flowCompletions: flowEvents.length,
+      actions: actionEvents.length,
       errors,
       uniqueActiveUsers: activeUserIdsPeriod.size,
+      monthlyActiveUsers: mau,
       dailyActiveUsers: activeUserIdsToday.size,
       weeklyActiveUsers: activeUserIdsWeek.size,
+      stickinessPct,
       uniqueDevices: uniqueDevices.size,
       avgSessionDurationMs: avgDurationMs(sessions),
       registeredAccounts: usersByRole.reduce((sum, r) => sum + r._count, 0),
@@ -393,6 +408,229 @@ export async function getAppAnalyticsTopScreens(db: Db, societyId: string, days:
       .map((r) => ({ screen: r.name, views: r._count._all }))
       .sort((a, b) => b.views - a.views)
       .slice(0, 25),
+  };
+}
+
+/** Human-readable labels for tracked business actions (client `ACTION` events). */
+export const BUSINESS_ACTION_LABELS: Record<string, string> = {
+  resident_pre_approve_visitor: "Pre-approve visitor",
+  resident_complaint_submit: "Submit complaint",
+  resident_maintenance_payment: "Maintenance payment",
+  resident_amenity_booking: "Amenity booking",
+  resident_poll_vote: "Poll vote",
+  admin_notice_publish: "Publish notice",
+  admin_billing_cycle_publish: "Publish billing cycle",
+  admin_expense_add: "Add expense",
+  guard_qr_scan: "QR scan",
+};
+
+export async function getAppAnalyticsActions(
+  db: Db,
+  societyId: string,
+  days: number,
+  registeredActiveAccounts: number,
+) {
+  const since = startOfLocalDayDaysAgo(days);
+  const events = await db.appAnalyticsEvent.findMany({
+    where: {
+      societyId,
+      kind: AppAnalyticsEventKind.ACTION,
+      occurredAt: { gte: since },
+    },
+    select: { name: true, userId: true, role: true, occurredAt: true },
+  });
+
+  const map = new Map<
+    string,
+    { action: string; label: string; count: number; uniqueUsers: Set<string>; byRole: Record<string, number> }
+  >();
+  for (const e of events) {
+    const slot = map.get(e.name) ?? {
+      action: e.name,
+      label: BUSINESS_ACTION_LABELS[e.name] ?? e.name.replace(/_/g, " "),
+      count: 0,
+      uniqueUsers: new Set<string>(),
+      byRole: {},
+    };
+    slot.count += 1;
+    slot.uniqueUsers.add(e.userId);
+    slot.byRole[e.role] = (slot.byRole[e.role] ?? 0) + 1;
+    map.set(e.name, slot);
+  }
+
+  const denominator = Math.max(registeredActiveAccounts, 1);
+  return {
+    actions: [...map.values()]
+      .map((a) => ({
+        action: a.action,
+        label: a.label,
+        count: a.count,
+        uniqueUsers: a.uniqueUsers.size,
+        adoptionPct: Math.round((a.uniqueUsers.size / denominator) * 100),
+        byRole: Object.entries(a.byRole).map(([role, count]) => ({ role, count })),
+      }))
+      .sort((a, b) => b.count - a.count),
+    totals: { events: events.length, distinctActions: map.size },
+  };
+}
+
+export async function getAppAnalyticsErrors(db: Db, societyId: string, days: number) {
+  const since = startOfLocalDayDaysAgo(days);
+  const events = await db.appAnalyticsEvent.findMany({
+    where: {
+      societyId,
+      kind: AppAnalyticsEventKind.ERROR,
+      occurredAt: { gte: since },
+    },
+    select: { name: true, userId: true, role: true, occurredAt: true, appVersion: true },
+    orderBy: { occurredAt: "desc" },
+  });
+
+  const map = new Map<
+    string,
+    {
+      error: string;
+      count: number;
+      uniqueUsers: Set<string>;
+      lastOccurredAt: Date;
+      byRole: Record<string, number>;
+    }
+  >();
+  for (const e of events) {
+    const slot = map.get(e.name) ?? {
+      error: e.name,
+      count: 0,
+      uniqueUsers: new Set<string>(),
+      lastOccurredAt: e.occurredAt,
+      byRole: {},
+    };
+    slot.count += 1;
+    slot.uniqueUsers.add(e.userId);
+    if (e.occurredAt > slot.lastOccurredAt) slot.lastOccurredAt = e.occurredAt;
+    slot.byRole[e.role] = (slot.byRole[e.role] ?? 0) + 1;
+    map.set(e.name, slot);
+  }
+
+  const sessionsInPeriod = await db.appAnalyticsSession.count({
+    where: { societyId, startedAt: { gte: since } },
+  });
+
+  return {
+    errors: [...map.values()]
+      .map((e) => ({
+        error: e.error,
+        count: e.count,
+        uniqueUsers: e.uniqueUsers.size,
+        lastOccurredAt: e.lastOccurredAt.toISOString(),
+        byRole: Object.entries(e.byRole).map(([role, count]) => ({ role, count })),
+      }))
+      .sort((a, b) => b.count - a.count)
+      .slice(0, 25),
+    totals: {
+      events: events.length,
+      distinctErrors: map.size,
+      errorRatePct:
+        sessionsInPeriod > 0 ? Math.round((events.length / sessionsInPeriod) * 100) : 0,
+    },
+  };
+}
+
+export async function getAppAnalyticsInsights(db: Db, societyId: string, days: number) {
+  const since = startOfLocalDayDaysAgo(days);
+  const todayStart = startOfLocalDayDaysAgo(0);
+  const weekStart = startOfLocalDayDaysAgo(7);
+  const monthStart = startOfLocalDayDaysAgo(30);
+
+  const [sessions, events, firstSessions] = await Promise.all([
+    db.appAnalyticsSession.findMany({
+      where: { societyId, startedAt: { gte: since } },
+      select: { userId: true, startedAt: true, lastSeenAt: true, role: true },
+    }),
+    db.appAnalyticsEvent.findMany({
+      where: { societyId, occurredAt: { gte: since } },
+      select: { userId: true, occurredAt: true, role: true },
+    }),
+    db.appAnalyticsSession.groupBy({
+      by: ["userId"],
+      where: { societyId },
+      _min: { startedAt: true },
+    }),
+  ]);
+
+  const firstSeen = new Map<string, Date>();
+  for (const row of firstSessions) {
+    if (row._min.startedAt) firstSeen.set(row.userId, row._min.startedAt);
+  }
+
+  const activeToday = new Set<string>();
+  const activeWeek = new Set<string>();
+  const activeMonth = new Set<string>();
+  const hourly = Array.from({ length: 24 }, (_, hour) => ({ hour, label: `${hour}:00`, count: 0 }));
+  const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label, day) => ({
+    day,
+    label,
+    count: 0,
+  }));
+
+  for (const s of sessions) {
+    if (s.lastSeenAt >= todayStart) activeToday.add(s.userId);
+    if (s.lastSeenAt >= weekStart) activeWeek.add(s.userId);
+    if (s.lastSeenAt >= monthStart) activeMonth.add(s.userId);
+    const h = s.startedAt.getHours();
+    hourly[h]!.count += 1;
+    weekday[s.startedAt.getDay()]!.count += 1;
+  }
+  for (const e of events) {
+    if (e.occurredAt >= todayStart) activeToday.add(e.userId);
+    if (e.occurredAt >= weekStart) activeWeek.add(e.userId);
+    if (e.occurredAt >= monthStart) activeMonth.add(e.userId);
+  }
+
+  const dau = activeToday.size;
+  const wau = activeWeek.size;
+  const mau = activeMonth.size;
+
+  function retentionPct(cohortBefore: Date, returnSince: Date): number {
+    let eligible = 0;
+    let returned = 0;
+    for (const [userId, first] of firstSeen) {
+      if (first > cohortBefore) continue;
+      eligible += 1;
+      const activeInReturn =
+        sessions.some((s) => s.userId === userId && s.lastSeenAt >= returnSince) ||
+        events.some((e) => e.userId === userId && e.occurredAt >= returnSince);
+      if (activeInReturn) returned += 1;
+    }
+    return eligible > 0 ? Math.round((returned / eligible) * 100) : 0;
+  }
+
+  const peakHours = [...hourly]
+    .sort((a, b) => b.count - a.count)
+    .slice(0, 3)
+    .map((h) => ({ hour: h.hour, label: h.label, count: h.count }));
+
+  const sessionsByRole: Record<string, number> = {};
+  for (const s of sessions) {
+    sessionsByRole[s.role] = (sessionsByRole[s.role] ?? 0) + 1;
+  }
+
+  return {
+    period: { days, startDate: since.toISOString(), endDate: new Date().toISOString() },
+    stickiness: {
+      dailyActiveUsers: dau,
+      weeklyActiveUsers: wau,
+      monthlyActiveUsers: mau,
+      stickinessPct: mau > 0 ? Math.round((dau / mau) * 100) : 0,
+      wauMauPct: mau > 0 ? Math.round((wau / mau) * 100) : 0,
+    },
+    retention: {
+      d7Pct: retentionPct(weekStart, weekStart),
+      d30Pct: retentionPct(monthStart, weekStart),
+    },
+    peakHours,
+    hourlyData: hourly,
+    weekdayUsage: weekday,
+    sessionsByRole: Object.entries(sessionsByRole).map(([role, count]) => ({ role, count })),
   };
 }
 

@@ -5,9 +5,12 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import {
   createAnalyticsSession,
+  getAppAnalyticsActions,
   getAppAnalyticsActiveUsers,
   getAppAnalyticsDailyTrend,
+  getAppAnalyticsErrors,
   getAppAnalyticsFlows,
+  getAppAnalyticsInsights,
   getAppAnalyticsSummary,
   getAppAnalyticsTopScreens,
   getAppAnalyticsUserEngagement,
@@ -110,12 +113,17 @@ router.patch(
       if (req.body.ended === true) {
         const { userId, role } = req.auth!;
         if (userId && role) {
+          const sessionRow = await prisma.appAnalyticsSession.findFirst({
+            where: { id: req.params.id, societyId },
+            select: { platform: true, appVersion: true },
+          });
           const userSnapshot = await loadAnalyticsUserSnapshot(prisma, societyId, userId);
           await recordAnalyticsEvent(prisma, {
             societyId,
             userId,
             role,
-            defaultPlatform: AppAnalyticsPlatform.ANDROID,
+            defaultPlatform: sessionRow?.platform ?? AppAnalyticsPlatform.ANDROID,
+            defaultAppVersion: sessionRow?.appVersion ?? undefined,
             userSnapshot,
             event: {
               kind: AppAnalyticsEventKind.SESSION_END,
@@ -255,6 +263,51 @@ router.get("/flows", requireRole(...ADMIN_READ_ROLES), async (req, res, next) =>
     const days = parseDays(req.query.days);
     const flows = await getAppAnalyticsFlows(prisma, societyId, days);
     return res.json(flows);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/actions", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const summary = await getAppAnalyticsSummary(prisma, societyId, days);
+    const registered =
+      summary.engagement.registeredActiveAccounts ?? summary.totals.registeredAccounts;
+    const actions = await getAppAnalyticsActions(prisma, societyId, days, registered);
+    return res.json(actions);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/errors", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const errors = await getAppAnalyticsErrors(prisma, societyId, days);
+    return res.json(errors);
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/insights", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const insights = await getAppAnalyticsInsights(prisma, societyId, days);
+    return res.json({ insights });
   } catch (error) {
     next(error);
   }
