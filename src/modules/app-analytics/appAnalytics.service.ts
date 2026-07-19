@@ -43,6 +43,99 @@ function avgDurationMs(
   return count > 0 ? Math.round(total / count) : 0;
 }
 
+type UsageSignals = {
+  activeInPeriod: Set<string>;
+  everUsed: Set<string>;
+  lastSeenAt: Map<string, Date>;
+};
+
+/** Union analytics + push device + refresh-token login signals for accurate engagement. */
+async function loadAppUsageSignals(
+  db: Db,
+  societyId: string,
+  since: Date,
+): Promise<UsageSignals> {
+  const [
+    sessionsInPeriod,
+    eventsInPeriod,
+    everSessionUserIds,
+    everEventUserIds,
+    pushDevices,
+    refreshTokens,
+  ] = await Promise.all([
+    db.appAnalyticsSession.findMany({
+      where: { societyId, lastSeenAt: { gte: since } },
+      select: { userId: true, lastSeenAt: true },
+    }),
+    db.appAnalyticsEvent.findMany({
+      where: { societyId, occurredAt: { gte: since } },
+      select: { userId: true, occurredAt: true },
+    }),
+    db.appAnalyticsSession.findMany({
+      where: { societyId },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    db.appAnalyticsEvent.findMany({
+      where: { societyId },
+      select: { userId: true },
+      distinct: ["userId"],
+    }),
+    db.pushDevice.findMany({
+      where: { user: { societyId, role: { in: APP_USER_ROLES } } },
+      select: { userId: true, lastUsedAt: true },
+    }),
+    db.refreshToken.findMany({
+      where: {
+        revoked: false,
+        user: { societyId, role: { in: APP_USER_ROLES } },
+      },
+      select: { userId: true, createdAt: true },
+    }),
+  ]);
+
+  const activeInPeriod = new Set<string>();
+  const everUsed = new Set<string>();
+  const lastSeenAt = new Map<string, Date>();
+
+  const note = (userId: string, at: Date, inPeriod: boolean) => {
+    everUsed.add(userId);
+    if (inPeriod) activeInPeriod.add(userId);
+    const prev = lastSeenAt.get(userId);
+    if (!prev || at > prev) lastSeenAt.set(userId, at);
+  };
+
+  for (const s of sessionsInPeriod) note(s.userId, s.lastSeenAt, true);
+  for (const e of eventsInPeriod) note(e.userId, e.occurredAt, true);
+  for (const row of everSessionUserIds) everUsed.add(row.userId);
+  for (const row of everEventUserIds) everUsed.add(row.userId);
+  for (const p of pushDevices) note(p.userId, p.lastUsedAt, p.lastUsedAt >= since);
+  for (const r of refreshTokens) note(r.userId, r.createdAt, r.createdAt >= since);
+
+  return { activeInPeriod, everUsed, lastSeenAt };
+}
+
+function mergeActiveUsersIntoSets(
+  userIds: Iterable<string>,
+  atByUser: Map<string, Date>,
+  targets: {
+    period: Set<string>;
+    today: Set<string>;
+    week: Set<string>;
+    month: Set<string>;
+  },
+  bounds: { since: Date; todayStart: Date; weekStart: Date; monthStart: Date },
+) {
+  for (const userId of userIds) {
+    const at = atByUser.get(userId);
+    if (!at) continue;
+    if (at >= bounds.since) targets.period.add(userId);
+    if (at >= bounds.todayStart) targets.today.add(userId);
+    if (at >= bounds.weekStart) targets.week.add(userId);
+    if (at >= bounds.monthStart) targets.month.add(userId);
+  }
+}
+
 export async function createAnalyticsSession(
   db: Db,
   params: {
@@ -181,8 +274,9 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
   const since = startOfLocalDayDaysAgo(days);
   const todayStart = startOfLocalDayDaysAgo(0);
   const weekStart = startOfLocalDayDaysAgo(7);
+  const monthStart = startOfLocalDayDaysAgo(30);
 
-  const [sessions, events, pushDevices, usersByRole] = await Promise.all([
+  const [sessions, events, pushDevices, usersByRole, usageSignals] = await Promise.all([
     db.appAnalyticsSession.findMany({
       where: { societyId, startedAt: { gte: since } },
       select: {
@@ -225,36 +319,45 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
       where: { societyId, isActive: true },
       _count: true,
     }),
+    loadAppUsageSignals(db, societyId, since),
   ]);
 
   const activeUserIdsPeriod = new Set<string>();
   const activeUserIdsToday = new Set<string>();
   const activeUserIdsWeek = new Set<string>();
+  const bounds = { since, todayStart, weekStart, monthStart };
+  const activeTargets = {
+    period: activeUserIdsPeriod,
+    today: activeUserIdsToday,
+    week: activeUserIdsWeek,
+    month: new Set<string>(),
+  };
+
   for (const s of sessions) {
-    activeUserIdsPeriod.add(s.userId);
-    if (s.lastSeenAt >= todayStart) activeUserIdsToday.add(s.userId);
-    if (s.lastSeenAt >= weekStart) activeUserIdsWeek.add(s.userId);
+    activeTargets.period.add(s.userId);
+    if (s.lastSeenAt >= todayStart) activeTargets.today.add(s.userId);
+    if (s.lastSeenAt >= weekStart) activeTargets.week.add(s.userId);
+    if (s.lastSeenAt >= monthStart) activeTargets.month.add(s.userId);
   }
   for (const e of events) {
-    activeUserIdsPeriod.add(e.userId);
-    if (e.occurredAt >= todayStart) activeUserIdsToday.add(e.userId);
-    if (e.occurredAt >= weekStart) activeUserIdsWeek.add(e.userId);
+    activeTargets.period.add(e.userId);
+    if (e.occurredAt >= todayStart) activeTargets.today.add(e.userId);
+    if (e.occurredAt >= weekStart) activeTargets.week.add(e.userId);
+    if (e.occurredAt >= monthStart) activeTargets.month.add(e.userId);
   }
+  mergeActiveUsersIntoSets(
+    usageSignals.everUsed,
+    usageSignals.lastSeenAt,
+    activeTargets,
+    bounds,
+  );
 
   const logins = events.filter((e) => e.kind === AppAnalyticsEventKind.LOGIN).length;
   const screenViews = events.filter((e) => e.kind === AppAnalyticsEventKind.SCREEN_VIEW).length;
   const flowEvents = events.filter((e) => e.kind === AppAnalyticsEventKind.FLOW_COMPLETE);
   const actionEvents = events.filter((e) => e.kind === AppAnalyticsEventKind.ACTION);
   const errors = events.filter((e) => e.kind === AppAnalyticsEventKind.ERROR).length;
-  const monthStart = startOfLocalDayDaysAgo(30);
-  const monthlyActiveUsers = new Set<string>();
-  for (const s of sessions) {
-    if (s.lastSeenAt >= monthStart) monthlyActiveUsers.add(s.userId);
-  }
-  for (const e of events) {
-    if (e.occurredAt >= monthStart) monthlyActiveUsers.add(e.userId);
-  }
-  const mau = monthlyActiveUsers.size;
+  const mau = activeTargets.month.size;
   const dau = activeUserIdsToday.size;
   const stickinessPct = mau > 0 ? Math.round((dau / mau) * 100) : 0;
 
@@ -279,15 +382,21 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
   const pushActiveToday = pushDevices.filter((d) => d.lastUsedAt >= todayStart).length;
   const pushActiveWeek = pushDevices.filter((d) => d.lastUsedAt >= weekStart).length;
 
+  const engagement = await getAppAnalyticsEngagementCounts(db, societyId, days);
+
+  const societyUserRoles = await db.user.findMany({
+    where: { societyId, role: { in: APP_USER_ROLES } },
+    select: { id: true, role: true },
+  });
+  const roleByUserId = new Map(societyUserRoles.map((u) => [u.id, u.role]));
+
   const activeByRole: Record<string, number> = {};
   for (const uid of activeUserIdsPeriod) {
     const session = sessions.find((s) => s.userId === uid);
     const event = events.find((e) => e.userId === uid);
-    const role = session?.role ?? event?.role;
+    const role = session?.role ?? event?.role ?? roleByUserId.get(uid);
     if (role) activeByRole[role] = (activeByRole[role] ?? 0) + 1;
   }
-
-  const engagement = await getAppAnalyticsEngagementCounts(db, societyId, days);
 
   return {
     period: { days, startDate: since.toISOString(), endDate: new Date().toISOString() },
@@ -756,39 +865,15 @@ type EngagementUserRow = {
 async function getAppAnalyticsEngagementCounts(db: Db, societyId: string, days: number) {
   const since = startOfLocalDayDaysAgo(days);
 
-  const [allUsers, sessionsInPeriod, eventsInPeriod, everSessionUserIds, everEventUserIds] =
-    await Promise.all([
+  const [allUsers, usageSignals] = await Promise.all([
     db.user.findMany({
       where: { societyId, role: { in: APP_USER_ROLES } },
       select: { id: true, isActive: true, role: true },
     }),
-    db.appAnalyticsSession.findMany({
-      where: { societyId, lastSeenAt: { gte: since } },
-      select: { userId: true },
-    }),
-    db.appAnalyticsEvent.findMany({
-      where: { societyId, occurredAt: { gte: since } },
-      select: { userId: true },
-    }),
-    db.appAnalyticsSession.findMany({
-      where: { societyId },
-      select: { userId: true },
-      distinct: ["userId"],
-    }),
-    db.appAnalyticsEvent.findMany({
-      where: { societyId },
-      select: { userId: true },
-      distinct: ["userId"],
-    }),
+    loadAppUsageSignals(db, societyId, since),
   ]);
 
-  const activeInPeriod = new Set<string>();
-  for (const s of sessionsInPeriod) activeInPeriod.add(s.userId);
-  for (const e of eventsInPeriod) activeInPeriod.add(e.userId);
-  const everActive = new Set([
-    ...everSessionUserIds.map((s) => s.userId),
-    ...everEventUserIds.map((e) => e.userId),
-  ]);
+  const { activeInPeriod, everUsed } = usageSignals;
 
   let registeredActive = 0;
   let activeCount = 0;
@@ -809,7 +894,7 @@ async function getAppAnalyticsEngagementCounts(db: Db, societyId: string, days: 
     if (activeInPeriod.has(u.id)) {
       activeCount += 1;
       byRole[u.role].active += 1;
-    } else if (everActive.has(u.id)) {
+    } else if (everUsed.has(u.id)) {
       inactiveCount += 1;
       byRole[u.role].inactive += 1;
     } else {
@@ -836,8 +921,7 @@ export async function getAppAnalyticsUserEngagement(
 ) {
   const since = startOfLocalDayDaysAgo(days);
 
-  const [allUsers, sessionsInPeriod, eventsInPeriod, everSessionUserIds, everEventUserIds] =
-    await Promise.all([
+  const [allUsers, usageSignals] = await Promise.all([
     db.user.findMany({
       where: { societyId, role: { in: APP_USER_ROLES } },
       select: {
@@ -850,44 +934,10 @@ export async function getAppAnalyticsUserEngagement(
       },
       orderBy: [{ role: "asc" }, { name: "asc" }],
     }),
-    db.appAnalyticsSession.findMany({
-      where: { societyId, lastSeenAt: { gte: since } },
-      select: { userId: true, lastSeenAt: true },
-      orderBy: { lastSeenAt: "desc" },
-    }),
-    db.appAnalyticsEvent.findMany({
-      where: { societyId, occurredAt: { gte: since } },
-      select: { userId: true, occurredAt: true },
-      orderBy: { occurredAt: "desc" },
-    }),
-    db.appAnalyticsSession.findMany({
-      where: { societyId },
-      select: { userId: true },
-      distinct: ["userId"],
-    }),
-    db.appAnalyticsEvent.findMany({
-      where: { societyId },
-      select: { userId: true },
-      distinct: ["userId"],
-    }),
+    loadAppUsageSignals(db, societyId, since),
   ]);
 
-  const activeInPeriod = new Set<string>();
-  const lastSeenMap = new Map<string, Date>();
-  for (const s of sessionsInPeriod) {
-    activeInPeriod.add(s.userId);
-    const prev = lastSeenMap.get(s.userId);
-    if (!prev || s.lastSeenAt > prev) lastSeenMap.set(s.userId, s.lastSeenAt);
-  }
-  for (const e of eventsInPeriod) {
-    activeInPeriod.add(e.userId);
-    const prev = lastSeenMap.get(e.userId);
-    if (!prev || e.occurredAt > prev) lastSeenMap.set(e.userId, e.occurredAt);
-  }
-  const everActive = new Set([
-    ...everSessionUserIds.map((s) => s.userId),
-    ...everEventUserIds.map((e) => e.userId),
-  ]);
+  const { activeInPeriod, everUsed, lastSeenAt: lastSeenMap } = usageSignals;
 
   const activeUsers: EngagementUserRow[] = [];
   const inactiveUsers: EngagementUserRow[] = [];
@@ -909,7 +959,7 @@ export async function getAppAnalyticsUserEngagement(
     }
     if (activeInPeriod.has(u.id)) {
       activeUsers.push({ ...base, status: "active" });
-    } else if (everActive.has(u.id)) {
+    } else if (everUsed.has(u.id)) {
       inactiveUsers.push({ ...base, status: "inactive" });
     } else {
       neverUsedUsers.push({ ...base, status: "never_used" });
@@ -944,7 +994,7 @@ export async function getAppAnalyticsUserEngagement(
     if (activeInPeriod.has(u.id)) {
       activeCount += 1;
       byRole[u.role].active += 1;
-    } else if (everActive.has(u.id)) {
+    } else if (everUsed.has(u.id)) {
       inactiveCount += 1;
       byRole[u.role].inactive += 1;
     } else {
@@ -969,7 +1019,10 @@ export async function getAppAnalyticsUserEngagement(
       ...u,
       lastSeenAt: lastSeenMap.get(u.userId)?.toISOString() ?? null,
     })),
-    inactiveUsers: inactiveUsers.slice(0, limit),
+    inactiveUsers: inactiveUsers.slice(0, limit).map((u) => ({
+      ...u,
+      lastSeenAt: lastSeenMap.get(u.userId)?.toISOString() ?? null,
+    })),
     neverUsedUsers: neverUsedUsers.slice(0, limit),
     deactivatedUsers: deactivatedUsers.slice(0, limit),
     totals: {

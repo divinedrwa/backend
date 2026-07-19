@@ -19,10 +19,16 @@ describe("appAnalytics.service", () => {
 
     const db = {
       appAnalyticsSession: {
-        findMany: async () => sessions,
+        findMany: async (args?: { distinct?: string[] }) => {
+          if (args?.distinct) return [{ userId }];
+          return sessions;
+        },
       },
       appAnalyticsEvent: {
-        findMany: async () => events,
+        findMany: async (args?: { distinct?: string[] }) => {
+          if (args?.distinct) return [{ userId }];
+          return events;
+        },
         create: async ({ data }: { data: Record<string, unknown> }) => {
           const row = { id: `e${events.length + 1}`, ...data };
           events.push(row);
@@ -39,6 +45,9 @@ describe("appAnalytics.service", () => {
             userId,
           },
         ],
+      },
+      refreshToken: {
+        findMany: async () => [],
       },
       user: {
         groupBy: async () => [{ role: UserRole.RESIDENT, _count: 10 }],

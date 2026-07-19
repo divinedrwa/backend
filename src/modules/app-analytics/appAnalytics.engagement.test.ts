@@ -90,10 +90,18 @@ describe("appAnalytics engagement", () => {
         },
       },
       appAnalyticsEvent: {
-        findMany: async (args?: { distinct?: string[] }) => {
+        findMany: async (args?: { distinct?: string[]; where?: { occurredAt?: { gte: Date } } }) => {
           if (args?.distinct) return [];
           return [];
         },
+      },
+      pushDevice: {
+        findMany: async () => [
+          { userId: "inactive1", lastUsedAt: new Date(now.getTime() - 60 * 86_400_000) },
+        ],
+      },
+      refreshToken: {
+        findMany: async () => [],
       },
     };
 
@@ -111,6 +119,46 @@ describe("appAnalytics engagement", () => {
     assert.equal(engagement.totals.active, 1);
     assert.equal(engagement.inactiveUsers[0]?.userId, "inactive1");
     assert.equal(engagement.neverUsedUsers[0]?.userId, "never1");
+  });
+
+  it("treats push-only users as active, not never-used", async () => {
+    const societyId = "soc1";
+    const now = new Date();
+    const users = [
+      {
+        id: "push1",
+        name: "Push User",
+        username: "push_user",
+        role: UserRole.RESIDENT,
+        isActive: true,
+        villa: { villaNumber: "29" },
+      },
+    ];
+
+    const db = {
+      user: { findMany: async () => users },
+      appAnalyticsSession: {
+        findMany: async (args: { distinct?: string[]; where?: { lastSeenAt?: { gte: Date } } }) => {
+          if (args.distinct) return [];
+          if (args.where?.lastSeenAt) return [];
+          return [];
+        },
+      },
+      appAnalyticsEvent: {
+        findMany: async () => [],
+      },
+      pushDevice: {
+        findMany: async () => [{ userId: "push1", lastUsedAt: now }],
+      },
+      refreshToken: {
+        findMany: async () => [],
+      },
+    };
+
+    const engagement = await getAppAnalyticsUserEngagement(db as never, societyId, 30, 50);
+    assert.equal(engagement.counts.activeInPeriod, 1);
+    assert.equal(engagement.counts.neverUsedApp, 0);
+    assert.equal(engagement.neverUsedUsers.length, 0);
   });
 
   it("stores user snapshot columns on ingest", async () => {
