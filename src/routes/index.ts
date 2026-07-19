@@ -62,6 +62,7 @@ import vendorContractRoutes from "../modules/vendor-contracts/routes";
 import assetRoutes from "../modules/assets/routes";
 import meetingRoutes from "../modules/meetings/routes";
 import staffAttendanceRoutes from "../modules/staff-attendance/routes";
+import appAnalyticsRoutes from "../modules/app-analytics/routes";
 
 // NEW: Resident Mobile APIs
 import residentRoutes from "../modules/residents/routes";
@@ -113,6 +114,7 @@ router.use("/garbage-collection", garbageCollectionRoutes);
 router.use("/complaints", complaintRoutes);
 router.use("/payment-disputes", paymentDisputeRoutes);
 router.use("/complaint-analytics", complaintAnalyticsRoutes);
+router.use("/app-analytics", appAnalyticsRoutes);
 router.use("/vendors", vendorRoutes);
 
 // Communication

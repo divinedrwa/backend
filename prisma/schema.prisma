@@ -258,6 +258,8 @@ model Society {
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
   adminAuditLogs      AdminAuditLog[]
+  appAnalyticsSessions AppAnalyticsSession[]
+  appAnalyticsEvents   AppAnalyticsEvent[]
 
   financialYears               FinancialYear[]
   maintenanceCollectionCycles  MaintenanceCollectionCycle[]
@@ -435,6 +437,8 @@ model User {
   billingCyclePayments    UserCyclePayment[]
   billingPaymentLogs      BillingPaymentLog[]
   adminAuditLogs          AdminAuditLog[]      @relation("AdminAuditActor")
+  appAnalyticsSessions    AppAnalyticsSession[]
+  appAnalyticsEvents      AppAnalyticsEvent[]
   billingLateFeeWaivers   BillingLateFeeWaiver[]
 
   societiesCreated Society[] @relation("SocietyCreator")
@@ -2519,4 +2523,84 @@ model AppVersionConfig {
   updatedAt      DateTime     @updatedAt
 
   @@map("app_version_configs")
+}
+
+enum AppAnalyticsPlatform {
+  ANDROID
+  IOS
+  WEB
+}
+
+enum AppAnalyticsEventKind {
+  SESSION_START
+  SESSION_END
+  LOGIN
+  LOGOUT
+  SCREEN_VIEW
+  FLOW_COMPLETE
+  ACTION
+  ERROR
+}
+
+/// Mobile/web app usage session (tenant-scoped).
+model AppAnalyticsSession {
+  id          String               @id @default(cuid())
+  societyId   String
+  userId      String
+  role        UserRole
+  userName    String?
+  username    String?
+  villaNumber String?
+  userIsActive Boolean             @default(true)
+  platform    AppAnalyticsPlatform
+  appVersion  String?
+  buildNumber String?
+  deviceId    String?
+  deviceModel String?
+  osVersion   String?
+  startedAt   DateTime             @default(now())
+  endedAt     DateTime?
+  lastSeenAt  DateTime             @default(now())
+
+  society Society             @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  user    User                @relation(fields: [userId], references: [id], onDelete: Cascade)
+  events  AppAnalyticsEvent[]
+
+  @@index([societyId, startedAt])
+  @@index([userId, startedAt])
+  @@index([societyId, lastSeenAt])
+  @@map("app_analytics_sessions")
+}
+
+/// Individual telemetry event (screen views, logins, guard flows, etc.).
+model AppAnalyticsEvent {
+  id            String                @id @default(cuid())
+  societyId     String
+  sessionId     String?
+  userId        String
+  role          UserRole
+  userName      String?
+  username      String?
+  villaNumber   String?
+  userIsActive  Boolean               @default(true)
+  platform      AppAnalyticsPlatform
+  appVersion    String?
+  kind          AppAnalyticsEventKind
+  name          String
+  durationMs    Int?
+  success       Boolean?
+  properties    Json?
+  clientEventId String?
+  occurredAt    DateTime              @default(now())
+
+  society Society              @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  session AppAnalyticsSession? @relation(fields: [sessionId], references: [id], onDelete: SetNull)
+  user    User                   @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([societyId, clientEventId])
+  @@index([societyId, occurredAt])
+  @@index([societyId, kind, occurredAt])
+  @@index([societyId, name, occurredAt])
+  @@index([userId, occurredAt])
+  @@map("app_analytics_events")
 }
