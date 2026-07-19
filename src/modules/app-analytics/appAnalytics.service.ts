@@ -12,6 +12,7 @@ import {
   loadAnalyticsUserSnapshot,
   mergeUserIntoProperties,
 } from "./userSnapshot";
+import { BUSINESS_ACTION_LABELS } from "./analyticsCatalog";
 
 type Db = typeof prisma | Prisma.TransactionClient;
 
@@ -521,17 +522,7 @@ export async function getAppAnalyticsTopScreens(db: Db, societyId: string, days:
 }
 
 /** Human-readable labels for tracked business actions (client `ACTION` events). */
-export const BUSINESS_ACTION_LABELS: Record<string, string> = {
-  resident_pre_approve_visitor: "Pre-approve visitor",
-  resident_complaint_submit: "Submit complaint",
-  resident_maintenance_payment: "Maintenance payment",
-  resident_amenity_booking: "Amenity booking",
-  resident_poll_vote: "Poll vote",
-  admin_notice_publish: "Publish notice",
-  admin_billing_cycle_publish: "Publish billing cycle",
-  admin_expense_add: "Add expense",
-  guard_qr_scan: "QR scan",
-};
+export { BUSINESS_ACTION_LABELS } from "./analyticsCatalog";
 
 export async function getAppAnalyticsActions(
   db: Db,

@@ -28,6 +28,7 @@ import {
   summaryQuerySchema,
 } from "./schemas";
 import { loadAnalyticsUserSnapshot } from "./userSnapshot";
+import { getAppAnalyticsGrowthDashboard } from "./growthDashboard.service";
 
 const router = Router();
 
@@ -308,6 +309,20 @@ router.get("/insights", requireRole(...ADMIN_READ_ROLES), async (req, res, next)
     const days = parseDays(req.query.days);
     const insights = await getAppAnalyticsInsights(prisma, societyId, days);
     return res.json({ insights });
+  } catch (error) {
+    next(error);
+  }
+});
+
+router.get("/growth-dashboard", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const dashboard = await getAppAnalyticsGrowthDashboard(prisma, societyId, days);
+    return res.json({ growth: dashboard });
   } catch (error) {
     next(error);
   }

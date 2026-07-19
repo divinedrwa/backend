@@ -3,6 +3,8 @@ import { describe, it } from "node:test";
 import { AppAnalyticsEventKind, UserRole } from "@prisma/client";
 import {
   BUSINESS_ACTION_LABELS,
+} from "./analyticsCatalog.js";
+import {
   getAppAnalyticsActions,
   getAppAnalyticsErrors,
   getAppAnalyticsInsights,
