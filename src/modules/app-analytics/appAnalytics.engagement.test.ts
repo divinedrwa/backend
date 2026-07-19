@@ -6,6 +6,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import {
+  getAppAnalyticsRoleAdoption,
   getAppAnalyticsUserEngagement,
   recordAnalyticsEvent,
 } from "./appAnalytics.service.js";
@@ -159,6 +160,78 @@ describe("appAnalytics engagement", () => {
     assert.equal(engagement.counts.activeInPeriod, 1);
     assert.equal(engagement.counts.neverUsedApp, 0);
     assert.equal(engagement.neverUsedUsers.length, 0);
+  });
+
+  it("returns per-role adoption with user outreach lists", async () => {
+    const societyId = "soc1";
+    const now = new Date();
+    const users = [
+      {
+        id: "r-active",
+        name: "Res Active",
+        username: "r_active",
+        role: UserRole.RESIDENT,
+        isActive: true,
+        villa: { villaNumber: "101" },
+      },
+      {
+        id: "r-never",
+        name: "Res Never",
+        username: "r_never",
+        role: UserRole.RESIDENT,
+        isActive: true,
+        villa: { villaNumber: "102" },
+      },
+      {
+        id: "g-active",
+        name: "Guard Active",
+        username: "g_active",
+        role: UserRole.GUARD,
+        isActive: true,
+        villa: null,
+      },
+    ];
+
+    const db = {
+      user: {
+        findMany: async () => users,
+        groupBy: async () => [
+          { role: UserRole.RESIDENT, _count: 2 },
+          { role: UserRole.GUARD, _count: 1 },
+        ],
+      },
+      appAnalyticsSession: {
+        findMany: async (args: { distinct?: string[]; where?: { lastSeenAt?: { gte: Date } } }) => {
+          if (args.distinct) return [{ userId: "r-active" }, { userId: "g-active" }];
+          if (args.where?.lastSeenAt) {
+            return [
+              { userId: "r-active", lastSeenAt: now },
+              { userId: "g-active", lastSeenAt: now },
+            ];
+          }
+          return [];
+        },
+      },
+      appAnalyticsEvent: {
+        findMany: async () => [],
+      },
+      pushDevice: { findMany: async () => [] },
+      refreshToken: { findMany: async () => [] },
+    };
+
+    const adoption = await getAppAnalyticsRoleAdoption(db as never, societyId, 30, 20);
+    const residents = adoption.roles.find((r) => r.role === UserRole.RESIDENT);
+    const guards = adoption.roles.find((r) => r.role === UserRole.GUARD);
+
+    assert.equal(residents?.registered, 2);
+    assert.equal(residents?.totalInSociety, 2);
+    assert.equal(residents?.active, 1);
+    assert.equal(residents?.neverUsed, 1);
+    assert.equal(residents?.notUsingAppUsers.neverUsed[0]?.userId, "r-never");
+    assert.equal(guards?.active, 1);
+    assert.equal(guards?.totalInSociety, 1);
+    assert.equal(adoption.meta.totalUsersInDatabase, 3);
+    assert.equal(guards?.activeRatePct, 100);
   });
 
   it("stores user snapshot columns on ingest", async () => {

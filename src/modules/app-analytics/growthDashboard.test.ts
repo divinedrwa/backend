@@ -21,4 +21,11 @@ describe("growthDashboard catalog", () => {
     assert.ok(ANALYTICS_DATA_SOURCES.primary.description.includes("database"));
     assert.ok(ANALYTICS_DATA_SOURCES.mirror.description.includes("GA4"));
   });
+
+  it("lists Firebase Spark free-tier metrics for admin UI", async () => {
+    const { FIREBASE_FREE_TIER_METRICS } = await import("./analyticsCatalog.js");
+    assert.ok(FIREBASE_FREE_TIER_METRICS.length >= 8);
+    assert.ok(FIREBASE_FREE_TIER_METRICS.some((m) => m.id === "dau_wau_mau"));
+    assert.ok(FIREBASE_FREE_TIER_METRICS.some((m) => m.source === "crashlytics"));
+  });
 });

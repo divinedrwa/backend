@@ -23,6 +23,222 @@ const APP_USER_ROLES: UserRole[] = [
   UserRole.RESIDENT_CUM_ADMIN,
 ];
 
+export const ROLE_ADOPTION_LABELS: Record<string, string> = {
+  [UserRole.RESIDENT]: "Residents",
+  [UserRole.GUARD]: "Guards",
+  [UserRole.ADMIN]: "Admins",
+  [UserRole.RESIDENT_CUM_ADMIN]: "Admin-residents",
+};
+
+const ROLE_DISPLAY_ORDER: UserRole[] = [
+  UserRole.RESIDENT,
+  UserRole.GUARD,
+  UserRole.ADMIN,
+  UserRole.RESIDENT_CUM_ADMIN,
+];
+
+type SocietyUserRow = {
+  id: string;
+  name: string;
+  username: string;
+  email: string;
+  phone: string | null;
+  role: UserRole;
+  isActive: boolean;
+  villa?: { villaNumber: string | null } | null;
+};
+
+type EngagementUserRow = {
+  userId: string;
+  name: string;
+  username: string;
+  email: string;
+  phone: string | null;
+  villaNumber: string | null;
+  role: UserRole;
+  isActive: boolean;
+  status: "active" | "inactive" | "never_used" | "deactivated";
+};
+
+type RoleEngagementBreakdown = {
+  totals: {
+    registeredActiveAccounts: number;
+    activeInPeriod: number;
+    inactiveInPeriod: number;
+    neverUsedApp: number;
+    deactivatedAccounts: number;
+  };
+  byRole: Array<{
+    role: UserRole;
+    label: string;
+    registered: number;
+    active: number;
+    dormant: number;
+    neverUsed: number;
+    deactivated: number;
+    everUsed: number;
+    notUsingApp: number;
+    activeRatePct: number;
+    activationRatePct: number;
+  }>;
+  usersByRole: Record<
+    UserRole,
+    {
+      active: EngagementUserRow[];
+      dormant: EngagementUserRow[];
+      neverUsed: EngagementUserRow[];
+      deactivated: EngagementUserRow[];
+    }
+  >;
+};
+
+function pctRound(n: number, d: number): number {
+  return d > 0 ? Math.round((n / d) * 100) : 0;
+}
+
+function buildRoleEngagementBreakdown(
+  allUsers: SocietyUserRow[],
+  usageSignals: UsageSignals,
+): RoleEngagementBreakdown {
+  const { activeInPeriod, everUsed, lastSeenAt } = usageSignals;
+
+  const usersByRole = {} as RoleEngagementBreakdown["usersByRole"];
+  for (const role of ROLE_DISPLAY_ORDER) {
+    usersByRole[role] = { active: [], dormant: [], neverUsed: [], deactivated: [] };
+  }
+
+  const roleCounts: Record<
+    UserRole,
+    { registered: number; active: number; dormant: number; neverUsed: number; deactivated: number }
+  > = {} as Record<
+    UserRole,
+    { registered: number; active: number; dormant: number; neverUsed: number; deactivated: number }
+  >;
+  for (const role of ROLE_DISPLAY_ORDER) {
+    roleCounts[role] = { registered: 0, active: 0, dormant: 0, neverUsed: 0, deactivated: 0 };
+  }
+
+  let registeredActive = 0;
+  let activeCount = 0;
+  let inactiveCount = 0;
+  let neverUsedCount = 0;
+  let deactivatedCount = 0;
+
+  for (const u of allUsers) {
+    const base: EngagementUserRow = {
+      userId: u.id,
+      name: u.name,
+      username: u.username,
+      email: u.email,
+      phone: u.phone,
+      villaNumber: u.villa?.villaNumber ?? null,
+      role: u.role,
+      isActive: u.isActive,
+      status: "never_used",
+    };
+
+    if (!roleCounts[u.role]) {
+      roleCounts[u.role] = { registered: 0, active: 0, dormant: 0, neverUsed: 0, deactivated: 0 };
+      usersByRole[u.role] = { active: [], dormant: [], neverUsed: [], deactivated: [] };
+    }
+
+    if (!u.isActive) {
+      deactivatedCount += 1;
+      roleCounts[u.role].deactivated += 1;
+      usersByRole[u.role].deactivated.push({ ...base, status: "deactivated" });
+      continue;
+    }
+
+    registeredActive += 1;
+    roleCounts[u.role].registered += 1;
+
+    if (activeInPeriod.has(u.id)) {
+      activeCount += 1;
+      roleCounts[u.role].active += 1;
+      usersByRole[u.role].active.push({ ...base, status: "active" });
+    } else if (everUsed.has(u.id)) {
+      inactiveCount += 1;
+      roleCounts[u.role].dormant += 1;
+      usersByRole[u.role].dormant.push({ ...base, status: "inactive" });
+    } else {
+      neverUsedCount += 1;
+      roleCounts[u.role].neverUsed += 1;
+      usersByRole[u.role].neverUsed.push({ ...base, status: "never_used" });
+    }
+  }
+
+  const sortByLastSeen = (a: EngagementUserRow, b: EngagementUserRow) => {
+    const ta = lastSeenAt.get(a.userId)?.getTime() ?? 0;
+    const tb = lastSeenAt.get(b.userId)?.getTime() ?? 0;
+    return tb - ta;
+  };
+
+  for (const role of ROLE_DISPLAY_ORDER) {
+    usersByRole[role]?.active.sort(sortByLastSeen);
+    usersByRole[role]?.dormant.sort(sortByLastSeen);
+    usersByRole[role]?.neverUsed.sort((a, b) => a.name.localeCompare(b.name));
+    usersByRole[role]?.deactivated.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  const byRole = ROLE_DISPLAY_ORDER.filter((role) => roleCounts[role] !== undefined).map((role) => {
+    const c = roleCounts[role]!;
+    const everUsedCount = c.active + c.dormant;
+    const notUsingApp = c.dormant + c.neverUsed;
+    return {
+      role,
+      label: ROLE_ADOPTION_LABELS[role] ?? role,
+      registered: c.registered,
+      active: c.active,
+      dormant: c.dormant,
+      neverUsed: c.neverUsed,
+      deactivated: c.deactivated,
+      everUsed: everUsedCount,
+      notUsingApp,
+      activeRatePct: pctRound(c.active, c.registered),
+      activationRatePct: pctRound(everUsedCount, c.registered),
+    };
+  });
+
+  return {
+    totals: {
+      registeredActiveAccounts: registeredActive,
+      activeInPeriod: activeCount,
+      inactiveInPeriod: inactiveCount,
+      neverUsedApp: neverUsedCount,
+      deactivatedAccounts: deactivatedCount,
+    },
+    byRole,
+    usersByRole,
+  };
+}
+
+function mapEngagementUsersWithLastSeen(
+  users: EngagementUserRow[],
+  lastSeenMap: Map<string, Date>,
+  limit: number,
+) {
+  const rows = limit > 0 ? users.slice(0, limit) : users;
+  return rows.map((u) => ({
+    userId: u.userId,
+    name: u.name,
+    username: u.username,
+    email: u.email,
+    phone: u.phone,
+    villaNumber: u.villaNumber,
+    role: u.role,
+    status: u.status,
+    lastSeenAt: lastSeenMap.get(u.userId)?.toISOString() ?? null,
+  }));
+}
+
+/** 0 = return every user row (no cap). */
+export function resolveAnalyticsListLimit(raw: unknown, fallback = 0): number {
+  if (raw === undefined || raw === null || raw === "") return fallback;
+  const n = parseInt(String(raw), 10);
+  if (Number.isNaN(n) || n <= 0) return 0;
+  return Math.min(n, 5000);
+}
+
 function dayKey(d: Date): string {
   return d.toISOString().slice(0, 10);
 }
@@ -843,64 +1059,64 @@ export async function getAppAnalyticsActiveUsers(
   return { users, total: byUser.size };
 }
 
-type EngagementUserRow = {
-  userId: string;
-  name: string;
-  username: string;
-  villaNumber: string | null;
-  role: UserRole;
-  isActive: boolean;
-  status: "active" | "inactive" | "never_used" | "deactivated";
-};
-
 async function getAppAnalyticsEngagementCounts(db: Db, societyId: string, days: number) {
   const since = startOfLocalDayDaysAgo(days);
 
-  const [allUsers, usageSignals] = await Promise.all([
+  const [allUsers, usageSignals, accountsByRole] = await Promise.all([
     db.user.findMany({
       where: { societyId, role: { in: APP_USER_ROLES } },
-      select: { id: true, isActive: true, role: true },
+      select: {
+        id: true,
+        isActive: true,
+        role: true,
+        name: true,
+        username: true,
+        email: true,
+        phone: true,
+      },
     }),
     loadAppUsageSignals(db, societyId, since),
+    db.user.groupBy({
+      by: ["role"],
+      where: { societyId, role: { in: APP_USER_ROLES } },
+      _count: true,
+    }),
   ]);
 
-  const { activeInPeriod, everUsed } = usageSignals;
-
-  let registeredActive = 0;
-  let activeCount = 0;
-  let inactiveCount = 0;
-  let neverUsedCount = 0;
-  let deactivatedCount = 0;
-  const byRole: Record<string, { active: number; inactive: number; neverUsed: number }> = {};
-
-  for (const u of allUsers) {
-    if (!byRole[u.role]) {
-      byRole[u.role] = { active: 0, inactive: 0, neverUsed: 0 };
-    }
-    if (!u.isActive) {
-      deactivatedCount += 1;
-      continue;
-    }
-    registeredActive += 1;
-    if (activeInPeriod.has(u.id)) {
-      activeCount += 1;
-      byRole[u.role].active += 1;
-    } else if (everUsed.has(u.id)) {
-      inactiveCount += 1;
-      byRole[u.role].inactive += 1;
-    } else {
-      neverUsedCount += 1;
-      byRole[u.role].neverUsed += 1;
-    }
-  }
+  const breakdown = buildRoleEngagementBreakdown(allUsers, usageSignals);
+  const totalByRole = new Map(accountsByRole.map((r) => [r.role, r._count]));
 
   return {
-    registeredActiveAccounts: registeredActive,
-    activeInPeriod: activeCount,
-    inactiveInPeriod: inactiveCount,
-    neverUsedApp: neverUsedCount,
-    deactivatedAccounts: deactivatedCount,
-    byRole: Object.entries(byRole).map(([role, counts]) => ({ role, ...counts })),
+    ...breakdown.totals,
+    totalUsersInDatabase: allUsers.length,
+    byRole: breakdown.byRole.map(
+      ({
+        role,
+        label,
+        registered,
+        active,
+        dormant,
+        neverUsed,
+        deactivated,
+        everUsed,
+        notUsingApp,
+        activeRatePct,
+        activationRatePct,
+      }) => ({
+        role,
+        label,
+        totalInSociety: totalByRole.get(role) ?? 0,
+        registered,
+        active,
+        inactive: dormant,
+        neverUsed,
+        deactivated,
+        everUsed,
+        notUsingApp,
+        activeRatePct,
+        activationRatePct,
+      }),
+    ),
   };
 }
 
@@ -919,6 +1135,8 @@ export async function getAppAnalyticsUserEngagement(
         id: true,
         name: true,
         username: true,
+        email: true,
+        phone: true,
         role: true,
         isActive: true,
         villa: { select: { villaNumber: true } },
@@ -928,99 +1146,144 @@ export async function getAppAnalyticsUserEngagement(
     loadAppUsageSignals(db, societyId, since),
   ]);
 
-  const { activeInPeriod, everUsed, lastSeenAt: lastSeenMap } = usageSignals;
+  const breakdown = buildRoleEngagementBreakdown(allUsers, usageSignals);
+  const { lastSeenAt } = usageSignals;
 
   const activeUsers: EngagementUserRow[] = [];
   const inactiveUsers: EngagementUserRow[] = [];
   const neverUsedUsers: EngagementUserRow[] = [];
   const deactivatedUsers: EngagementUserRow[] = [];
 
-  for (const u of allUsers) {
-    const base = {
-      userId: u.id,
-      name: u.name,
-      username: u.username,
-      villaNumber: u.villa?.villaNumber ?? null,
-      role: u.role,
-      isActive: u.isActive,
-    };
-    if (!u.isActive) {
-      deactivatedUsers.push({ ...base, status: "deactivated" });
-      continue;
-    }
-    if (activeInPeriod.has(u.id)) {
-      activeUsers.push({ ...base, status: "active" });
-    } else if (everUsed.has(u.id)) {
-      inactiveUsers.push({ ...base, status: "inactive" });
-    } else {
-      neverUsedUsers.push({ ...base, status: "never_used" });
-    }
+  for (const role of ROLE_DISPLAY_ORDER) {
+    const bucket = breakdown.usersByRole[role];
+    if (!bucket) continue;
+    activeUsers.push(...bucket.active);
+    inactiveUsers.push(...bucket.dormant);
+    neverUsedUsers.push(...bucket.neverUsed);
+    deactivatedUsers.push(...bucket.deactivated);
   }
 
-  const sortByLastSeen = (a: EngagementUserRow, b: EngagementUserRow) => {
-    const ta = lastSeenMap.get(a.userId)?.getTime() ?? 0;
-    const tb = lastSeenMap.get(b.userId)?.getTime() ?? 0;
-    return tb - ta;
-  };
-
-  activeUsers.sort(sortByLastSeen);
-  inactiveUsers.sort(sortByLastSeen);
-
-  let registeredActive = 0;
-  let activeCount = 0;
-  let inactiveCount = 0;
-  let neverUsedCount = 0;
-  let deactivatedCount = 0;
-  const byRole: Record<string, { active: number; inactive: number; neverUsed: number }> = {};
-
-  for (const u of allUsers) {
-    if (!byRole[u.role]) {
-      byRole[u.role] = { active: 0, inactive: 0, neverUsed: 0 };
-    }
-    if (!u.isActive) {
-      deactivatedCount += 1;
-      continue;
-    }
-    registeredActive += 1;
-    if (activeInPeriod.has(u.id)) {
-      activeCount += 1;
-      byRole[u.role].active += 1;
-    } else if (everUsed.has(u.id)) {
-      inactiveCount += 1;
-      byRole[u.role].inactive += 1;
-    } else {
-      neverUsedCount += 1;
-      byRole[u.role].neverUsed += 1;
-    }
-  }
-
-  const counts = {
-    registeredActiveAccounts: registeredActive,
-    activeInPeriod: activeCount,
-    inactiveInPeriod: inactiveCount,
-    neverUsedApp: neverUsedCount,
-    deactivatedAccounts: deactivatedCount,
-    byRole: Object.entries(byRole).map(([role, roleCounts]) => ({ role, ...roleCounts })),
-  };
+  const mapLimited = (users: EngagementUserRow[]) =>
+    mapEngagementUsersWithLastSeen(users, lastSeenAt, limit);
 
   return {
     period: { days, startDate: since.toISOString(), endDate: new Date().toISOString() },
-    counts,
-    activeUsers: activeUsers.slice(0, limit).map((u) => ({
-      ...u,
-      lastSeenAt: lastSeenMap.get(u.userId)?.toISOString() ?? null,
-    })),
-    inactiveUsers: inactiveUsers.slice(0, limit).map((u) => ({
-      ...u,
-      lastSeenAt: lastSeenMap.get(u.userId)?.toISOString() ?? null,
-    })),
-    neverUsedUsers: neverUsedUsers.slice(0, limit),
-    deactivatedUsers: deactivatedUsers.slice(0, limit),
+    counts: breakdown.totals,
+    byRole: breakdown.byRole,
+    activeUsers: mapLimited(activeUsers),
+    inactiveUsers: mapLimited(inactiveUsers),
+    neverUsedUsers: mapLimited(neverUsedUsers),
+    deactivatedUsers: (limit > 0 ? deactivatedUsers.slice(0, limit) : deactivatedUsers).map(
+      (u) => ({
+        userId: u.userId,
+        name: u.name,
+        username: u.username,
+        email: u.email,
+        phone: u.phone,
+        villaNumber: u.villaNumber,
+        role: u.role,
+        status: u.status,
+        lastSeenAt: null,
+      }),
+    ),
     totals: {
       active: activeUsers.length,
       inactive: inactiveUsers.length,
       neverUsed: neverUsedUsers.length,
       deactivated: deactivatedUsers.length,
+    },
+  };
+}
+
+/** Per-role app adoption: how many residents/guards/admins use the app + who does not. */
+export async function getAppAnalyticsRoleAdoption(
+  db: Db,
+  societyId: string,
+  days: number,
+  listLimit = 0,
+) {
+  const since = startOfLocalDayDaysAgo(days);
+
+  const [allUsers, usageSignals, accountsByRole] = await Promise.all([
+    db.user.findMany({
+      where: { societyId, role: { in: APP_USER_ROLES } },
+      select: {
+        id: true,
+        name: true,
+        username: true,
+        email: true,
+        phone: true,
+        role: true,
+        isActive: true,
+        villa: { select: { villaNumber: true } },
+      },
+      orderBy: [{ role: "asc" }, { name: "asc" }],
+    }),
+    loadAppUsageSignals(db, societyId, since),
+    db.user.groupBy({
+      by: ["role"],
+      where: { societyId, role: { in: APP_USER_ROLES } },
+      _count: true,
+    }),
+  ]);
+
+  const breakdown = buildRoleEngagementBreakdown(allUsers, usageSignals);
+  const { lastSeenAt } = usageSignals;
+  const totalByRole = new Map(accountsByRole.map((r) => [r.role, r._count]));
+  const statsByRole = new Map(breakdown.byRole.map((r) => [r.role, r]));
+
+  const roles = ROLE_DISPLAY_ORDER.map((role) => {
+    const row = statsByRole.get(role)!;
+    const bucket = breakdown.usersByRole[role];
+    const totalInSociety = totalByRole.get(role) ?? 0;
+    return {
+      ...row,
+      totalInSociety,
+      usingApp: row.active,
+      notUsingAppUsers: {
+        neverUsed: mapEngagementUsersWithLastSeen(
+          bucket?.neverUsed ?? [],
+          lastSeenAt,
+          listLimit,
+        ),
+        dormant: mapEngagementUsersWithLastSeen(bucket?.dormant ?? [], lastSeenAt, listLimit),
+      },
+      usingAppUsers: mapEngagementUsersWithLastSeen(bucket?.active ?? [], lastSeenAt, listLimit),
+      deactivatedUsers: mapEngagementUsersWithLastSeen(
+        bucket?.deactivated ?? [],
+        lastSeenAt,
+        listLimit,
+      ),
+      listCounts: {
+        usingApp: bucket?.active.length ?? 0,
+        neverUsed: bucket?.neverUsed.length ?? 0,
+        dormant: bucket?.dormant.length ?? 0,
+        deactivated: bucket?.deactivated.length ?? 0,
+      },
+    };
+  });
+
+  return {
+    period: { days, startDate: since.toISOString(), endDate: new Date().toISOString() },
+    meta: {
+      societyId,
+      totalUsersInDatabase: allUsers.length,
+      source: "User table scoped by societyId — not estimated.",
+    },
+    totals: {
+      ...breakdown.totals,
+      totalUsersInDatabase: allUsers.length,
+      accountsByRole: accountsByRole.map((r) => ({
+        role: r.role,
+        label: ROLE_ADOPTION_LABELS[r.role] ?? r.role,
+        count: r._count,
+      })),
+    },
+    roles,
+    dataSources: {
+      custom: "Every row loaded from User table for this society (name, email, phone, villa, role).",
+      firebase:
+        "Filter Firebase Analytics by user_role for engagement trends across the whole app.",
     },
   };
 }

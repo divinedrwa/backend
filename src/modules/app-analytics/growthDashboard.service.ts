@@ -5,6 +5,7 @@ import { startOfLocalDayDaysAgo } from "../../lib/societyTime";
 import {
   ANALYTICS_DATA_SOURCES,
   BUSINESS_ACTION_CATALOG,
+  FIREBASE_FREE_TIER_METRICS,
   FIREBASE_MIRRORED_EVENTS,
   type GrowthPillar,
 } from "./analyticsCatalog";
@@ -13,6 +14,7 @@ import {
   getAppAnalyticsErrors,
   getAppAnalyticsFlows,
   getAppAnalyticsInsights,
+  getAppAnalyticsRoleAdoption,
   getAppAnalyticsSummary,
 } from "./appAnalytics.service";
 
@@ -48,11 +50,12 @@ function pct(n: number, d: number): number {
 export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, days: number) {
   const since = startOfLocalDayDaysAgo(days);
 
-  const [summary, insights, flowsPayload, errorsPayload] = await Promise.all([
+  const [summary, insights, flowsPayload, errorsPayload, roleAdoption] = await Promise.all([
     getAppAnalyticsSummary(db, societyId, days),
     getAppAnalyticsInsights(db, societyId, days),
     getAppAnalyticsFlows(db, societyId, days),
     getAppAnalyticsErrors(db, societyId, days),
+    getAppAnalyticsRoleAdoption(db, societyId, days, 0),
   ]);
 
   const engagement = summary.engagement;
@@ -243,6 +246,8 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
     period: { days, startDate: since.toISOString(), endDate: new Date().toISOString() },
     dataSources: ANALYTICS_DATA_SOURCES,
     firebaseMirroredEvents: FIREBASE_MIRRORED_EVENTS,
+    firebaseFreeMetrics: FIREBASE_FREE_TIER_METRICS,
+    roleAdoption: roleAdoption.roles,
     healthScore,
     kpis,
     funnel,

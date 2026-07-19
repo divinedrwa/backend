@@ -12,10 +12,12 @@ import {
   getAppAnalyticsFlows,
   getAppAnalyticsInsights,
   getAppAnalyticsSummary,
+  getAppAnalyticsRoleAdoption,
   getAppAnalyticsTopScreens,
   getAppAnalyticsUserEngagement,
   recordAnalyticsEvent,
   recordAnalyticsEventBatch,
+  resolveAnalyticsListLimit,
   touchAnalyticsSession,
 } from "./appAnalytics.service";
 import {
@@ -343,6 +345,21 @@ router.get("/active-users", requireRole(...ADMIN_READ_ROLES), async (req, res, n
   }
 });
 
+router.get("/role-adoption", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const limit = resolveAnalyticsListLimit(req.query.limit, 0);
+    const adoption = await getAppAnalyticsRoleAdoption(prisma, societyId, days, limit);
+    return res.json({ adoption });
+  } catch (error) {
+    next(error);
+  }
+});
+
 router.get("/user-engagement", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
   try {
     const societyId = tenantSocietyId(req);
@@ -350,7 +367,7 @@ router.get("/user-engagement", requireRole(...ADMIN_READ_ROLES), async (req, res
       return res.status(403).json({ message: "Tenant context required" });
     }
     const days = parseDays(req.query.days);
-    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "50"), 10) || 50, 1), 200);
+    const limit = resolveAnalyticsListLimit(req.query.limit, 0);
     const engagement = await getAppAnalyticsUserEngagement(prisma, societyId, days, limit);
     return res.json({ engagement });
   } catch (error) {
