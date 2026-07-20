@@ -19,6 +19,7 @@ import {
   syncVillaBillingCyclesFromSnapshots,
 } from "../billing-cycle/billing-collection-link";
 import {
+  loadAppVisibleBillingCyclePeriodKeys,
   loadBillingCyclePeriodKeys,
   maintenanceCollectionBackedByBillingCycleWhere,
   isCollectionCycleBackedByBillingCycle,
@@ -2328,7 +2329,8 @@ router.post("/send-dues-reminders", async (req, res, next) => {
 });
 
 // GET /api/maintenance-management/outstanding-dues
-// All villas with any pending maintenance payment across all cycles.
+// All villas with pending maintenance for published, app-visible billing cycles only.
+// Draft/unpublished cycles are excluded (same scope as resident outstanding-dues).
 router.get("/outstanding-dues", async (req, res, next) => {
   try {
     const societyId = tenantSocietyId(req);
@@ -2336,7 +2338,7 @@ router.get("/outstanding-dues", async (req, res, next) => {
       return res.status(403).json({ message: "Tenant context required" });
     }
 
-    const periodKeys = await loadBillingCyclePeriodKeys(prisma, societyId);
+    const periodKeys = await loadAppVisibleBillingCyclePeriodKeys(prisma, societyId);
 
     const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
       where: {
