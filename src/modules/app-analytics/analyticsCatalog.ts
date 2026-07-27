@@ -100,6 +100,112 @@ export const BUSINESS_ACTION_LABELS: Record<string, string> = Object.fromEntries
   BUSINESS_ACTION_CATALOG.map((e) => [e.id, e.label]),
 );
 
+/** Guard FLOW_COMPLETE ids → business language, mirrors `GuardFlowTelemetry.start(...)` call sites in divine_app. */
+export const GUARD_FLOW_CATALOG: CatalogEntry[] = [
+  {
+    id: "guard_check_in",
+    label: "Guard check-in",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard started/ended a duty shift.",
+  },
+  {
+    id: "guard_vehicle_entry",
+    label: "Vehicle entry logged",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard logged a vehicle entering the society.",
+  },
+  {
+    id: "guard_delivery_entry",
+    label: "Delivery entry logged",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard logged a delivery partner entry.",
+  },
+  {
+    id: "guard_notify_visitor_at_gate",
+    label: "Visitor notified to resident",
+    pillar: "communication",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard notified a resident that a visitor is at the gate.",
+  },
+  {
+    id: "guard_call_resident",
+    label: "Called resident",
+    pillar: "communication",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard placed an in-app call to a resident to confirm a visitor.",
+  },
+  {
+    id: "guard_allow_entry",
+    label: "Visitor entry allowed",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard allowed a visitor entry after approval.",
+  },
+  {
+    id: "guard_deny_entry",
+    label: "Visitor entry denied",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard denied a visitor entry.",
+  },
+  {
+    id: "guard_admit_preapproved_from_approval",
+    label: "Pre-approved visitor admitted",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard admitted a visitor from a resident's pre-approval list.",
+  },
+  {
+    id: "guard_incident_report",
+    label: "Incident reported",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard filed a security/incident report.",
+  },
+  {
+    id: "guard_soc_broadcast",
+    label: "SOS broadcast sent",
+    pillar: "operations",
+    firebaseEvent: "guard_flow_complete",
+    description: "Guard broadcast an SOS/emergency alert to the society.",
+  },
+];
+
+export const GUARD_FLOW_LABELS: Record<string, string> = Object.fromEntries(
+  GUARD_FLOW_CATALOG.map((e) => [e.id, e.label]),
+);
+
+/** Screen path fragments → business language, for admin Feature Analytics / top-screens views. */
+export const SCREEN_LABEL_OVERRIDES: Record<string, string> = {
+  "pre-approve-visitor": "Pre-approve visitor",
+  "visitor-approval": "Visitor approval",
+  "check-in": "Guard check-in",
+  maintenance: "Maintenance",
+  complaints: "Complaints",
+  notices: "Notices",
+  polls: "Polls",
+  amenities: "Amenities",
+  parcels: "Parcels",
+  visitors: "Visitors",
+  "gate-utilities": "Gate utilities",
+  incidents: "Incidents",
+  patrols: "Patrols",
+  sos: "SOS",
+};
+
+/** Best-effort business label for a raw event/action/flow id — used when an id isn't in a specific catalog. */
+export function humanizeEventId(id: string): string {
+  return BUSINESS_ACTION_LABELS[id] ??
+    GUARD_FLOW_LABELS[id] ??
+    id
+      .replace(/^(admin|resident|guard)_/, "")
+      .replace(/_/g, " ")
+      .replace(/\b\w/g, (c) => c.toUpperCase());
+}
+
 export const FIREBASE_FREE_TIER_METRICS = [
   {
     id: "dau_wau_mau",

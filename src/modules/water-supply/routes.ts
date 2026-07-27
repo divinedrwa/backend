@@ -92,7 +92,7 @@ router.post("/toggle", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(
     return res.status(201).json({
       event,
       message: turnedOn
-        ? "Water supply turned ON. Residents have been notified."
+        ? "Water supply turned ON. Residents have been notified. If still ON after 30 minutes, you and admins will get a reminder to check the tank."
         : "Water supply turned OFF. Admins have been notified.",
     });
   } catch (error) {

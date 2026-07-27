@@ -12,7 +12,7 @@ import {
   loadAnalyticsUserSnapshot,
   mergeUserIntoProperties,
 } from "./userSnapshot";
-import { BUSINESS_ACTION_LABELS } from "./analyticsCatalog";
+import { BUSINESS_ACTION_LABELS, humanizeEventId } from "./analyticsCatalog";
 
 type Db = typeof prisma | Prisma.TransactionClient;
 
@@ -940,6 +940,7 @@ export async function getAppAnalyticsInsights(db: Db, societyId: string, days: n
       wauMauPct: mau > 0 ? Math.round((wau / mau) * 100) : 0,
     },
     retention: {
+      d1Pct: retentionPct(startOfLocalDayDaysAgo(1), todayStart),
       d7Pct: retentionPct(weekStart, weekStart),
       d30Pct: retentionPct(monthStart, weekStart),
     },
@@ -982,6 +983,7 @@ export async function getAppAnalyticsFlows(db: Db, societyId: string, days: numb
     flows: [...map.values()]
       .map((f) => ({
         flowId: f.flowId,
+        label: humanizeEventId(f.flowId),
         count: f.count,
         successRate: f.count > 0 ? Math.round((f.successCount / f.count) * 100) : 0,
         avgDurationMs: f.count > 0 ? Math.round(f.totalDurationMs / f.count) : 0,

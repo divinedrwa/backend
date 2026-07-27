@@ -1906,6 +1906,9 @@ model WaterSupplyEvent {
   turnedOn    Boolean
   reason      String?
   createdAt   DateTime @default(now())
+  /// Set when the "still ON after N minutes" push was sent, or when the
+  /// reminder was suppressed because a newer ON/OFF event superseded this one.
+  stillOnReminderSentAt DateTime?
 
   society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
   gate    Gate    @relation(fields: [gateId], references: [id], onDelete: Cascade)
@@ -1914,6 +1917,7 @@ model WaterSupplyEvent {
   @@index([gateId])
   @@index([createdAt])
   @@index([societyId, gateId, createdAt])
+  @@index([turnedOn, stillOnReminderSentAt, createdAt])
 }
 
 model WaterSupplyRequest {

@@ -14,6 +14,7 @@ import { NotificationService } from "./services/notification.service";
 import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
 import { processEscalations } from "./services/sos-coordinator";
+import { processWaterStillOnReminders } from "./services/waterStillOnReminder.service";
 
 validateProductionEnv();
 
@@ -177,4 +178,30 @@ cron.schedule(
     }
   },
   { timezone: "Etc/UTC" }
+);
+
+/**
+ * Every minute: if a water motor has been ON for ≥30 minutes (configurable via
+ * WATER_STILL_ON_REMINDER_MINUTES) with no newer OFF/ON, push the actor + admins
+ * to check the tank and switch the motor OFF.
+ */
+cron.schedule(
+  "* * * * *",
+  async () => {
+    try {
+      const ran = await withAdvisoryLock(AdvisoryLockKeys.waterStillOnReminder, async () => {
+        return processWaterStillOnReminders();
+      });
+      if (ran === null) {
+        logger.debug("[water-still-on] lock not acquired; another replica owns this tick");
+        return;
+      }
+      if (ran.sent > 0 || ran.suppressed > 0) {
+        logger.info(ran, "[water-still-on] tick complete");
+      }
+    } catch (e) {
+      logger.error({ err: e }, "[water-still-on] cron failed");
+    }
+  },
+  { timezone: "Etc/UTC" },
 );

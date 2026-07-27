@@ -67,4 +67,5 @@ export async function withAdvisoryLock<T>(
  */
 export const AdvisoryLockKeys = {
   billingCycleHourly: 4242_0001,
+  waterStillOnReminder: 4242_0002,
 } as const;

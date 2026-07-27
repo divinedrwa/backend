@@ -26,6 +26,36 @@ export const WATER_SUPPLY_ON_NOTIFICATION = {
   body: "Water supply will begin shortly.",
 } as const;
 
+/** Society roles that receive the "motor still ON" reminder (alongside the actor). */
+export const WATER_STILL_ON_NOTIFY_ROLES: UserRole[] = [
+  UserRole.ADMIN,
+  UserRole.RESIDENT_CUM_ADMIN,
+];
+
+/** Default delay before the still-ON reminder (minutes). Overridable via WATER_STILL_ON_REMINDER_MINUTES. */
+export const WATER_STILL_ON_REMINDER_MINUTES_DEFAULT = 30;
+
+export function waterStillOnReminderMinutes(): number {
+  const raw = process.env.WATER_STILL_ON_REMINDER_MINUTES;
+  const parsed = raw ? Number.parseInt(raw, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 1 && parsed <= 24 * 60) return parsed;
+  return WATER_STILL_ON_REMINDER_MINUTES_DEFAULT;
+}
+
+export function buildWaterStillOnReminder(params: {
+  gateName?: string | null;
+  minutesOn: number;
+}): { title: string; body: string; type: string } {
+  const gateLabel = params.gateName?.trim() || "the gate";
+  return {
+    title: "Water motor still ON",
+    body:
+      `Water supply at ${gateLabel} has been ON for ${params.minutesOn}+ minutes. ` +
+      `Check if the tank is full, then switch the motor OFF.`,
+    type: "WATER_SUPPLY_STILL_ON",
+  };
+}
+
 /** Society roles notified when water is turned OFF (admins only — not residents). */
 export const WATER_SUPPLY_OFF_NOTIFY_ROLES: UserRole[] = [
   UserRole.ADMIN,
