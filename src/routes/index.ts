@@ -77,6 +77,7 @@ import residentExpenseRoutes from "../modules/residents/expenses";
 import residentSpecialProjectRoutes from "../modules/residents/special-projects";
 import residentPaymentDisputeRoutes from "../modules/residents/payment-disputes";
 import residentWaterRequestRoutes from "../modules/residents/water-requests";
+import residentIncidentRoutes from "../modules/residents/incidents";
 
 // NEW: Guard Mobile APIs
 import guardRoutes from "../modules/guards/routes";
@@ -211,6 +212,7 @@ router.use("/residents", residentExpenseRoutes); // Society expenses (read-only)
 router.use("/residents", residentSpecialProjectRoutes); // Special projects
 router.use("/residents", residentPaymentDisputeRoutes); // Payment disputes (G5)
 router.use("/residents", residentWaterRequestRoutes); // Water supply requests
+router.use("/residents", residentIncidentRoutes); // Read-only incident log
 router.use("/residents", residentPaymentMethodsRouter); // Payment methods
 
 // Guard Mobile APIs

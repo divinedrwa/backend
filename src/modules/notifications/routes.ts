@@ -204,6 +204,26 @@ router.patch("/:id/read", async (req, res, next) => {
   }
 });
 
+/** DELETE /api/notifications/:id — Dismiss one notification from the caller's inbox. */
+router.delete("/:id", async (req, res, next) => {
+  try {
+    const { userId, societyId } = req.auth!;
+    const { id } = req.params;
+
+    const deleted = await prisma.userNotification.deleteMany({
+      where: { id, userId, societyId },
+    });
+
+    if (deleted.count === 0) {
+      return res.status(404).json({ message: "Notification not found" });
+    }
+
+    return res.json({ ok: true });
+  } catch (error) {
+    next(error);
+  }
+});
+
 /** POST /api/notifications/read-all — Mark all as read for current user. */
 router.post("/read-all", async (req, res, next) => {
   try {

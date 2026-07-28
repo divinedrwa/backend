@@ -56,7 +56,7 @@ router.post("/entry", requireAuth, requireRole("GUARD", "ADMIN"), validateBody(l
       category: NotificationCategory.GARBAGE,
       title: "Garbage collection",
       body: `Collector arrived at ${event.gate?.name ?? "the gate"}. Please prepare your garbage.`,
-      data: { eventId: event.id, gateId },
+      data: { type: "GARBAGE_COLLECTOR_ARRIVED", eventId: event.id, gateId },
     }).catch((err) => logger.error({ err }, "[notifications] garbage push failed"));
 
     return res.status(201).json({
