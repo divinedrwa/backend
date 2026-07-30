@@ -3,6 +3,11 @@ import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import {
+  summarizeVisitorsToday,
+  visitorIsCheckedOut,
+  visitorIsInside,
+} from "../../lib/visitorLifecycle";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { UserRole, NotificationCategory, VisitorStatus } from "@prisma/client";
@@ -311,7 +316,8 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         purpose: purpose ?? "",
         vehicleNumber,
         photo,
-        checkInTime: new Date(),
+        checkInTime: now,
+        checkInAt: now,
         status: awaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN" as VisitorStatus,
         createdBy: userId,
       },
@@ -407,7 +413,7 @@ router.post("/visitor-checkout", requireRole(UserRole.GUARD), validateBody(check
       return res.status(404).json({ message: "Visitor not found" });
     }
 
-    if (visitor.checkOutTime) {
+    if (visitorIsCheckedOut(visitor)) {
       const updated = await fetchGuardVisitorDetail(visitorId);
       return res.json({
         message: "Visitor already checked out",
@@ -496,16 +502,11 @@ router.get(["/visitors-today", "/my-visitors"], requireRole(UserRole.GUARD), asy
       take: 1000,
     });
 
-    const checkedIn = visitors.filter((v) => !v.checkOutTime);
-    const checkedOut = visitors.filter((v) => v.checkOutTime);
+    const summary = summarizeVisitorsToday(visitors);
 
     return res.json({
       visitors,
-      summary: {
-        total: visitors.length,
-        checkedIn: checkedIn.length,
-        checkedOut: checkedOut.length,
-      },
+      summary,
     });
   } catch (error) {
     next(error);
@@ -554,7 +555,7 @@ router.post(
         });
       }
 
-      if (visitor.checkOutTime) {
+      if (visitorIsCheckedOut(visitor)) {
         return res.status(400).json({ message: "Visitor already checked out" });
       }
 

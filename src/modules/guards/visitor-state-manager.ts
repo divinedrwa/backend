@@ -346,8 +346,14 @@ export async function transitionVisitorState(
       status: transition.toStatus,
       updatedAt: transition.timestamp,
       // Set timestamps based on status
-      ...(transition.toStatus === VisitorStatus.CHECKED_IN && { checkInAt: transition.timestamp }),
-      ...(transition.toStatus === VisitorStatus.CHECKED_OUT && { checkOutAt: transition.timestamp }),
+      ...(transition.toStatus === VisitorStatus.CHECKED_IN && {
+        checkInAt: transition.timestamp,
+        checkInTime: transition.timestamp,
+      }),
+      ...(transition.toStatus === VisitorStatus.CHECKED_OUT && {
+        checkOutAt: transition.timestamp,
+        checkOutTime: transition.timestamp,
+      }),
     },
   });
   if (updateResult.count === 0) {
@@ -593,6 +599,7 @@ export async function admitPreApprovedVisitor(
       societyId: params.societyId,
       gateId: params.gateId,
       checkInAt: now,
+      checkInTime: now,
       checkedInByGuardId: params.guardUserId,
       preApprovedId: preApproved.id,
     },

@@ -5,6 +5,12 @@ import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import {
+  localDayRange,
+  summarizeVisitorsToday,
+  visitorIsCheckedOut,
+  visitorIsInside,
+} from "../../lib/visitorLifecycle";
+import {
   findResidentVisitorVillaRow,
   residentVisitorVillaVisitWhere,
   visitorApprovalIncludeForResident,
@@ -144,7 +150,7 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
         const today = new Date().toDateString();
         return new Date(v.checkInTime).toDateString() === today;
       }).length,
-      checkedIn: visitors.filter((v) => !v.checkOutTime).length,
+      checkedIn: visitors.filter((v) => visitorIsInside(v)).length,
     };
 
     return res.json({ visitors, summary, ...paginationMeta(total, visitors.length, pagination) });
@@ -173,11 +179,7 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
       ...(user.unitId ? { unitId: user.unitId } : {}),
     };
 
-    // Get today's date range
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { start: today, end: tomorrow } = localDayRange();
 
     const visitors = await prisma.visitor.findMany({
       where: {
@@ -185,10 +187,10 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
         villaVisits: {
           some: visitMatch,
         },
-        checkInTime: {
-          gte: today,
-          lt: tomorrow,
-        },
+        OR: [
+          { checkInTime: { gte: today, lt: tomorrow } },
+          { checkInAt: { gte: today, lt: tomorrow } },
+        ],
       },
       include: {
         gate: {
@@ -200,16 +202,11 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
       orderBy: { checkInTime: "desc" },
     });
 
-    const checkedIn = visitors.filter((v) => !v.checkOutTime);
-    const checkedOut = visitors.filter((v) => v.checkOutTime);
+    const summary = summarizeVisitorsToday(visitors);
 
     return res.json({
       visitors,
-      summary: {
-        total: visitors.length,
-        checkedIn: checkedIn.length,
-        checkedOut: checkedOut.length,
-      },
+      summary,
     });
   } catch (error) {
     next(error);
