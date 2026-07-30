@@ -35,6 +35,10 @@ import {
   mapPreApprovedForClient,
   mapPreApprovedForMobile,
 } from "../../services/preApprovedVisitor.service";
+import {
+  revokePreApprovedPublicLink,
+  listPreApprovedPassViews,
+} from "../../services/visitorPassAudit.service";
 
 const router = Router();
 
@@ -311,6 +315,69 @@ router.post(
         societyId,
         role,
         actorVillaId: villaId,
+      });
+      return res.json(result);
+    } catch (error) {
+      const statusCode =
+        error && typeof error === "object" && "statusCode" in error
+          ? Number((error as { statusCode: number }).statusCode)
+          : undefined;
+      if (statusCode) {
+        return res.status(statusCode).json({
+          message: error instanceof Error ? error.message : "Request failed",
+        });
+      }
+      next(error);
+    }
+  },
+);
+
+// POST /api/residents/pre-approved/:id/revoke-link — invalidate shared browser URL (pass stays active)
+router.post(
+  "/pre-approved/:id/revoke-link",
+  preApproveRateLimiter,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId, role, villaId } = req.auth!;
+      await revokePreApprovedPublicLink(prisma, {
+        id: req.params.id,
+        societyId,
+        role,
+        actorVillaId: villaId,
+      });
+      return res.json({ message: "Share link revoked" });
+    } catch (error) {
+      const statusCode =
+        error && typeof error === "object" && "statusCode" in error
+          ? Number((error as { statusCode: number }).statusCode)
+          : undefined;
+      if (statusCode) {
+        return res.status(statusCode).json({
+          message: error instanceof Error ? error.message : "Request failed",
+        });
+      }
+      next(error);
+    }
+  },
+);
+
+// GET /api/residents/pre-approved/:id/pass-views — audit of public pass opens
+router.get(
+  "/pre-approved/:id/pass-views",
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId, role, villaId } = req.auth!;
+      const limit = req.query.limit
+        ? Number.parseInt(String(req.query.limit), 10)
+        : undefined;
+      const result = await listPreApprovedPassViews(prisma, {
+        id: req.params.id,
+        societyId,
+        role,
+        actorVillaId: villaId,
+        limit,
       });
       return res.json(result);
     } catch (error) {

@@ -29,7 +29,7 @@ router.get("/my-parcels", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
         societyId,
         ...(status && { status: status as ParcelStatus }),
       },
-      orderBy: { receivedAt: "desc" },
+      orderBy: [{ leftAtGate: "desc" }, { receivedAt: "desc" }],
       take: 50,
     });
 

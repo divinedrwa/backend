@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   defaultValidUntilForVisitorType,
+  expectedCheckoutAtForVisitorType,
   visitorTypeLabel,
   VISITOR_TYPE_DEFAULT_VALIDITY_HOURS,
+  VISITOR_TYPE_OVERSTAY_MINUTES,
 } from "./visitorTypePresets";
 
 describe("visitorTypePresets", () => {
@@ -26,5 +28,12 @@ describe("visitorTypePresets", () => {
   it("visitorTypeLabel covers cab", () => {
     assert.equal(visitorTypeLabel("CAB"), "Cab");
     assert.equal(visitorTypeLabel("GUEST"), "Guest");
+  });
+
+  it("expectedCheckoutAtForVisitorType uses overstay minutes", () => {
+    assert.equal(VISITOR_TYPE_OVERSTAY_MINUTES.DELIVERY, 45);
+    const checkIn = new Date("2026-07-29T10:00:00.000Z");
+    const checkout = expectedCheckoutAtForVisitorType("DELIVERY", checkIn);
+    assert.equal(checkout.toISOString(), "2026-07-29T10:45:00.000Z");
   });
 });

@@ -51,3 +51,23 @@ export function visitorTypeLabel(visitorType: string | undefined | null): string
   const key = (visitorType ?? "GUEST").trim();
   return VISITOR_TYPE_LABEL[key] ?? key.replace(/_/g, " ");
 }
+
+/** Minutes inside society before overstay alert (from check-in). */
+export const VISITOR_TYPE_OVERSTAY_MINUTES: Partial<Record<VisitorType, number>> = {
+  DELIVERY: 45,
+  CAB: 30,
+  SERVICE_PROVIDER: 120,
+  GUEST: 240,
+  VENDOR: 180,
+  CONTRACTOR: 180,
+  OTHER: 240,
+};
+
+export function expectedCheckoutAtForVisitorType(
+  visitorType: VisitorType | string | undefined | null,
+  checkInAt: Date = new Date(),
+): Date {
+  const key = (visitorType ?? "GUEST") as VisitorType;
+  const minutes = VISITOR_TYPE_OVERSTAY_MINUTES[key] ?? 240;
+  return new Date(checkInAt.getTime() + minutes * 60 * 1000);
+}

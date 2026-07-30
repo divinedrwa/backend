@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { expectedCheckoutAtForVisitorType } from "../../lib/visitorTypePresets";
 import { notifyUsers } from "../../services/notification.service";
 
 /**
@@ -340,6 +341,13 @@ export async function transitionVisitorState(
   if (transition.fromStatus !== null) {
     guardedWhere.status = transition.fromStatus;
   }
+  const existingVisitor =
+    transition.toStatus === VisitorStatus.CHECKED_IN
+      ? await tx.visitor.findUnique({
+          where: { id: transition.visitorId },
+          select: { visitorType: true },
+        })
+      : null;
   const updateResult = await tx.visitor.updateMany({
     where: guardedWhere,
     data: {
@@ -349,6 +357,11 @@ export async function transitionVisitorState(
       ...(transition.toStatus === VisitorStatus.CHECKED_IN && {
         checkInAt: transition.timestamp,
         checkInTime: transition.timestamp,
+        expectedCheckoutAt: expectedCheckoutAtForVisitorType(
+          existingVisitor?.visitorType,
+          transition.timestamp,
+        ),
+        overstayNotifiedAt: null,
       }),
       ...(transition.toStatus === VisitorStatus.CHECKED_OUT && {
         checkOutAt: transition.timestamp,
@@ -600,6 +613,7 @@ export async function admitPreApprovedVisitor(
       gateId: params.gateId,
       checkInAt: now,
       checkInTime: now,
+      expectedCheckoutAt: expectedCheckoutAtForVisitorType(preApproved.visitorType, now),
       checkedInByGuardId: params.guardUserId,
       preApprovedId: preApproved.id,
     },

@@ -25,13 +25,14 @@ const logParcelSchema = z.object({
   senderName: z.string().trim().optional(),
   description: z.string().trim().optional(),
   photoUrl: z.string().url().optional(),
+  leftAtGate: z.boolean().optional(),
 });
 
 // POST /api/guards/parcel-received - Log parcel
 router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logParcelSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { villaId, deliveryService, trackingNumber, senderName, description, photoUrl } = req.body;
+    const { villaId, deliveryService, trackingNumber, senderName, description, photoUrl, leftAtGate } = req.body;
 
     // Verify villa exists
     const villa = await prisma.villa.findFirst({
@@ -51,6 +52,7 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
         senderName,
         description: normalizeParcelDescription(description),
         photoUrl,
+        leftAtGate: leftAtGate === true,
         receivedAt: new Date(),
         status: ParcelStatus.RECEIVED, // Use enum
       },
@@ -76,14 +78,22 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
           select: { id: true },
         });
         if (residents.length > 0) {
+          const atGate = leftAtGate === true;
           await notifyUsers(
             residents.map((r) => r.id),
             {
-              title: "New parcel received",
-              body: `A parcel has been received for villa ${villa.villaNumber}.${description ? ` (${description})` : ""}`,
-              data: { type: "PARCEL_RECEIVED", parcelId: parcel.id, villaId },
+              title: atGate ? "Parcel left at gate" : "New parcel received",
+              body: atGate
+                ? `A ${deliveryService ?? "delivery"} parcel is waiting at the gate for villa ${villa.villaNumber}. Please collect it.`
+                : `A parcel has been received at security for villa ${villa.villaNumber}.${description ? ` (${description})` : ""}`,
+              data: {
+                type: atGate ? "PARCEL_LEFT_AT_GATE" : "PARCEL_RECEIVED",
+                parcelId: parcel.id,
+                villaId,
+                leftAtGate: atGate ? "true" : "false",
+              },
             },
-            { category: NotificationCategory.SYSTEM },
+            { category: NotificationCategory.PARCEL },
           );
         }
       } catch {
@@ -117,7 +127,7 @@ router.get("/parcels-pending", requireRole(UserRole.GUARD), async (req, res, nex
           },
         },
       },
-      orderBy: { receivedAt: "asc" }, // Oldest first
+      orderBy: [{ leftAtGate: "desc" }, { receivedAt: "asc" }], // Gate pickups first
     });
 
     return res.json({

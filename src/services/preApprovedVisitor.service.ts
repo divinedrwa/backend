@@ -265,7 +265,7 @@ export async function deactivatePreApprovedVisitor(
 
   await db.preApprovedVisitor.update({
     where: { id: p.id },
-    data: { isActive: false },
+    data: { isActive: false, publicPassTokenHash: null, publicPassIssuedAt: null },
   });
 }
 

@@ -1053,6 +1053,9 @@ model Visitor {
   /// Link back to the pre-approval that was consumed to admit this visitor (audit trail).
   /// NOT unique: a recurring pre-approval pass legitimately admits many visitors.
   preApprovedId   String?
+  /// Expected checkout time for overstay alerts (set at check-in from visitor type).
+  expectedCheckoutAt DateTime?
+  overstayNotifiedAt DateTime?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
@@ -1208,6 +1211,8 @@ model Parcel {
   description     String
   photoUrl        String?
   status          ParcelStatus @default(RECEIVED)
+  /// Courier left parcel at the gate for resident pickup (vs desk handoff).
+  leftAtGate      Boolean      @default(false)
   receivedAt      DateTime     @default(now())
   collectedAt     DateTime?
   deliveredAt     DateTime?    // Alias for mobile API compatibility
@@ -1533,6 +1538,7 @@ model PreApprovedVisitor {
   /// The raw bearer token is returned only when a link is issued and is never stored.
   publicPassTokenHash String?   @unique @db.VarChar(64)
   publicPassIssuedAt  DateTime?
+  passViews           PreApprovedPassView[]
   /// Recurring pass: allows multiple uses within the validity window.
   isRecurring  Boolean     @default(false)
   /// Max uses for recurring pass. NULL = unlimited within validity period.
@@ -1555,6 +1561,19 @@ model PreApprovedVisitor {
   @@index([isActive])
   @@index([approvedById])
   @@index([societyId, otp, isActive, isUsed])
+}
+
+/// Append-only audit when someone opens the public browser pass page.
+model PreApprovedPassView {
+  id              String   @id @default(cuid())
+  preApprovedId   String
+  viewedAt        DateTime @default(now())
+  ipHash          String?  @db.VarChar(64)
+  userAgent       String?  @db.VarChar(512)
+
+  preApproved PreApprovedVisitor @relation(fields: [preApprovedId], references: [id], onDelete: Cascade)
+
+  @@index([preApprovedId, viewedAt])
 }
 
 enum PollStatus {

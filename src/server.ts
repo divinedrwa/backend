@@ -15,6 +15,7 @@ import { applyLateFees } from "./services/lateFee.service";
 import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./services/complaintSla.service";
 import { processEscalations } from "./services/sos-coordinator";
 import { processWaterStillOnReminders } from "./services/waterStillOnReminder.service";
+import { processVisitorOverstayAlerts } from "./services/visitorPassAudit.service";
 
 validateProductionEnv();
 
@@ -201,6 +202,31 @@ cron.schedule(
       }
     } catch (e) {
       logger.error({ err: e }, "[water-still-on] cron failed");
+    }
+  },
+  { timezone: "Etc/UTC" },
+);
+
+/**
+ * Every 5 minutes: alert residents and guards when a checked-in visitor
+ * exceeds the expected checkout window for their visitor type.
+ */
+cron.schedule(
+  "*/5 * * * *",
+  async () => {
+    try {
+      const ran = await withAdvisoryLock(AdvisoryLockKeys.visitorOverstayReminder, async () => {
+        return processVisitorOverstayAlerts();
+      });
+      if (ran === null) {
+        logger.debug("[visitor-overstay] lock not acquired; another replica owns this tick");
+        return;
+      }
+      if (ran.notified > 0) {
+        logger.info(ran, "[visitor-overstay] tick complete");
+      }
+    } catch (e) {
+      logger.error({ err: e }, "[visitor-overstay] cron failed");
     }
   },
   { timezone: "Etc/UTC" },

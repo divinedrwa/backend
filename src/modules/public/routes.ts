@@ -11,6 +11,7 @@ import {
   isValidVisitorPublicPassToken,
   resolveVisitorPublicPassStatus,
 } from "../../lib/visitorPublicPass";
+import { recordPreApprovedPassView } from "../../services/visitorPassAudit.service";
 import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
@@ -189,6 +190,7 @@ router.get("/visitor-pass/:token", async (req, res, next) => {
         publicPassTokenHash: hashVisitorPublicPassToken(rawToken),
       },
       select: {
+        id: true,
         name: true,
         visitorType: true,
         purpose: true,
@@ -221,6 +223,8 @@ router.get("/visitor-pass/:token", async (req, res, next) => {
     if (!pass) {
       return res.status(404).json({ message: "Visitor pass not found" });
     }
+
+    recordPreApprovedPassView(prisma, pass.id, req);
 
     const status = resolveVisitorPublicPassStatus(
       {

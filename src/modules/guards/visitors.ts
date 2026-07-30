@@ -23,6 +23,7 @@ import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
+import { expectedCheckoutAtForVisitorType } from "../../lib/visitorTypePresets";
 import {
   hashVisitorPublicPassToken,
   isValidVisitorPublicPassToken,
@@ -305,7 +306,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       return res.status(400).json({ message: "No active shift found" });
     }
 
-    // Create visitor
+    const admittedNow = !awaitResidentApproval;
     const visitor = await prisma.visitor.create({
       data: {
         societyId,
@@ -318,6 +319,9 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         photo,
         checkInTime: now,
         checkInAt: now,
+        ...(admittedNow && {
+          expectedCheckoutAt: expectedCheckoutAtForVisitorType(visitorType, now),
+        }),
         status: awaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN" as VisitorStatus,
         createdBy: userId,
       },
