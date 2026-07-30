@@ -7,6 +7,9 @@ import { validateBody } from "../../middlewares/validate";
 import { BannerType, NotificationCategory, Prisma } from "@prisma/client";
 import { broadcastNoticeToAllResidents } from "../../services/notification.service";
 import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache";
+import { brandingImageMemory } from "../../lib/brandingImageUpload";
+import { uploadBannerImageBuffer } from "../../services/cloudinaryBanner";
+import { isCloudinaryConfigured } from "../../services/cloudinaryProfile";
 
 const router = Router();
 
@@ -195,6 +198,33 @@ router.get(
       next(error);
     }
   }
+);
+
+// POST /api/banners/upload-image — upload banner image to Cloudinary (Admin only)
+router.post(
+  "/upload-image",
+  requireRole("ADMIN"),
+  brandingImageMemory.single("image"),
+  async (req, res, next) => {
+    try {
+      if (!isCloudinaryConfigured()) {
+        return res.status(503).json({
+          message:
+            "Image upload is not configured. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.",
+        });
+      }
+      if (!req.file) {
+        return res.status(400).json({ message: "No image file provided" });
+      }
+      const imageUrl = await uploadBannerImageBuffer(
+        req.file.buffer,
+        req.auth!.societyId,
+      );
+      return res.json({ imageUrl, url: imageUrl });
+    } catch (error) {
+      next(error);
+    }
+  },
 );
 
 // GET /api/banners/:id - Get banner by ID (Admin only)
