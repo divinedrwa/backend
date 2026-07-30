@@ -64,7 +64,18 @@ const createBannerSchema = z.object({
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
   isActive: z.boolean().default(true),
-  actionUrl: z.string().url().optional(),
+  actionUrl: z
+    .string()
+    .trim()
+    .min(1)
+    .refine(
+      (v) =>
+        /^https?:\/\//i.test(v) ||
+        /^societyapp:\/\//i.test(v) ||
+        v.startsWith("/"),
+      { message: "Must be an https URL, societyapp:// link, or app path" },
+    )
+    .optional(),
 });
 
 const updateBannerSchema = z.object({
@@ -76,7 +87,18 @@ const updateBannerSchema = z.object({
   startDate: z.string().datetime().optional(),
   endDate: z.string().datetime().optional(),
   isActive: z.boolean().optional(),
-  actionUrl: z.string().url().optional(),
+  actionUrl: z
+    .string()
+    .trim()
+    .min(1)
+    .refine(
+      (v) =>
+        /^https?:\/\//i.test(v) ||
+        /^societyapp:\/\//i.test(v) ||
+        v.startsWith("/"),
+      { message: "Must be an https URL, societyapp:// link, or app path" },
+    )
+    .optional(),
 });
 
 router.use(requireAuth);
