@@ -7,6 +7,11 @@ import { requireAuth } from "../../middlewares/auth";
 import { isMissingColumnError } from "../../lib/schemaChecks";
 import { societyIsSandboxColumnExists } from "../../lib/sandboxSociety";
 import {
+  hashVisitorPublicPassToken,
+  isValidVisitorPublicPassToken,
+  resolveVisitorPublicPassStatus,
+} from "../../lib/visitorPublicPass";
+import {
   CURRENT_PRIVACY_VERSION,
   CURRENT_TERMS_VERSION,
   PRIVACY_URL,
@@ -160,6 +165,99 @@ router.get("/society-appearance/:societyId", async (req, res, next) => {
       if (!isMissingColumnError(error)) throw error;
       return res.json({ themeColors: null, splashUrl: null });
     }
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/public/visitor-pass/:token — browser pass for a pre-approved visitor.
+ *
+ * The URL token is a 256-bit bearer secret; only its SHA-256 hash is stored.
+ * This endpoint is read-only and cannot admit a visitor. Admission still
+ * requires an authenticated guard using the existing atomic gate flow.
+ */
+router.get("/visitor-pass/:token", async (req, res, next) => {
+  try {
+    const rawToken = req.params.token?.trim() ?? "";
+    if (!isValidVisitorPublicPassToken(rawToken)) {
+      return res.status(404).json({ message: "Visitor pass not found" });
+    }
+
+    const pass = await prisma.preApprovedVisitor.findUnique({
+      where: {
+        publicPassTokenHash: hashVisitorPublicPassToken(rawToken),
+      },
+      select: {
+        name: true,
+        visitorType: true,
+        purpose: true,
+        validFrom: true,
+        validUntil: true,
+        otp: true,
+        isActive: true,
+        isUsed: true,
+        isRecurring: true,
+        maxUses: true,
+        usedCount: true,
+        society: {
+          select: {
+            name: true,
+            status: true,
+            archivedAt: true,
+            splashUrl: true,
+            themeColors: true,
+          },
+        },
+        villa: {
+          select: {
+            villaNumber: true,
+            block: true,
+          },
+        },
+      },
+    });
+
+    if (!pass) {
+      return res.status(404).json({ message: "Visitor pass not found" });
+    }
+
+    const status = resolveVisitorPublicPassStatus(
+      {
+        ...pass,
+        isActive:
+          pass.isActive &&
+          pass.society.archivedAt == null &&
+          pass.society.status === SocietyStatus.ACTIVE,
+      },
+      new Date(),
+    );
+    const flatLabel = [pass.villa.block, pass.villa.villaNumber]
+      .map((part) => part?.trim())
+      .filter(Boolean)
+      .join(" · ");
+
+    res.setHeader("Cache-Control", "no-store, private");
+    res.setHeader("Referrer-Policy", "no-referrer");
+    return res.json({
+      pass: {
+        societyName: pass.society.name,
+        societySplashUrl: pass.society.splashUrl,
+        societyThemeColors: pass.society.themeColors,
+        visitorName: pass.name,
+        visitorType: pass.visitorType,
+        purpose: pass.purpose,
+        flatLabel,
+        validFrom: pass.validFrom,
+        validUntil: pass.validUntil,
+        status,
+        // Once invalid, do not continue displaying a usable gate credential.
+        otp:
+          status === "ACTIVE" || status === "NOT_YET_VALID"
+            ? pass.otp
+            : null,
+      },
+    });
   } catch (e) {
     next(e);
   }

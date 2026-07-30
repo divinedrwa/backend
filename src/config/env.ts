@@ -60,6 +60,16 @@ export function validateProductionEnv(): void {
     logger.warn("API_BASE_URL not set — payment gateway callback URLs may be misconfigured.");
   }
 
+  if (
+    !process.env.VISITOR_PASS_BASE_URL?.trim() &&
+    !process.env.FRONTEND_URL?.trim()
+  ) {
+    logger.warn(
+      "VISITOR_PASS_BASE_URL and FRONTEND_URL are not set — visitor pre-approvals will work, "
+        + "but public browser-pass links cannot be issued.",
+    );
+  }
+
   if (!process.env.RAZORPAY_WEBHOOK_SECRET?.trim()) {
     logger.warn(
       "RAZORPAY_WEBHOOK_SECRET not set — Razorpay webhooks will fail signature verification "

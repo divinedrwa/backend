@@ -11,6 +11,7 @@ import {
   createPreApprovedVisitor,
   deactivatePreApprovedVisitor,
   listPreApprovedVisitors,
+  mapPreApprovedForClient,
 } from "../../services/preApprovedVisitor.service";
 
 const router = Router();
@@ -56,7 +57,7 @@ router.get("/", async (req, res, next) => {
     });
 
     return res.json({
-      visitors: rows,
+      visitors: rows.map(mapPreApprovedForClient),
       ...paginationMeta(summary.total, rows.length, pagination),
     });
   } catch (error) {
@@ -92,7 +93,11 @@ router.post(
       });
 
       const otp = visitor.otp ?? "";
-      return res.status(201).json({ visitor, otp });
+      return res.status(201).json({
+        visitor: mapPreApprovedForClient(visitor),
+        otp,
+        publicPassUrl: visitor.publicPassUrl,
+      });
     } catch (error) {
       const statusCode =
         error && typeof error === "object" && "statusCode" in error

@@ -1529,6 +1529,10 @@ model PreApprovedVisitor {
   isActive     Boolean     @default(true)   // Added for mobile API
   approvedById String?                      // Added for mobile API
   usedAt       DateTime?
+  /// SHA-256 of the unguessable token embedded in the public browser-pass URL.
+  /// The raw bearer token is returned only when a link is issued and is never stored.
+  publicPassTokenHash String?   @unique @db.VarChar(64)
+  publicPassIssuedAt  DateTime?
   /// Recurring pass: allows multiple uses within the validity window.
   isRecurring  Boolean     @default(false)
   /// Max uses for recurring pass. NULL = unlimited within validity period.

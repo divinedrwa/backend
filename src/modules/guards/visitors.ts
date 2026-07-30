@@ -18,7 +18,14 @@ import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
-import { isPreApprovalGateEligible } from "../../services/preApprovedVisitor.service";
+import {
+  hashVisitorPublicPassToken,
+  isValidVisitorPublicPassToken,
+} from "../../lib/visitorPublicPass";
+import {
+  isPreApprovalGateEligible,
+  mapPreApprovedForClient,
+} from "../../services/preApprovedVisitor.service";
 import {
   resolveVisitorApprovalRecipientIds,
   type VisitorApprovalTarget,
@@ -93,6 +100,10 @@ const otpVerifySchema = z.object({
   // Optional: an OTP uniquely identifies its pre-approval (and flat) within a
   // society, so a guard can verify an OTP-only arrival without knowing the flat.
   villaId: z.string().optional(),
+});
+
+const publicPassResolveSchema = z.object({
+  token: z.string().min(40).max(64),
 });
 
 const visitorNotifySchema = z.object({
@@ -664,14 +675,14 @@ router.post("/verify-pre-approved", requireRole(UserRole.GUARD), validateBody(ve
       return res.status(400).json({
         verified: false,
         message: "Pre-approval expired",
-        preApproved,
+        preApproved: mapPreApprovedForClient(preApproved),
       });
     }
 
     return res.json({
       verified: true,
       message: "Visitor verified successfully",
-      preApproved,
+      preApproved: mapPreApprovedForClient(preApproved),
     });
   } catch (error) {
     next(error);
@@ -712,7 +723,7 @@ router.post("/visitor-otp-verify", otpRateLimiter, requireRole(UserRole.GUARD), 
       return res.status(400).json({
         verified: false,
         message: "This pass is not valid yet.",
-        preApproved,
+        preApproved: mapPreApprovedForClient(preApproved),
       });
     }
     if (!isPreApprovalGateEligible(preApproved, now)) {
@@ -722,19 +733,64 @@ router.post("/visitor-otp-verify", otpRateLimiter, requireRole(UserRole.GUARD), 
           preApproved.validUntil && new Date(preApproved.validUntil) <= now
             ? "OTP expired"
             : "OTP has already been used",
-        preApproved,
+        preApproved: mapPreApprovedForClient(preApproved),
       });
     }
 
     return res.json({
       verified: true,
       message: "OTP verified",
-      preApproved,
+      preApproved: mapPreApprovedForClient(preApproved),
     });
   } catch (error) {
     next(error);
   }
 });
+
+// POST /api/guards/visitor-pass-resolve — resolve a public browser-pass QR
+// within the authenticated guard's society. This does not consume/admit it.
+router.post(
+  "/visitor-pass-resolve",
+  otpRateLimiter,
+  requireRole(UserRole.GUARD),
+  validateBody(publicPassResolveSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const { token } = req.body as z.infer<typeof publicPassResolveSchema>;
+      if (!isValidVisitorPublicPassToken(token)) {
+        return res.status(404).json({
+          verified: false,
+          message: "Visitor pass not found",
+        });
+      }
+
+      const preApproved = await prisma.preApprovedVisitor.findFirst({
+        where: {
+          societyId,
+          publicPassTokenHash: hashVisitorPublicPassToken(token),
+        },
+        include: {
+          villa: { select: { villaNumber: true, block: true } },
+        },
+      });
+      if (!preApproved || !isPreApprovalGateEligible(preApproved)) {
+        return res.status(404).json({
+          verified: false,
+          message: "Visitor pass is invalid, expired, cancelled, or already used",
+        });
+      }
+
+      return res.json({
+        verified: true,
+        otp: preApproved.otp,
+        preApproved: mapPreApprovedForClient(preApproved),
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // POST /api/guards/visitor-approve-entry — atomic verify + consume OTP + visitor check-in
 router.post(
@@ -803,7 +859,7 @@ router.get("/pre-approved-entries", requireRole(UserRole.GUARD), async (req, res
       "[guards] pre-approved-entries",
     );
     return res.json({
-      preApproved: eligible,
+      preApproved: eligible.map(mapPreApprovedForClient),
       count: total,
       ...paginationMeta(total, eligible.length, pagination),
     });

@@ -24,7 +24,9 @@ import {
 import {
   createPreApprovedVisitor,
   deactivatePreApprovedVisitor,
+  issuePreApprovedVisitorPublicLink,
   listPreApprovedVisitors,
+  mapPreApprovedForClient,
   mapPreApprovedForMobile,
 } from "../../services/preApprovedVisitor.service";
 
@@ -282,6 +284,7 @@ router.post("/pre-approve-visitor", preApproveRateLimiter, requireRole(UserRole.
       preApproved: mapPreApprovedForMobile(preApproved),
       otp,
       passcode: otp,
+      publicPassUrl: preApproved.publicPassUrl,
     });
   } catch (error) {
     const statusCode =
@@ -296,6 +299,37 @@ router.post("/pre-approve-visitor", preApproveRateLimiter, requireRole(UserRole.
     next(error);
   }
 });
+
+// POST /api/residents/pre-approved/:id/share-link — rotate and return a new
+// public browser-pass URL. Rotating invalidates any previously shared URL.
+router.post(
+  "/pre-approved/:id/share-link",
+  preApproveRateLimiter,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  async (req, res, next) => {
+    try {
+      const { societyId, role, villaId } = req.auth!;
+      const result = await issuePreApprovedVisitorPublicLink(prisma, {
+        id: req.params.id,
+        societyId,
+        role,
+        actorVillaId: villaId,
+      });
+      return res.json(result);
+    } catch (error) {
+      const statusCode =
+        error && typeof error === "object" && "statusCode" in error
+          ? Number((error as { statusCode: number }).statusCode)
+          : undefined;
+      if (statusCode) {
+        return res.status(statusCode).json({
+          message: error instanceof Error ? error.message : "Request failed",
+        });
+      }
+      next(error);
+    }
+  },
+);
 
 // DELETE /api/residents/pre-approved/:id - Remove pre-approval
 router.delete("/pre-approved/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
@@ -400,7 +434,10 @@ router.patch("/pre-approved/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN)
       },
     });
 
-    return res.json({ message: "Pre-approval updated successfully", preApproved: updated });
+    return res.json({
+      message: "Pre-approval updated successfully",
+      preApproved: mapPreApprovedForClient(updated),
+    });
   } catch (error) {
     next(error);
   }

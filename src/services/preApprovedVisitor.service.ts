@@ -2,6 +2,10 @@ import { randomInt } from "node:crypto";
 import { UserRole, type Prisma, type PrismaClient, type VisitorType } from "@prisma/client";
 import { logger } from "../lib/logger";
 import { defaultValidUntilForVisitorType } from "../lib/visitorTypePresets";
+import {
+  buildVisitorPublicPassUrl,
+  createVisitorPublicPassToken,
+} from "../lib/visitorPublicPass";
 import { notifyGuardsPreApprovedCreated } from "../modules/guards/visitorResidentApproval.service";
 
 /** Max active (unused) pre-approvals allowed per villa. */
@@ -145,6 +149,7 @@ export async function createPreApprovedVisitor(
   // Type presets: cab/delivery get short windows when client omits validUntil.
   const validUntil =
     input.validUntil ?? defaultValidUntilForVisitorType(visitorType, validFrom);
+  const publicPass = createVisitorPublicPassToken();
 
   const preApproved = await db.preApprovedVisitor.create({
     data: {
@@ -157,6 +162,8 @@ export async function createPreApprovedVisitor(
       validFrom,
       validUntil,
       otp,
+      publicPassTokenHash: publicPass.tokenHash,
+      publicPassIssuedAt: new Date(),
       approvedById: input.approvedById,
       isActive: true,
       isRecurring,
@@ -181,7 +188,10 @@ export async function createPreApprovedVisitor(
     logger.error({ err: notifyErr }, "[createPreApprovedVisitor] guard notify error");
   }
 
-  return preApproved;
+  return {
+    ...preApproved,
+    publicPassUrl: buildVisitorPublicPassUrl(publicPass.rawToken),
+  };
 }
 
 export async function listPreApprovedVisitors(
@@ -259,6 +269,92 @@ export async function deactivatePreApprovedVisitor(
   });
 }
 
-export function mapPreApprovedForMobile<T extends { otp: string | null }>(row: T) {
-  return { ...row, passcode: row.otp };
+type PrivatePublicPassFields = {
+  publicPassTokenHash?: string | null;
+  publicPassIssuedAt?: Date | string | null;
+};
+
+/** Never serialize the stored token hash to resident/admin/guard clients. */
+export function mapPreApprovedForClient<
+  T extends PrivatePublicPassFields,
+>(row: T): Omit<T, keyof PrivatePublicPassFields> {
+  const {
+    publicPassTokenHash,
+    publicPassIssuedAt,
+    ...safe
+  } = row;
+  void publicPassTokenHash;
+  void publicPassIssuedAt;
+  return safe;
+}
+
+export function mapPreApprovedForMobile<
+  T extends PrivatePublicPassFields & { otp: string | null },
+>(row: T) {
+  return { ...mapPreApprovedForClient(row), passcode: row.otp };
+}
+
+export async function issuePreApprovedVisitorPublicLink(
+  db: PrismaClient,
+  p: {
+    id: string;
+    societyId: string;
+    role: UserRole;
+    actorVillaId?: string | null;
+  },
+): Promise<{ publicPassUrl: string }> {
+  const baseCheck = buildVisitorPublicPassUrl("x".repeat(43));
+  if (!baseCheck) {
+    const err = new Error(
+      "Visitor pass URL is not configured. Set VISITOR_PASS_BASE_URL or FRONTEND_URL.",
+    );
+    (err as Error & { statusCode: number }).statusCode = 503;
+    throw err;
+  }
+
+  const existing = await db.preApprovedVisitor.findFirst({
+    where: { id: p.id, societyId: p.societyId },
+    select: {
+      id: true,
+      villaId: true,
+      isActive: true,
+      isUsed: true,
+      isRecurring: true,
+      maxUses: true,
+      usedCount: true,
+      validFrom: true,
+      validUntil: true,
+    },
+  });
+  if (!existing) {
+    const err = new Error("Pre-approved visitor not found");
+    (err as Error & { statusCode: number }).statusCode = 404;
+    throw err;
+  }
+  if (
+    p.role === UserRole.RESIDENT &&
+    (!p.actorVillaId || existing.villaId !== p.actorVillaId)
+  ) {
+    const err = new Error("Cannot share a pre-approval for another villa");
+    (err as Error & { statusCode: number }).statusCode = 403;
+    throw err;
+  }
+  if (!isPreApprovalGateEligible(existing)) {
+    const err = new Error("Only an active visitor pass can be shared");
+    (err as Error & { statusCode: number }).statusCode = 409;
+    throw err;
+  }
+
+  const issued = createVisitorPublicPassToken();
+  await db.preApprovedVisitor.update({
+    where: { id: existing.id },
+    data: {
+      publicPassTokenHash: issued.tokenHash,
+      publicPassIssuedAt: new Date(),
+    },
+  });
+
+  return {
+    publicPassUrl: buildVisitorPublicPassUrl(issued.rawToken)!,
+  };
 }

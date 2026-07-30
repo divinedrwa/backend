@@ -489,7 +489,13 @@ export async function recomputeVisitorAggregateApproval(
 export async function admitPreApprovedVisitor(
   tx: Prisma.TransactionClient,
   params: PreApprovedAdmitParams
-): Promise<{ visitor: Visitor; preApproved: PreApprovedVisitor }> {
+): Promise<{
+  visitor: Visitor;
+  preApproved: Omit<
+    PreApprovedVisitor,
+    "publicPassTokenHash" | "publicPassIssuedAt"
+  >;
+}> {
   logger.info(
     {
       preApprovedId: params.preApprovedId,
@@ -648,7 +654,15 @@ export async function admitPreApprovedVisitor(
     "[visitor-pre-approved] Admitted successfully"
   );
 
-  return { visitor, preApproved };
+  // Never serialize the stored public-link hash through guard admission APIs.
+  const {
+    publicPassTokenHash,
+    publicPassIssuedAt,
+    ...safePreApproved
+  } = preApproved;
+  void publicPassTokenHash;
+  void publicPassIssuedAt;
+  return { visitor, preApproved: safePreApproved };
 }
 
 // ============================================================================
