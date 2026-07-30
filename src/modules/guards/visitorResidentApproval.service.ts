@@ -6,6 +6,7 @@ import {
 import type { Prisma, PrismaClient } from "@prisma/client";
 import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
+import { VISITOR_TYPE_LABEL } from "../../lib/visitorTypePresets";
 import {
   recomputeVisitorAggregateApproval as recomputeFromStateManager,
   resolveVisitorApprovalRecipientIds as resolveFromStateManager,
@@ -53,13 +54,6 @@ export async function resolveVisitorApprovalRecipientIds(params: {
 export type VisitorForApprovalPayload = Prisma.VisitorGetPayload<{
   include: typeof visitorWithVillas;
 }>;
-
-const VISITOR_TYPE_LABEL: Record<string, string> = {
-  GUEST: "Guest",
-  DELIVERY: "Delivery",
-  SERVICE_PROVIDER: "Service provider",
-  VENDOR: "Vendor",
-};
 
 /** FCM rich image only supports https URLs (not data: URLs). */
 function httpsPhotoForPush(photo: string | undefined | null): string | undefined {

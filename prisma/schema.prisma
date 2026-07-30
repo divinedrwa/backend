@@ -1132,6 +1132,8 @@ enum VisitorType {
   GUEST
   SERVICE_PROVIDER
   DELIVERY
+  /// Cab / rideshare pickup or drop-off (short-lived pass).
+  CAB
   VENDOR
   CONTRACTOR
   OTHER

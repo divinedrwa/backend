@@ -52,7 +52,7 @@ const preApproveVisitorSchema = z.object({
   /** Accept legacy client value `SERVICE` and normalize to `SERVICE_PROVIDER` (Prisma enum). */
   visitorType: z.preprocess(
     (v) => (v === "SERVICE" ? "SERVICE_PROVIDER" : v),
-    z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]).optional(),
+    z.enum(["GUEST", "DELIVERY", "CAB", "SERVICE_PROVIDER", "VENDOR"]).optional(),
   ),
   /** Recurring pass: allows multiple uses within the validity window. */
   isRecurring: z.boolean().optional(),

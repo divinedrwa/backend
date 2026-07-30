@@ -61,7 +61,7 @@ const checkInSchema = z
     villaIds: z.array(z.string()).optional(),
     /** Preferred: property + unit + optional specific resident. */
     visitTargets: z.array(visitTargetSchema).optional(),
-    visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
+    visitorType: z.enum(["GUEST", "DELIVERY", "CAB", "SERVICE_PROVIDER", "VENDOR"]),
     purpose: z.string().trim().optional(),
     vehicleNumber: z.string().trim().optional(),
     photo: z.string().optional(),

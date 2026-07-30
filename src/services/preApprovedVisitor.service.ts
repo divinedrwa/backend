@@ -1,6 +1,7 @@
 import { randomInt } from "node:crypto";
 import { UserRole, type Prisma, type PrismaClient, type VisitorType } from "@prisma/client";
 import { logger } from "../lib/logger";
+import { defaultValidUntilForVisitorType } from "../lib/visitorTypePresets";
 import { notifyGuardsPreApprovedCreated } from "../modules/guards/visitorResidentApproval.service";
 
 /** Max active (unused) pre-approvals allowed per villa. */
@@ -139,6 +140,11 @@ export async function createPreApprovedVisitor(
 
   const otp = await generateUniquePreApprovalOtp(db, input.societyId);
   const isRecurring = input.isRecurring ?? false;
+  const visitorType = input.visitorType ?? "GUEST";
+  const validFrom = input.validFrom ?? new Date();
+  // Type presets: cab/delivery get short windows when client omits validUntil.
+  const validUntil =
+    input.validUntil ?? defaultValidUntilForVisitorType(visitorType, validFrom);
 
   const preApproved = await db.preApprovedVisitor.create({
     data: {
@@ -147,9 +153,9 @@ export async function createPreApprovedVisitor(
       name: input.name.trim(),
       phone,
       purpose: input.purpose?.trim() || undefined,
-      visitorType: input.visitorType ?? "GUEST",
-      validFrom: input.validFrom ?? new Date(),
-      validUntil: input.validUntil ?? null,
+      visitorType,
+      validFrom,
+      validUntil,
       otp,
       approvedById: input.approvedById,
       isActive: true,

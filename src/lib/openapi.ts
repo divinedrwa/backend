@@ -112,7 +112,7 @@ const GuardVisitorCheckInRequest = registry.register(
     phone: z.string().trim().min(10),
     visitTargets: z.array(GuardVisitTarget).optional(),
     villaIds: z.array(z.string()).optional(),
-    visitorType: z.enum(["GUEST", "DELIVERY", "SERVICE_PROVIDER", "VENDOR"]),
+    visitorType: z.enum(["GUEST", "DELIVERY", "CAB", "SERVICE_PROVIDER", "VENDOR"]),
     purpose: z.string().trim().optional(),
     vehicleNumber: z.string().trim().optional(),
     photo: z.string().optional(),
