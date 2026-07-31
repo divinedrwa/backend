@@ -78,7 +78,7 @@ export async function processWaterStillOnReminders(
     if (claimed.count === 0) continue;
 
     try {
-      const admins = await db.user.findMany({
+      const recipients = await db.user.findMany({
         where: {
           societyId: event.societyId,
           isActive: true,
@@ -87,7 +87,19 @@ export async function processWaterStillOnReminders(
         select: { id: true },
       });
 
-      const recipientIds = [...new Set([event.guardId, ...admins.map((a) => a.id)])];
+      const recipientIds = recipients.map((r) => r.id);
+      if (recipientIds.length === 0) {
+        logger.warn(
+          { eventId: event.id, societyId: event.societyId },
+          "[water-still-on] no active guard/admin recipients",
+        );
+        await db.waterSupplyEvent.update({
+          where: { id: event.id },
+          data: { stillOnReminderSentAt: null },
+        });
+        continue;
+      }
+
       const notification = buildWaterStillOnReminder({
         gateName: event.gate?.name,
         minutesOn: minutes,
@@ -106,7 +118,9 @@ export async function processWaterStillOnReminders(
             turnedOn: "true",
           },
         },
-        { category: NotificationCategory.WATER_SUPPLY },
+        // SYSTEM cannot be muted — ops alert must reach guards/admins even if
+        // WATER_SUPPLY category is disabled in notification preferences.
+        { category: NotificationCategory.SYSTEM },
       );
 
       sent += 1;

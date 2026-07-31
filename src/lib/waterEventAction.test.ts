@@ -60,8 +60,9 @@ describe("waterEventAction", () => {
     assert.match(n.body, /switch the motor OFF/i);
   });
 
-  it("WATER_STILL_ON_NOTIFY_ROLES are admins only", () => {
+  it("WATER_STILL_ON_NOTIFY_ROLES include guards and admins", () => {
     assert.deepEqual(WATER_STILL_ON_NOTIFY_ROLES, [
+      UserRole.GUARD,
       UserRole.ADMIN,
       UserRole.RESIDENT_CUM_ADMIN,
     ]);

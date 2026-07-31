@@ -111,7 +111,7 @@ describe("processWaterStillOnReminders", () => {
   const fortyMinAgo = new Date(fixedNow.getTime() - 40 * 60_000);
   const tenMinAgo = new Date(fixedNow.getTime() - 10 * 60_000);
 
-  it("sends to actor + admins when ON event is still current after 30+ minutes", async () => {
+  it("sends to all active guards + admins when ON event is still current after 30+ minutes", async () => {
     const notified: string[][] = [];
     const db = fakeDb({
       events: [
@@ -128,6 +128,18 @@ describe("processWaterStillOnReminders", () => {
         },
       ],
       users: [
+        {
+          id: "guard1",
+          societyId: "soc1",
+          isActive: true,
+          role: UserRole.GUARD,
+        },
+        {
+          id: "guard2",
+          societyId: "soc1",
+          isActive: true,
+          role: UserRole.GUARD,
+        },
         {
           id: "admin1",
           societyId: "soc1",
@@ -161,12 +173,12 @@ describe("processWaterStillOnReminders", () => {
         notified.push([...ids].sort());
         assert.equal(payload.data?.type, "WATER_SUPPLY_STILL_ON");
         assert.match(payload.body ?? "", /North Gate/);
-        assert.equal(opts?.category, NotificationCategory.WATER_SUPPLY);
+        assert.equal(opts?.category, NotificationCategory.SYSTEM);
       },
     });
 
     assert.deepEqual(result, { checked: 1, sent: 1, suppressed: 0 });
-    assert.deepEqual(notified, [["admin1", "admin2", "guard1"]]);
+    assert.deepEqual(notified, [["admin1", "admin2", "guard1", "guard2"]]);
   });
 
   it("suppresses when a later OFF event supersedes the ON", async () => {

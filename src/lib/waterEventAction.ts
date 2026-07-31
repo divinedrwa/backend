@@ -26,8 +26,9 @@ export const WATER_SUPPLY_ON_NOTIFICATION = {
   body: "Water supply will begin shortly.",
 } as const;
 
-/** Society roles that receive the "motor still ON" reminder (alongside the actor). */
+/** Society roles that receive the "motor still ON" reminder. */
 export const WATER_STILL_ON_NOTIFY_ROLES: UserRole[] = [
+  UserRole.GUARD,
   UserRole.ADMIN,
   UserRole.RESIDENT_CUM_ADMIN,
 ];

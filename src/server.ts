@@ -183,7 +183,7 @@ cron.schedule(
 
 /**
  * Every minute: if a water motor has been ON for ≥30 minutes (configurable via
- * WATER_STILL_ON_REMINDER_MINUTES) with no newer OFF/ON, push the actor + admins
+ * WATER_STILL_ON_REMINDER_MINUTES) with no newer OFF/ON, push all guards + admins
  * to check the tank and switch the motor OFF.
  */
 cron.schedule(
