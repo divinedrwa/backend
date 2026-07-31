@@ -15,6 +15,7 @@ import { resolveResidentDwelling } from "../../lib/residentUnitResolve";
 import { findOrCreateShellVillaForResident } from "../../services/societyProvisioning";
 import { auditFromRequest } from "../../services/audit.service";
 import { passwordSchema } from "../../lib/passwordSchema";
+import { deleteSocietyUser, UserDeleteBlockedError } from "../../lib/deleteSocietyUser";
 import { realignVillaBillingFromSnapshots } from "../billing-cycle/billing-collection-link";
 
 const router = Router();
@@ -641,30 +642,31 @@ router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
       return res.status(403).json({ message: "You cannot delete your own account" });
     }
 
-    const deleted = await prisma.user.findFirst({
-      where: { id, societyId: req.auth!.societyId },
-      select: { id: true, name: true, username: true, role: true },
+    const deleted = await deleteSocietyUser(prisma, {
+      userId: id,
+      societyId: req.auth!.societyId!,
     });
 
-    await prisma.user.deleteMany({
-      where: { id, societyId: req.auth!.societyId },
-    });
+    if (!deleted) {
+      return res.status(404).json({ message: "User not found" });
+    }
 
     invalidateAuthCache(id);
 
-    if (deleted) {
-      auditFromRequest(req, {
-        adminId: req.auth!.userId,
-        societyId: req.auth!.societyId,
-        action: "DELETE_USER",
-        entityType: "User",
-        entityId: id,
-        metadata: { name: deleted.name, username: deleted.username, role: deleted.role },
-      });
-    }
+    auditFromRequest(req, {
+      adminId: req.auth!.userId,
+      societyId: req.auth!.societyId,
+      action: "DELETE_USER",
+      entityType: "User",
+      entityId: id,
+      metadata: { name: deleted.name, username: deleted.username, role: deleted.role },
+    });
 
     return res.json({ message: "User deleted" });
   } catch (error) {
+    if (error instanceof UserDeleteBlockedError) {
+      return res.status(409).json({ message: error.message });
+    }
     next(error);
   }
 });

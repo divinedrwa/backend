@@ -764,8 +764,8 @@ model CycleVillaExclusion {
   villaId        String
   villa          Villa                     @relation(fields: [villaId], references: [id], onDelete: Cascade)
   reason         String?
-  excludedBy     String
-  excludedByUser User                      @relation("CycleVillaExclusions", fields: [excludedBy], references: [id])
+  excludedBy     String?
+  excludedByUser User?                     @relation("CycleVillaExclusions", fields: [excludedBy], references: [id], onDelete: SetNull)
   createdAt      DateTime                  @default(now())
 
   @@unique([cycleId, villaId])
@@ -1213,12 +1213,12 @@ model VisitorCheckpoint {
   visitorId      String
   checkpointType VisitorCheckpointType
   timestamp      DateTime
-  actorUserId    String
+  actorUserId    String?
   metadata       Json     @default("{}")
   createdAt      DateTime @default(now())
 
   visitor Visitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
-  actor   User    @relation("VisitorCheckpointActor", fields: [actorUserId], references: [id], onDelete: Restrict)
+  actor   User?   @relation("VisitorCheckpointActor", fields: [actorUserId], references: [id], onDelete: SetNull)
 
   @@index([visitorId, timestamp])
   @@index([actorUserId])
@@ -2052,12 +2052,12 @@ model Banner {
   endDate     DateTime?
   isActive    Boolean     @default(true)
   actionUrl   String?     // Deep link for mobile app
-  createdBy   String
+  createdBy   String?
   createdAt   DateTime    @default(now())
   updatedAt   DateTime    @updatedAt
 
   society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
-  creator User    @relation(fields: [createdBy], references: [id])
+  creator User?   @relation(fields: [createdBy], references: [id], onDelete: SetNull)
 
   @@index([societyId])
   @@index([isActive])
