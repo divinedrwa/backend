@@ -3,6 +3,11 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import {
+  buildDailyRosterSlots,
+  buildRosterShiftRows,
+  ROSTER_SHIFT_DURATIONS_HOURS,
+} from "../../lib/guardShiftRoster";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
@@ -39,6 +44,7 @@ const createShiftSchema = z
     endTime: z.string().datetime().optional(),
     recurringStartMinutes: z.number().int().min(0).max(1439).optional(),
     recurringEndMinutes: z.number().int().min(0).max(1440).optional(),
+    contactPhone: z.string().trim().min(6).max(20).optional().nullable(),
     notes: z.string().trim().optional(),
   })
   .superRefine((data, ctx) => {
@@ -72,8 +78,24 @@ const updateShiftSchema = z.object({
   shiftType: z.nativeEnum(ShiftType).optional(),
   startTime: z.string().datetime().optional(),
   endTime: z.string().datetime().optional(),
-  notes: z.string().trim().optional()
+  contactPhone: z.string().trim().min(6).max(20).optional().nullable(),
+  notes: z.string().trim().optional(),
 });
+
+const generateRosterSchema = z.object({
+  guardId: z.string().min(1),
+  gateId: z.string().min(1),
+  shiftDurationHours: z.union([z.literal(8), z.literal(12)]),
+  dayStartMinutes: z.number().int().min(0).max(1439),
+  contactPhones: z.array(z.string().trim().min(6).max(20).nullable()).optional(),
+  notes: z.string().trim().optional(),
+  replaceExisting: z.boolean().optional().default(true),
+});
+
+const shiftInclude = {
+  guard: { select: { id: true, name: true, email: true, phone: true } },
+  gate: { select: { id: true, name: true, location: true } },
+} as const;
 
 router.use(requireAuth);
 
@@ -85,10 +107,7 @@ router.get("/", async (req, res, next) => {
     const [shifts, total] = await Promise.all([
       prisma.guardShift.findMany({
         where,
-        include: {
-          guard: { select: { id: true, name: true, email: true } },
-          gate: { select: { id: true, name: true, location: true } },
-        },
+        include: shiftInclude,
         orderBy: { startTime: "desc" },
         take: pagination.take,
         skip: pagination.skip,
@@ -129,6 +148,81 @@ router.get("/my-shifts", requireRole(UserRole.GUARD), async (req, res, next) => 
     next(error);
   }
 });
+
+// Generate full 24h recurring roster (8h → 3 shifts, 12h → 2 shifts)
+router.post(
+  "/generate-roster",
+  requireRole(UserRole.ADMIN),
+  validateBody(generateRosterSchema),
+  async (req, res, next) => {
+    try {
+      const body = req.body as z.infer<typeof generateRosterSchema>;
+      const societyId = req.auth!.societyId;
+
+      const guard = await prisma.user.findFirst({
+        where: { id: body.guardId, societyId, role: UserRole.GUARD },
+      });
+      if (!guard) {
+        return res.status(404).json({ message: "Guard not found" });
+      }
+
+      const gate = await prisma.gate.findFirst({
+        where: { id: body.gateId, societyId },
+      });
+      if (!gate) {
+        return res.status(404).json({ message: "Gate not found" });
+      }
+
+      const slots = buildDailyRosterSlots(body.shiftDurationHours, body.dayStartMinutes);
+      const rows = buildRosterShiftRows(slots, body.contactPhones, body.notes ?? null);
+
+      if (body.replaceExisting) {
+        await prisma.guardShift.deleteMany({
+          where: {
+            societyId,
+            guardId: body.guardId,
+            gateId: body.gateId,
+            recurringDaily: true,
+          },
+        });
+      }
+
+      const created = await prisma.$transaction(
+        rows.map((row) => {
+          const anchors = buildRecurringAnchorTimes(
+            row.recurringStartMinutes,
+            row.recurringEndMinutes,
+          );
+          return prisma.guardShift.create({
+            data: {
+              societyId,
+              guardId: body.guardId,
+              gateId: body.gateId,
+              shiftType: row.shiftType,
+              startTime: anchors.startTime,
+              endTime: anchors.endTime,
+              recurringDaily: true,
+              recurringStartMinutes: row.recurringStartMinutes,
+              recurringEndMinutes: row.recurringEndMinutes,
+              contactPhone: row.contactPhone,
+              notes: row.notes,
+            },
+            include: shiftInclude,
+          });
+        }),
+      );
+
+      return res.status(201).json({
+        shifts: created,
+        shiftDurationHours: body.shiftDurationHours,
+        slotCount: created.length,
+        supportedDurations: ROSTER_SHIFT_DURATIONS_HOURS,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
 
 // Create shift (Admin only)
 router.post(
@@ -210,24 +304,10 @@ router.post(
           recurringDaily,
           recurringStartMinutes,
           recurringEndMinutes,
-          notes: body.notes
+          contactPhone: body.contactPhone ?? null,
+          notes: body.notes,
         },
-        include: {
-          guard: {
-            select: {
-              id: true,
-              name: true,
-              email: true
-            }
-          },
-          gate: {
-            select: {
-              id: true,
-              name: true,
-              location: true
-            }
-          }
-        }
+        include: shiftInclude,
       });
 
       return res.status(201).json({ shift });
@@ -254,6 +334,7 @@ router.patch(
       if (body.startTime) updateData.startTime = new Date(body.startTime);
       if (body.endTime) updateData.endTime = new Date(body.endTime);
       if (body.notes !== undefined) updateData.notes = body.notes;
+      if (body.contactPhone !== undefined) updateData.contactPhone = body.contactPhone;
 
       const shift = await prisma.guardShift.updateMany({
         where: {

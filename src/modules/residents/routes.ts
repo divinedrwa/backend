@@ -7,6 +7,8 @@ import { passwordSchema } from "../../lib/passwordSchema";
 import { logger } from "../../lib/logger";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { findActiveShiftsForSociety } from "../../lib/guardShiftActive";
+import { resolveGuardDutyPhone } from "../../lib/guardDutyPhone";
 import { profileImageMemory } from "../../lib/profileImageUpload";
 import { getCachedMoneySnapshot } from "../../lib/societyFinance";
 import {
@@ -818,11 +820,39 @@ router.delete("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), asy
 // EMERGENCY CONTACTS APIs
 // ========================================
 
-// GET /api/residents/security-contacts - Active guard contacts for resident society
+// GET /api/residents/security-contacts - On-duty guard contacts (shift duty phone when set)
 router.get("/security-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const contacts = await prisma.user.findMany({
+    const activeShifts = await findActiveShiftsForSociety(prisma, { societyId });
+
+    const seen = new Set<string>();
+    const contacts = activeShifts
+      .filter((s) => s.guard?.isActive !== false)
+      .map((s) => {
+        const phone = resolveGuardDutyPhone(s, s.guard);
+        return {
+          id: s.guard.id,
+          name: s.guard.name,
+          phone,
+          gateId: s.gate.id,
+          gateName: s.gate.name,
+          shiftType: s.shiftType,
+        };
+      })
+      .filter((c) => {
+        if (!c.phone) return false;
+        if (seen.has(c.id)) return false;
+        seen.add(c.id);
+        return true;
+      });
+
+    if (contacts.length > 0) {
+      return res.json({ contacts });
+    }
+
+    // Fallback when no shift is active right now: all active guards with profile phone.
+    const guards = await prisma.user.findMany({
       where: {
         societyId,
         role: UserRole.GUARD,
@@ -837,7 +867,7 @@ router.get("/security-contacts", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
     });
 
     return res.json({
-      contacts: contacts
+      contacts: guards
         .map((c) => ({
           id: c.id,
           name: c.name,

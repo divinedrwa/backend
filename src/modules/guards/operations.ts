@@ -183,7 +183,8 @@ router.get("/residents-directory", requireRole(UserRole.GUARD), async (req, res,
             }
           : {}),
       },
-      take: 80,
+      take: 500,
+      orderBy: [{ villa: { block: "asc" } }, { villa: { villaNumber: "asc" } }, { name: "asc" }],
       select: {
         id: true,
         name: true,

@@ -210,6 +210,7 @@ export const MOBILE_API_CASES: MobileApiCase[] = [
   { name: "admin sos active", method: "GET", path: "/sos-alerts/active", roles: ["admin"], expect: [200] },
   { name: "admin sos stats", method: "GET", path: "/sos-alerts/stats", roles: ["admin"], expect: [200] },
   { name: "admin guard shifts", method: "GET", path: "/guard-shifts", roles: ["admin"], expect: [200] },
+  { name: "admin guard shifts generate roster", method: "POST", path: "/guard-shifts/generate-roster", roles: ["admin"], expect: [201, 404, 409] },
   { name: "admin guard patrols", method: "GET", path: "/guard-patrols", roles: ["admin"], expect: [200] },
   { name: "admin polls", method: "GET", path: "/polls", roles: ["admin"], expect: [200] },
   { name: "admin staff", method: "GET", path: "/staff", roles: ["admin"], expect: [200] },

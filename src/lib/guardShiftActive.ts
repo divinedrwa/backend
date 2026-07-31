@@ -36,6 +36,89 @@ function recurringMinutesFromStored(s: GuardShift): { sm: number; em: number } |
   return { sm, em };
 }
 
+const activeShiftInclude = {
+  guard: { select: { id: true, name: true, username: true, phone: true, isActive: true } },
+  gate: { select: { id: true, name: true, location: true } },
+} satisfies Prisma.GuardShiftInclude;
+
+export type ActiveGuardShift = Prisma.GuardShiftGetPayload<{
+  include: typeof activeShiftInclude;
+}>;
+
+function filterRecurringActive(
+  rows: GuardShift[],
+  nowMinutes: number,
+): GuardShift[] {
+  const out: GuardShift[] = [];
+  for (const s of rows) {
+    const pair = recurringMinutesFromStored(s);
+    if (!pair) continue;
+    if (isMinuteWithinRecurringWindow(nowMinutes, pair.sm, pair.em)) {
+      out.push(s);
+    }
+  }
+  return out;
+}
+
+/**
+ * All guard shifts active right now for a society (optionally scoped to one gate).
+ */
+export async function findActiveShiftsForSociety(
+  prisma: PrismaClient,
+  params: {
+    societyId: string;
+    now?: Date;
+    gateId?: string;
+    include?: Prisma.GuardShiftInclude;
+  },
+): Promise<ActiveGuardShift[]> {
+  const now = params.now ?? new Date();
+  const include = params.include ?? activeShiftInclude;
+  const baseWhere: Prisma.GuardShiftWhereInput = {
+    societyId: params.societyId,
+    ...(params.gateId ? { gateId: params.gateId } : {}),
+  };
+
+  const [absolute, recurringRows] = await Promise.all([
+    prisma.guardShift.findMany({
+      where: {
+        ...baseWhere,
+        recurringDaily: false,
+        startTime: { lte: now },
+        endTime: { gte: now },
+      },
+      include,
+      orderBy: { startTime: "desc" },
+    }),
+    prisma.guardShift.findMany({
+      where: { ...baseWhere, recurringDaily: true },
+      include,
+      orderBy: { createdAt: "desc" },
+    }),
+  ]);
+
+  const nm = toIstMinuteOfDay(now);
+  return [...absolute, ...filterRecurringActive(recurringRows, nm)] as ActiveGuardShift[];
+}
+
+export async function findActiveGuardShiftAtGate(
+  prisma: PrismaClient,
+  params: {
+    gateId: string;
+    societyId: string;
+    now?: Date;
+    include?: Prisma.GuardShiftInclude;
+  },
+): Promise<ActiveGuardShift | null> {
+  const rows = await findActiveShiftsForSociety(prisma, {
+    societyId: params.societyId,
+    gateId: params.gateId,
+    now: params.now,
+    include: params.include,
+  });
+  return rows[0] ?? null;
+}
+
 /**
  * Active shift: either a one-off row containing `now`, or a recurring daily template whose window contains `now`.
  */

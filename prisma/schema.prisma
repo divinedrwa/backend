@@ -1316,6 +1316,8 @@ model GuardShift {
   recurringStartMinutes Int?
   /// Exclusive end minute (may be ≤ start when the window crosses midnight).
   recurringEndMinutes   Int?
+  /// Duty handset / SIM for this shift window (falls back to guard User.phone).
+  contactPhone          String?
   notes     String?
   createdAt DateTime  @default(now())
   updatedAt DateTime  @updatedAt

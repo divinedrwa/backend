@@ -5,6 +5,7 @@ import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { Gate, GuardShift, UserRole, SOSStatus } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
+import { resolveGuardDutyPhone } from "../../lib/guardDutyPhone";
 
 type GuardShiftWithGate = GuardShift & { gate: Gate };
 import {
@@ -152,7 +153,17 @@ router.get("/my-gate", requireRole(UserRole.GUARD), async (req, res, next) => {
       return res.status(404).json({ message: "No gate assigned" });
     }
 
-    return res.json({ gate: currentShift.gate, shift: currentShift });
+    const guard = await prisma.user.findFirst({
+      where: { id: userId, societyId },
+      select: { phone: true },
+    });
+    const dutyPhone = resolveGuardDutyPhone(currentShift, guard);
+
+    return res.json({
+      gate: currentShift.gate,
+      shift: currentShift,
+      dutyPhone,
+    });
   } catch (error) {
     next(error);
   }

@@ -1,6 +1,8 @@
 import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import { prisma } from "../../lib/prisma";
+import { findActiveGuardShiftAtGate } from "../../lib/guardShiftActive";
+import { resolveGuardDutyPhone } from "../../lib/guardDutyPhone";
 import {
   localDateKey,
   localDateKeysForLastDays,
@@ -56,22 +58,36 @@ router.get("/overview", async (req, res, next) => {
     const totalMap = new Map(totalByGate.map((r) => [r.gateId, r._count]));
     const activeMap = new Map(activeByGate.map((r) => [r.gateId, r._count]));
 
-    const gateOverview = gates.map((gate) => ({
-      id: gate.id,
-      name: gate.name,
-      location: gate.location,
-      isActive: gate.isActive,
-      assignedGuard: gate.assignedGuard
-        ? {
-            name: gate.assignedGuard.name,
-            username: gate.assignedGuard.username,
-            phone: gate.assignedGuard.phone,
-            isActive: gate.assignedGuard.isActive,
-          }
-        : null,
-      todayVisitors: totalMap.get(gate.id) || 0,
-      activeVisitors: activeMap.get(gate.id) || 0,
-    }));
+    const gateOverview = await Promise.all(
+      gates.map(async (gate) => {
+        const activeShift = await findActiveGuardShiftAtGate(prisma, {
+          societyId,
+          gateId: gate.id,
+        });
+
+        const onDutyGuard = activeShift?.guard ?? gate.assignedGuard;
+        const dutyPhone = resolveGuardDutyPhone(activeShift, onDutyGuard);
+
+        return {
+          id: gate.id,
+          name: gate.name,
+          location: gate.location,
+          isActive: gate.isActive,
+          assignedGuard: onDutyGuard
+            ? {
+                name: onDutyGuard.name,
+                username: onDutyGuard.username,
+                phone: dutyPhone,
+                isActive: onDutyGuard.isActive,
+                onShift: Boolean(activeShift),
+                shiftType: activeShift?.shiftType ?? null,
+              }
+            : null,
+          todayVisitors: totalMap.get(gate.id) || 0,
+          activeVisitors: activeMap.get(gate.id) || 0,
+        };
+      }),
+    );
 
     return res.json({ gates: gateOverview });
   } catch (error) {
