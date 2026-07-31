@@ -18,6 +18,9 @@ import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
 import { loadEarlyCycleExpensesPreview } from "./expense-early-cycle-preview";
+import {
+  resolveFamilyMemberLinkedUserId,
+} from "../../lib/familyVisitorDelegation";
 
 const updateProfileSchema = z.object({
   name: z.string().trim().min(2).optional(),
@@ -33,6 +36,7 @@ const updateFamilyMemberSchema = z.object({
   age: z.number().int().min(0).max(120).optional(),
   phone: z.string().trim().max(20).optional(),
   idProof: z.string().trim().max(200).optional(),
+  canApproveVisitors: z.boolean().optional(),
 });
 
 const router = Router();
@@ -141,6 +145,7 @@ const addFamilyMemberSchema = z.object({
   age: z.number().int().positive().optional(),
   phone: z.string().trim().optional(),
   idProof: z.string().trim().optional(),
+  canApproveVisitors: z.boolean().optional(),
 });
 
 const emergencyContactSchema = z.object({
@@ -149,6 +154,69 @@ const emergencyContactSchema = z.object({
   phone: z.string().trim().min(10),
   address: z.string().trim().optional(),
 });
+
+async function mapFamilyMemberForClient(
+  member: {
+    id: string;
+    name: string;
+    relation: string;
+    age: number | null;
+    phone: string | null;
+    idProof: string | null;
+    createdAt: Date;
+    canApproveVisitors: boolean;
+    linkedUserId: string | null;
+  },
+  linkedUserName?: string | null,
+) {
+  return {
+    id: member.id,
+    name: member.name,
+    relationship: member.relation,
+    age: member.age,
+    phone: member.phone,
+    idProof: member.idProof,
+    createdAt: member.createdAt,
+    canApproveVisitors: member.canApproveVisitors,
+    linkedUserId: member.linkedUserId,
+    linkedUserName: linkedUserName ?? null,
+    visitorApprovalLinked:
+      member.canApproveVisitors && member.linkedUserId != null,
+  };
+}
+
+async function syncFamilyMemberDelegation(
+  memberId: string,
+  societyId: string,
+): Promise<void> {
+  const member = await prisma.familyMember.findUnique({
+    where: { id: memberId },
+    include: { resident: { select: { villaId: true } } },
+  });
+  if (!member?.resident.villaId) return;
+
+  if (!member.canApproveVisitors) {
+    if (member.linkedUserId) {
+      await prisma.familyMember.update({
+        where: { id: memberId },
+        data: { linkedUserId: null },
+      });
+    }
+    return;
+  }
+
+  const linkedUserId = await resolveFamilyMemberLinkedUserId(prisma, {
+    societyId,
+    villaId: member.resident.villaId,
+    phone: member.phone,
+    linkedUserId: member.linkedUserId,
+  });
+
+  await prisma.familyMember.update({
+    where: { id: memberId },
+    data: { linkedUserId, villaId: member.resident.villaId },
+  });
+}
 
 // ========================================
 // DASHBOARD API
@@ -618,17 +686,16 @@ router.get("/my-family", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     const raw = await prisma.familyMember.findMany({
       where: { residentId: userId },
       orderBy: { createdAt: "desc" },
+      include: {
+        linkedUser: { select: { name: true } },
+      },
     });
 
-    const familyMembers = raw.map((m) => ({
-      id: m.id,
-      name: m.name,
-      relationship: m.relation,
-      age: m.age,
-      phone: m.phone,
-      idProof: m.idProof,
-      createdAt: m.createdAt,
-    }));
+    const familyMembers = await Promise.all(
+      raw.map((m) =>
+        mapFamilyMemberForClient(m, m.linkedUser?.name ?? null),
+      ),
+    );
 
     return res.json({ familyMembers, count: familyMembers.length });
   } catch (error) {
@@ -639,32 +706,40 @@ router.get("/my-family", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
 // POST /api/residents/add-family-member - Add family member
 router.post("/add-family-member", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(addFamilyMemberSchema), async (req, res, next) => {
   try {
-    const { userId } = req.auth!;
-    const { name, relationship, age, phone, idProof } = req.body;
+    const { userId, societyId } = req.auth!;
+    const { name, relationship, age, phone, idProof, canApproveVisitors } = req.body;
+
+    const resident = await prisma.user.findFirst({
+      where: { id: userId, societyId },
+      select: { villaId: true },
+    });
 
     const created = await prisma.familyMember.create({
       data: {
         residentId: userId,
+        villaId: resident?.villaId ?? undefined,
         name,
         relation: relationship,
         relationship,
         age,
         phone,
         idProof,
+        canApproveVisitors: canApproveVisitors === true,
       },
+    });
+
+    if (created.canApproveVisitors) {
+      await syncFamilyMemberDelegation(created.id, societyId);
+    }
+
+    const fresh = await prisma.familyMember.findUniqueOrThrow({
+      where: { id: created.id },
+      include: { linkedUser: { select: { name: true } } },
     });
 
     return res.status(201).json({
       message: "Family member added successfully",
-      familyMember: {
-        id: created.id,
-        name: created.name,
-        relationship: created.relation,
-        age: created.age,
-        phone: created.phone,
-        idProof: created.idProof,
-        createdAt: created.createdAt,
-      },
+      familyMember: await mapFamilyMemberForClient(fresh, fresh.linkedUser?.name ?? null),
     });
   } catch (error) {
     next(error);
@@ -674,11 +749,10 @@ router.post("/add-family-member", requireRole(UserRole.RESIDENT, UserRole.ADMIN)
 // PATCH /api/residents/family/:id - Update family member
 router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), validateBody(updateFamilyMemberSchema), async (req, res, next) => {
   try {
-    const { userId } = req.auth!;
+    const { userId, societyId } = req.auth!;
     const { id } = req.params;
     const body = req.body as z.infer<typeof updateFamilyMemberSchema>;
 
-    // Verify ownership
     const existing = await prisma.familyMember.findFirst({
       where: { id, residentId: userId },
     });
@@ -695,20 +769,22 @@ router.patch("/family/:id", requireRole(UserRole.RESIDENT, UserRole.ADMIN), vali
         ...(body.age !== undefined && { age: body.age }),
         ...(body.phone !== undefined && { phone: body.phone }),
         ...(body.idProof !== undefined && { idProof: body.idProof }),
+        ...(body.canApproveVisitors !== undefined && {
+          canApproveVisitors: body.canApproveVisitors,
+        }),
       },
+    });
+
+    await syncFamilyMemberDelegation(updated.id, societyId);
+
+    const fresh = await prisma.familyMember.findUniqueOrThrow({
+      where: { id: updated.id },
+      include: { linkedUser: { select: { name: true } } },
     });
 
     return res.json({
       message: "Family member updated successfully",
-      familyMember: {
-        id: updated.id,
-        name: updated.name,
-        relationship: updated.relation,
-        age: updated.age,
-        phone: updated.phone,
-        idProof: updated.idProof,
-        createdAt: updated.createdAt,
-      },
+      familyMember: await mapFamilyMemberForClient(fresh, fresh.linkedUser?.name ?? null),
     });
   } catch (error) {
     next(error);

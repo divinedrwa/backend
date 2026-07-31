@@ -7,7 +7,6 @@ import { prisma } from "../../lib/prisma";
 import {
   localDayRange,
   summarizeVisitorsToday,
-  visitorIsCheckedOut,
   visitorIsInside,
 } from "../../lib/visitorLifecycle";
 import {
@@ -17,7 +16,12 @@ import {
 } from "../../lib/residentVisitorApprovalScope";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
-import { UserRole, VisitorStatus, VisitorVillaApprovalStatus } from "@prisma/client";
+import {
+  NotificationCategory,
+  UserRole,
+  VisitorStatus,
+  VisitorVillaApprovalStatus,
+} from "@prisma/client";
 import {
   VISITOR_PENDING_APPROVAL,
   VISITOR_APPROVED_FOR_ENTRY,
@@ -39,15 +43,60 @@ import {
   revokePreApprovedPublicLink,
   listPreApprovedPassViews,
 } from "../../services/visitorPassAudit.service";
+import { notifySocietyRoles, notifyUsers } from "../../services/notification.service";
+import { logger } from "../../lib/logger";
 
 const router = Router();
 
 router.use(requireAuth);
 
+const wrongEntryReportSchema = z.object({
+  reason: z
+    .string()
+    .trim()
+    .min(3, "Reason is required")
+    .max(200, "Reason is too long"),
+  residentNote: z.string().trim().max(1000).optional().nullable(),
+});
+
+function visitorIsOverstay(visitor: {
+  status: VisitorStatus;
+  checkOutAt: Date | null;
+  expectedCheckoutAt: Date | null;
+}): boolean {
+  if (!visitorIsInside(visitor)) return false;
+  if (!visitor.expectedCheckoutAt) return false;
+  return visitor.expectedCheckoutAt.getTime() < Date.now();
+}
+
+function enrichVisitorForResident<
+  T extends {
+    status: VisitorStatus;
+    checkOutAt: Date | null;
+    expectedCheckoutAt: Date | null;
+    wrongEntryReports?: { id: string; status: string; createdAt: Date }[];
+  },
+>(visitor: T) {
+  const reports = visitor.wrongEntryReports ?? [];
+  const { wrongEntryReports: _omit, ...rest } = visitor;
+  return {
+    ...rest,
+    isOverstay: visitorIsOverstay(visitor),
+    wrongEntryReported: reports.length > 0,
+    wrongEntryReport: reports[0] ?? null,
+  };
+}
+
 const preApproveRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
   max: 10,
   message: "Too many pre-approval requests, please try again later",
+});
+
+const wrongEntryRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: "Too many wrong-entry reports, please try again later",
 });
 
 // Validation schemas
@@ -139,6 +188,12 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
               unit: { select: { label: true, unitCode: true } },
             },
           },
+          wrongEntryReports: {
+            where: { reportedByUserId: userId },
+            select: { id: true, status: true, createdAt: true },
+            orderBy: { createdAt: "desc" },
+            take: 1,
+          },
         },
         orderBy: { checkInTime: "desc" },
         take: pagination.take,
@@ -148,16 +203,18 @@ router.get("/my-visitors", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async
     ]);
 
     // Calculate summary
+    const enriched = visitors.map(enrichVisitorForResident);
     const summary = {
       total,
-      today: visitors.filter((v) => {
+      today: enriched.filter((v) => {
         const today = new Date().toDateString();
         return new Date(v.checkInTime).toDateString() === today;
       }).length,
-      checkedIn: visitors.filter((v) => visitorIsInside(v)).length,
+      checkedIn: enriched.filter((v) => visitorIsInside(v)).length,
+      overstay: enriched.filter((v) => v.isOverstay).length,
     };
 
-    return res.json({ visitors, summary, ...paginationMeta(total, visitors.length, pagination) });
+    return res.json({ visitors: enriched, summary, ...paginationMeta(total, enriched.length, pagination) });
   } catch (error) {
     next(error);
   }
@@ -202,15 +259,25 @@ router.get("/visitors-today", requireRole(UserRole.RESIDENT, UserRole.ADMIN), as
             name: true,
           },
         },
+        wrongEntryReports: {
+          where: { reportedByUserId: userId },
+          select: { id: true, status: true, createdAt: true },
+          orderBy: { createdAt: "desc" },
+          take: 1,
+        },
       },
       orderBy: { checkInTime: "desc" },
     });
 
+    const enriched = visitors.map(enrichVisitorForResident);
     const summary = summarizeVisitorsToday(visitors);
 
     return res.json({
-      visitors,
-      summary,
+      visitors: enriched,
+      summary: {
+        ...summary,
+        overstay: enriched.filter((v) => v.isOverstay).length,
+      },
     });
   } catch (error) {
     next(error);
@@ -858,6 +925,126 @@ router.post(
                decision: "REJECT",
              });
              return res.status(result.status).json(result.body);
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
+// POST /api/residents/visitors/:visitorId/wrong-entry — report unexpected / wrong-flat check-in
+router.post(
+  "/visitors/:visitorId/wrong-entry",
+  wrongEntryRateLimiter,
+  requireRole(UserRole.RESIDENT, UserRole.ADMIN),
+  validateBody(wrongEntryReportSchema),
+  async (req, res, next) => {
+    try {
+      const { userId, societyId } = req.auth!;
+      const { visitorId } = req.params;
+      const { reason, residentNote } = req.body as z.infer<typeof wrongEntryReportSchema>;
+
+      const user = await prisma.user.findFirst({
+        where: { id: userId, societyId },
+        select: { villaId: true, unitId: true, name: true },
+      });
+      if (!user?.villaId) {
+        return res.status(404).json({ message: "Villa not assigned" });
+      }
+
+      const visitMatch = {
+        villaId: user.villaId,
+        ...(user.unitId ? { unitId: user.unitId } : {}),
+      };
+
+      const visitor = await prisma.visitor.findFirst({
+        where: {
+          id: visitorId,
+          societyId,
+          villaVisits: { some: visitMatch },
+        },
+        include: {
+          villaVisits: {
+            where: visitMatch,
+            select: {
+              villa: { select: { villaNumber: true, block: true } },
+            },
+          },
+        },
+      });
+
+      if (!visitor) {
+        return res.status(404).json({ message: "Visitor not found" });
+      }
+
+      const existing = await prisma.visitorWrongEntryReport.findUnique({
+        where: {
+          visitorId_reportedByUserId: {
+            visitorId: visitor.id,
+            reportedByUserId: userId,
+          },
+        },
+      });
+      if (existing) {
+        return res.status(409).json({
+          message: "You already reported this visitor",
+          report: existing,
+        });
+      }
+
+      const report = await prisma.visitorWrongEntryReport.create({
+        data: {
+          societyId,
+          visitorId: visitor.id,
+          reportedByUserId: userId,
+          reason,
+          residentNote: residentNote?.trim() ? residentNote.trim() : null,
+        },
+      });
+
+      const flatLabel = visitor.villaVisits
+        .map((v) => [v.villa.block, v.villa.villaNumber].filter(Boolean).join(" "))
+        .filter(Boolean)
+        .join(", ");
+
+      const payload = {
+        title: "Wrong entry reported",
+        body: `${user.name || "Resident"} flagged ${visitor.name}${flatLabel ? ` at ${flatLabel}` : ""}: ${reason}`,
+        data: {
+          type: "VISITOR_WRONG_ENTRY",
+          visitorId: visitor.id,
+          reportId: report.id,
+          visitorName: visitor.name,
+        },
+      };
+
+      try {
+        await notifySocietyRoles({
+          societyId,
+          roles: [UserRole.GUARD, UserRole.ADMIN],
+          title: payload.title,
+          body: payload.body,
+          data: payload.data,
+          category: NotificationCategory.VISITOR,
+        });
+
+        if (visitor.checkedInByGuardId) {
+          await notifyUsers([visitor.checkedInByGuardId], payload, {
+            category: NotificationCategory.VISITOR,
+          });
+        }
+      } catch (err) {
+        logger.error({ err, visitorId: visitor.id, reportId: report.id }, "[wrong-entry] notify failed");
+      }
+
+      return res.status(201).json({
+        report,
+        visitor: enrichVisitorForResident({
+          ...visitor,
+          wrongEntryReports: [
+            { id: report.id, status: report.status, createdAt: report.createdAt },
+          ],
+        }),
+      });
     } catch (error) {
       next(error);
     }

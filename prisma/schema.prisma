@@ -172,6 +172,7 @@ model Society {
   maintenancePayments   MaintenancePayment[]
   complaints            Complaint[]
   paymentDisputes       PaymentDispute[]
+  visitorWrongEntryReports VisitorWrongEntryReport[]
   vendors               Vendor[]
   notices               Notice[]
   visitors              Visitor[]
@@ -424,7 +425,10 @@ model User {
   complaints        Complaint[]          @relation("ResidentComplaints")
   paymentDisputes     PaymentDispute[]     @relation("PaymentDisputeResident")
   paymentDisputesResolved PaymentDispute[] @relation("PaymentDisputeResolver")
+  visitorWrongEntryReports VisitorWrongEntryReport[] @relation("VisitorWrongEntryReporter")
+  visitorWrongEntryReportsResolved VisitorWrongEntryReport[] @relation("VisitorWrongEntryResolver")
   familyMembers     FamilyMember[]       @relation("ResidentFamilyMembers")
+  familyMemberDelegations FamilyMember[] @relation("FamilyMemberDelegate")
   emergencyContacts EmergencyContact[]   @relation("ResidentEmergencyContacts")
   approvedVisitors  PreApprovedVisitor[] @relation("ApprovedVisitors")
   createdBanners    Banner[]
@@ -793,6 +797,8 @@ model Complaint {
   priority    ComplaintPriority  @default(MEDIUM)
   status      ComplaintStatus    @default(OPEN)
   adminNotes  String?            @db.Text
+  /// Optional photo attached when filing (Cloudinary URL).
+  photoUrl    String?
   slaDeadline DateTime?
   slaBreachNotifiedAt DateTime?
   resolvedAt  DateTime?
@@ -1067,6 +1073,7 @@ model Visitor {
   villaVisits    VisitorVilla[]
   checkpoints    VisitorCheckpoint[]
   guardClientMutations GuardClientMutation[]
+  wrongEntryReports VisitorWrongEntryReport[]
 
   @@index([societyId])
   @@index([gateId])
@@ -1078,9 +1085,43 @@ model Visitor {
   @@index([societyId, checkInAt])
   @@index([societyId, checkInTime])
   @@index([societyId, checkOutTime])
+  @@index([societyId, expectedCheckoutAt])
   @@index([checkedInByGuardId])
   @@index([checkedOutByGuardId])
   @@index([preApprovedId])
+}
+
+enum VisitorWrongEntryStatus {
+  OPEN
+  ACKNOWLEDGED
+  DISMISSED
+}
+
+/// Resident reports a visitor who was checked in to the wrong flat / unexpectedly.
+model VisitorWrongEntryReport {
+  id               String                  @id @default(cuid())
+  societyId        String
+  visitorId        String
+  reportedByUserId String
+  reason           String
+  residentNote     String?                 @db.Text
+  status           VisitorWrongEntryStatus @default(OPEN)
+  resolvedById     String?
+  resolvedAt       DateTime?
+  adminNote        String?                 @db.Text
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  society    Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  visitor    Visitor @relation(fields: [visitorId], references: [id], onDelete: Cascade)
+  reportedBy User    @relation("VisitorWrongEntryReporter", fields: [reportedByUserId], references: [id], onDelete: Cascade)
+  resolvedBy User?   @relation("VisitorWrongEntryResolver", fields: [resolvedById], references: [id], onDelete: SetNull)
+
+  @@unique([visitorId, reportedByUserId])
+  @@index([societyId, status])
+  @@index([visitorId])
+  @@index([reportedByUserId])
+  @@index([societyId, createdAt])
 }
 
 /// Idempotency ledger for guard mobile offline sync (check-in/out replay).
@@ -1669,14 +1710,19 @@ model FamilyMember {
   age          Int?
   phone        String?
   idProof      String?  // Added for mobile API
+  /// When true, linked app user (same villa) may approve gate visitors for this flat.
+  canApproveVisitors Boolean @default(false)
+  linkedUserId       String?
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 
-  villa    Villa? @relation(fields: [villaId], references: [id], onDelete: Cascade)
-  resident User   @relation("ResidentFamilyMembers", fields: [residentId], references: [id], onDelete: Cascade)
+  villa        Villa? @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  resident     User   @relation("ResidentFamilyMembers", fields: [residentId], references: [id], onDelete: Cascade)
+  linkedUser   User?  @relation("FamilyMemberDelegate", fields: [linkedUserId], references: [id], onDelete: SetNull)
 
   @@index([villaId])
   @@index([residentId])
+  @@index([linkedUserId])
 }
 
 // Emergency Contacts

@@ -10,6 +10,7 @@ import {
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { resolveFamilyVisitorDelegateUserIds } from "../../lib/familyVisitorDelegation";
 import { expectedCheckoutAtForVisitorType } from "../../lib/visitorTypePresets";
 import { notifyUsers } from "../../services/notification.service";
 
@@ -747,6 +748,11 @@ export async function resolveVisitorApprovalRecipientIds(params: {
       });
       for (const x of list) ids.add(x.id);
     }
+    const delegateIds = await resolveFamilyVisitorDelegateUserIds(params.prisma, {
+      societyId: params.societyId,
+      villaIds: [...new Set(params.targets.map((t) => t.villaId))],
+    });
+    for (const id of delegateIds) ids.add(id);
     return [...ids];
   }
 
@@ -762,5 +768,10 @@ export async function resolveVisitorApprovalRecipientIds(params: {
     distinct: ["id"],
   });
 
-  return residents.map((r) => r.id);
+  const delegateIds = await resolveFamilyVisitorDelegateUserIds(params.prisma, {
+    societyId: params.societyId,
+    villaIds: params.villaIds,
+  });
+
+  return [...new Set([...residents.map((r) => r.id), ...delegateIds])];
 }

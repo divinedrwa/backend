@@ -10,21 +10,14 @@ import { cacheMiddleware, invalidateSocietyCache } from "../../middlewares/cache
 import { brandingImageMemory } from "../../lib/brandingImageUpload";
 import { uploadBannerImageBuffer } from "../../services/cloudinaryBanner";
 import { isCloudinaryConfigured } from "../../services/cloudinaryProfile";
+import {
+  bannerEndDateStillActiveWhere,
+  bannerIsInActiveWindow,
+  normalizeBannerEndDate,
+  normalizeBannerStartDate,
+} from "../../lib/bannerSchedule";
 
 const router = Router();
-
-/** Banner is eligible for resident home carousel — same window as GET /active/list. */
-function bannerIsInActiveWindow(banner: {
-  isActive: boolean;
-  startDate: Date;
-  endDate: Date | null;
-}): boolean {
-  const now = new Date();
-  if (!banner.isActive) return false;
-  if (banner.startDate > now) return false;
-  if (banner.endDate != null && banner.endDate < now) return false;
-  return true;
-}
 
 function notifyResidentsAboutBanner(banner: {
   id: string;
@@ -119,7 +112,7 @@ router.get("/active/list", cacheMiddleware(120), async (req, res, next) => {
         startDate: {
           lte: now,
         },
-        OR: [{ endDate: null }, { endDate: { gte: now } }],
+        ...bannerEndDateStillActiveWhere(now),
       },
       select: {
         id: true,
@@ -153,7 +146,7 @@ router.post("/:id/register", async (req, res, next) => {
         societyId: req.auth!.societyId,
         isActive: true,
         startDate: { lte: now },
-        OR: [{ endDate: null }, { endDate: { gte: now } }],
+        ...bannerEndDateStillActiveWhere(now),
       },
       select: {
         id: true,
@@ -297,8 +290,10 @@ router.post(
           imageUrl: data.imageUrl,
           type: data.type || BannerType.ANNOUNCEMENT,
           priority: data.priority ?? 0,
-          startDate: data.startDate ? new Date(data.startDate) : new Date(),
-          endDate: data.endDate ? new Date(data.endDate) : null,
+          startDate: data.startDate
+            ? normalizeBannerStartDate(new Date(data.startDate))
+            : new Date(),
+          endDate: data.endDate ? normalizeBannerEndDate(new Date(data.endDate)) : null,
           isActive: data.isActive ?? true,
           actionUrl: data.actionUrl,
           societyId: req.auth!.societyId,
@@ -358,8 +353,12 @@ router.put(
       if (data.imageUrl !== undefined) updateData.imageUrl = data.imageUrl;
       if (data.type !== undefined) updateData.type = data.type;
       if (data.priority !== undefined) updateData.priority = data.priority;
-      if (data.startDate !== undefined) updateData.startDate = new Date(data.startDate);
-      if (data.endDate !== undefined) updateData.endDate = data.endDate ? new Date(data.endDate) : null;
+      if (data.startDate !== undefined) {
+        updateData.startDate = normalizeBannerStartDate(new Date(data.startDate));
+      }
+      if (data.endDate !== undefined) {
+        updateData.endDate = data.endDate ? normalizeBannerEndDate(new Date(data.endDate)) : null;
+      }
       if (data.isActive !== undefined) updateData.isActive = data.isActive;
       if (data.actionUrl !== undefined) updateData.actionUrl = data.actionUrl;
 
