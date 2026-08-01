@@ -6,6 +6,7 @@ import { validateBody } from "../../middlewares/validate";
 import { Gate, GuardShift, UserRole, SOSStatus } from "@prisma/client";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { resolveGuardDutyPhone } from "../../lib/guardDutyPhone";
+import { localDayRange } from "../../lib/societyTime";
 
 type GuardShiftWithGate = GuardShift & { gate: Gate };
 import {
@@ -45,10 +46,8 @@ router.get("/my-dashboard", requireRole(UserRole.GUARD), async (req, res, next) 
     }
 
     const now = new Date();
-    const today = new Date(now);
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { start: today, end: todayEnd } = localDayRange(now);
+    const tomorrow = new Date(todayEnd.getTime() + 1);
 
     const currentShift = await findActiveGuardShift(prisma, {
       guardId: userId,

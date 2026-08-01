@@ -31,9 +31,9 @@ describe("deriveCycleStatus (IST calendar days)", () => {
       deriveCycleStatus(new Date("2026-05-31T19:30:00.000Z"), start, end, IST),
       BillingCycleStatus.OPEN,
     );
-    // June 15 11pm IST
+    // June 15 11pm IST (= 17:30 UTC)
     assert.equal(
-      deriveCycleStatus(new Date("2026-06-15T18:30:00.000Z"), start, end, IST),
+      deriveCycleStatus(new Date("2026-06-15T17:30:00.000Z"), start, end, IST),
       BillingCycleStatus.OPEN,
     );
   });

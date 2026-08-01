@@ -4,6 +4,7 @@ import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
 import { prisma } from "../../lib/prisma";
+import { localDayRange } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
@@ -29,8 +30,7 @@ router.use(requireAuth);
 router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const societyId = req.auth!.societyId;
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
+    const { start: todayStart } = localDayRange();
     const pagination = getPagination(req);
     const { search, status, gateId, startDate, endDate } = req.query;
     const where: Prisma.VisitorWhereInput = { societyId };

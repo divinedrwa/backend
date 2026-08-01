@@ -1,37 +1,45 @@
 /**
- * Banner schedule helpers — date-only admin picks must be inclusive through end of day.
- * Legacy rows may store endDate as UTC midnight of the last day; queries treat that as
- * "visible for the full calendar day" as well.
+ * Banner schedule helpers — date-only admin picks are inclusive IST calendar days.
+ * Legacy rows may store endDate as midnight UTC; normalization expands to full local day.
  */
+import type { Prisma } from "@prisma/client";
+import {
+  endOfLocalCalendarDay,
+  localDayRange,
+  societyTimeZone,
+  startOfLocalCalendarDay,
+} from "./societyTime";
 
+const TZ = societyTimeZone();
+
+/** @deprecated Use startOfLocalCalendarDay — kept for tests migrating from UTC helpers. */
 export function startOfUtcDay(d: Date): Date {
-  return new Date(Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate()));
+  return startOfLocalCalendarDay(d, TZ);
 }
 
+/** @deprecated Use endOfLocalCalendarDay — kept for tests migrating from UTC helpers. */
 export function endOfUtcDay(d: Date): Date {
-  return new Date(
-    Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate(), 23, 59, 59, 999),
-  );
+  return endOfLocalCalendarDay(d, TZ);
 }
 
-/** Normalize stored start to UTC start-of-day. */
-export function normalizeBannerStartDate(date: Date): Date {
-  return startOfUtcDay(date);
+/** Normalize stored start to society-local start-of-day. */
+export function normalizeBannerStartDate(date: Date, timeZone = TZ): Date {
+  return startOfLocalCalendarDay(date, timeZone);
 }
 
-/** Normalize stored end to UTC end-of-day so "31 Jul" means through 23:59:59 UTC that day. */
-export function normalizeBannerEndDate(date: Date): Date {
-  return endOfUtcDay(date);
+/** Normalize stored end to society-local end-of-day so "31 Jul" means through 23:59:59 IST. */
+export function normalizeBannerEndDate(date: Date, timeZone = TZ): Date {
+  return endOfLocalCalendarDay(date, timeZone);
 }
 
 export function bannerStartDateIsActive(startDate: Date, now: Date): boolean {
   return startDate <= now;
 }
 
-/** Inclusive end: valid through the entire UTC calendar day of endDate. */
-export function bannerEndDateIsActive(endDate: Date | null, now: Date): boolean {
+/** Inclusive end: valid through the entire society-local calendar day of endDate. */
+export function bannerEndDateIsActive(endDate: Date | null, now: Date, timeZone = TZ): boolean {
   if (endDate == null) return true;
-  return endOfUtcDay(endDate) >= now;
+  return endOfLocalCalendarDay(endDate, timeZone) >= now;
 }
 
 export function bannerIsInActiveWindow(banner: {
@@ -46,12 +54,12 @@ export function bannerIsInActiveWindow(banner: {
   return true;
 }
 
-import type { Prisma } from "@prisma/client";
-
 /** Prisma where fragment for banners still within their end window (inclusive last day). */
-export function bannerEndDateStillActiveWhere(now: Date): Pick<Prisma.BannerWhereInput, "OR"> {
-  const startOfToday = startOfUtcDay(now);
-  const endOfToday = endOfUtcDay(now);
+export function bannerEndDateStillActiveWhere(
+  now: Date,
+  timeZone = TZ,
+): Pick<Prisma.BannerWhereInput, "OR"> {
+  const { start: startOfToday, end: endOfToday } = localDayRange(now, timeZone);
   return {
     OR: [
       { endDate: null },

@@ -13,6 +13,7 @@ import PDFDocument from "pdfkit";
 import { clearExcludedResidentsUserCyclePayments } from "../../lib/maintenanceBillingRole";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { prisma } from "../../lib/prisma";
+import { parseMonthYearFromQuery } from "../../lib/societyTime";
 import {
   ensureVillaLedgersAligned,
   syncBillingUserCyclePaymentsFromSnapshot,
@@ -61,17 +62,7 @@ const additionalFundSchema = z.object({
 });
 
 function parseMonthYear(query: Record<string, unknown>) {
-  const now = new Date();
-  const rawM = query?.month;
-  const rawY = query?.year;
-  const mPick = Array.isArray(rawM) ? rawM[0] : rawM;
-  const yPick = Array.isArray(rawY) ? rawY[0] : rawY;
-  const month = Number(mPick ?? now.getMonth() + 1);
-  const year = Number(yPick ?? now.getFullYear());
-  return {
-    month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : now.getMonth() + 1,
-    year: Number.isFinite(year) && year >= 2000 ? year : now.getFullYear(),
-  };
+  return parseMonthYearFromQuery(query);
 }
 
 function tenantSocietyId(req: { auth?: { societyId?: string | null } }): string | null {

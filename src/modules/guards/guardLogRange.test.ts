@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
+import { localDateKey } from "../../lib/societyTime";
 import { isNowWithinShift, resolveGuardLogRange } from "./guardLogRange";
 
 describe("resolveGuardLogRange", () => {
@@ -17,17 +18,15 @@ describe("resolveGuardLogRange", () => {
     assert.match(r.message, /Both from and to/);
   });
 
-  it("parses inclusive range", () => {
+  it("parses inclusive range in society local calendar", () => {
     const r = resolveGuardLogRange({
       from: "2026-04-01",
       to: "2026-04-03",
     });
     assert.equal(r.ok, true);
     if (!r.ok) return;
-    assert.equal(r.start.getFullYear(), 2026);
-    assert.equal(r.start.getMonth(), 3);
-    assert.equal(r.start.getDate(), 1);
-    assert.equal(r.endInclusive.getDate(), 3);
+    assert.equal(localDateKey(r.start), "2026-04-01");
+    assert.equal(localDateKey(r.endInclusive), "2026-04-03");
   });
 
   it("rejects from after to", () => {

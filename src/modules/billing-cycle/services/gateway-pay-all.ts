@@ -3,6 +3,7 @@ import { prisma } from "../../../lib/prisma";
 import { getVillaCreditBalance } from "../../maintenance-management/credit-walker";
 import { computeAmountDueForCycle } from "../domain/amountDue";
 import { computeUserBillingLedger } from "./cycle-service";
+import { nowLocalYmd } from "../../../lib/societyTime";
 
 export type GatewayCheckoutQuote = {
   /** Maintenance due before advance credit (matches hub remainingDue). */
@@ -31,8 +32,7 @@ function parseCycleMonthYear(cycleKey: string): { month: number; year: number } 
   if (m) {
     return { year: Number(m[1]), month: Number(m[2]) };
   }
-  const now = new Date();
-  return { month: now.getMonth() + 1, year: now.getFullYear() };
+  return nowLocalYmd();
 }
 
 /** Strict variant — undefined (not "now") when the key is unparsable. */

@@ -2,6 +2,7 @@ import { UserRole } from "@prisma/client";
 import { Router } from "express";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
+import { endOfLocalCalendarDay, localDateKey, parseLocalDateKey } from "../../lib/societyTime";
 
 const router = Router();
 
@@ -69,7 +70,7 @@ router.get("/overview", async (req, res, next) => {
     // Group by date
     const byDate: Record<string, BookingWithAmenity[]> = {};
     bookings.forEach((b) => {
-      const dateKey = new Date(b.startTime).toISOString().split("T")[0];
+      const dateKey = localDateKey(new Date(b.startTime));
       if (!byDate[dateKey]) byDate[dateKey] = [];
       byDate[dateKey].push(b);
     });
@@ -177,11 +178,8 @@ router.get("/daily/:date", async (req, res, next) => {
     const { societyId } = req.auth!;
     const { date } = req.params;
 
-    const targetDate = new Date(date);
-    const startOfDay = new Date(targetDate);
-    startOfDay.setHours(0, 0, 0, 0);
-    const endOfDay = new Date(targetDate);
-    endOfDay.setHours(23, 59, 59, 999);
+    const startOfDay = parseLocalDateKey(date);
+    const endOfDay = endOfLocalCalendarDay(startOfDay);
 
     const bookings = await prisma.amenityBooking.findMany({
       where: {
@@ -259,7 +257,7 @@ router.get("/daily/:date", async (req, res, next) => {
     });
 
     return res.json({
-      date: targetDate,
+      date,
       totalBookings: bookings.length,
       bookings,
       hourlyBookings,

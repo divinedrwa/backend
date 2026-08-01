@@ -1,4 +1,6 @@
 /** Total amount due on a villa snapshot (base maintenance + late fee). */
+import { localDateKey } from "../../lib/societyTime";
+
 export function resolveSnapshotExpectedTotal(
   expectedAmount: unknown,
   lateFeeAmount?: unknown | null,
@@ -45,10 +47,8 @@ export function refreshSnapshotStatus(
   if (e <= 0 && p <= 0) return "PENDING";
   if (p >= e) return "PAID";
   if (p > 0) return "PARTIAL";
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-  const due = new Date(dueDate);
-  due.setHours(0, 0, 0, 0);
-  if (isFinite(due.getTime()) && today > due) return "OVERDUE";
+  const todayKey = localDateKey(new Date());
+  const dueKey = localDateKey(dueDate);
+  if (isFinite(dueDate.getTime()) && todayKey > dueKey) return "OVERDUE";
   return "PENDING";
 }

@@ -147,3 +147,48 @@ export function endOfLocalCalendarDay(instant: Date, timeZone = DEFAULT_TZ): Dat
   const [y, m, d] = key.split("-").map(Number);
   return new Date(zonedDayStartUtc(y, m - 1, d + 1, timeZone).getTime() - 1);
 }
+
+/** Inclusive local-day window [start, end] for the calendar day containing `instant`. */
+export function localDayRange(
+  instant = new Date(),
+  timeZone = DEFAULT_TZ,
+): { start: Date; end: Date } {
+  return {
+    start: startOfLocalCalendarDay(instant, timeZone),
+    end: endOfLocalCalendarDay(instant, timeZone),
+  };
+}
+
+/** Parse YYYY-MM-DD as society-local calendar day start. */
+export function parseLocalDateKey(dateKey: string, timeZone = DEFAULT_TZ): Date {
+  const [y, m, d] = dateKey.trim().split("-").map(Number);
+  if (!Number.isFinite(y) || !Number.isFinite(m) || !Number.isFinite(d)) {
+    throw new Error(`Invalid local date key: ${dateKey}`);
+  }
+  return zonedDayStartUtc(y, m - 1, d, timeZone);
+}
+
+/** Current society-local Y/M/D parts. */
+export function nowLocalYmd(timeZone = DEFAULT_TZ): { year: number; month: number; day: number } {
+  const key = localDateKey(new Date(), timeZone);
+  const [year, month, day] = key.split("-").map(Number);
+  return { year, month, day };
+}
+
+/** Default month/year for API query params (society local calendar). */
+export function parseMonthYearFromQuery(
+  query: Record<string, unknown>,
+  timeZone = DEFAULT_TZ,
+): { month: number; year: number } {
+  const { year: defaultYear, month: defaultMonth } = nowLocalYmd(timeZone);
+  const rawM = query?.month;
+  const rawY = query?.year;
+  const mPick = Array.isArray(rawM) ? rawM[0] : rawM;
+  const yPick = Array.isArray(rawY) ? rawY[0] : rawY;
+  const month = Number(mPick ?? defaultMonth);
+  const year = Number(yPick ?? defaultYear);
+  return {
+    month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : defaultMonth,
+    year: Number.isFinite(year) && year >= 2000 ? year : defaultYear,
+  };
+}

@@ -10,6 +10,7 @@ import {
 } from "../../lib/maintenanceBillingRole";
 import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
+import { startOfLocalCalendarDay } from "../../lib/societyTime";
 import { validateBody } from "../../middlewares/validate";
 import {
   ensureVillaLedgersAligned,
@@ -1234,10 +1235,8 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
 
       let daysOverdue = 0;
       if (s.status === "OVERDUE" && cycle.dueDate) {
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const due = new Date(cycle.dueDate);
-        due.setHours(0, 0, 0, 0);
+        const today = startOfLocalCalendarDay(new Date());
+        const due = startOfLocalCalendarDay(new Date(cycle.dueDate));
         daysOverdue = Math.max(0, Math.floor((today.getTime() - due.getTime()) / (1000 * 60 * 60 * 24)));
       }
 

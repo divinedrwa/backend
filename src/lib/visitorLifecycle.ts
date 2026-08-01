@@ -1,4 +1,5 @@
 import { VisitorStatus } from "@prisma/client";
+import { localDayRange as societyLocalDayRange } from "./societyTime";
 
 type VisitorCheckoutFields = {
   checkOutTime?: Date | string | null;
@@ -41,13 +42,9 @@ export function visitorCheckOutDate(visitor: VisitorCheckoutFields): Date | null
   return toDate(visitor.checkOutTime ?? visitor.checkOutAt);
 }
 
-/** Local-day bounds for society visitor summaries (server runs in UTC; dates are calendar days). */
+/** Society-local calendar day bounds (Asia/Kolkata by default). */
 export function localDayRange(now = new Date()): { start: Date; end: Date } {
-  const start = new Date(now);
-  start.setHours(0, 0, 0, 0);
-  const end = new Date(start);
-  end.setDate(end.getDate() + 1);
-  return { start, end };
+  return societyLocalDayRange(now);
 }
 
 export function visitorCheckedInOnDay(
@@ -57,7 +54,7 @@ export function visitorCheckedInOnDay(
   const checkIn = visitorCheckInDate(visitor);
   if (!checkIn) return false;
   const { start, end } = localDayRange(day);
-  return checkIn >= start && checkIn < end;
+  return checkIn >= start && checkIn <= end;
 }
 
 export function summarizeVisitorsToday<

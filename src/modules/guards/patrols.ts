@@ -2,6 +2,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
+import { localDayRange } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { UserRole, PatrolStatus, IncidentSeverity, VisitorStatus } from "@prisma/client";
@@ -172,10 +173,8 @@ router.get("/patrols-today", requireRole(UserRole.GUARD), async (req, res, next)
   try {
     const { userId, societyId } = req.auth!;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { start: today, end: todayEnd } = localDayRange();
+    const tomorrow = new Date(todayEnd.getTime() + 1);
 
     const patrols = await prisma.guardPatrol.findMany({
       where: {
@@ -227,10 +226,8 @@ router.get("/checklist", requireRole(UserRole.GUARD), async (req, res, next) => 
   try {
     const { userId, societyId } = req.auth!;
 
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const tomorrow = new Date(today);
-    tomorrow.setDate(tomorrow.getDate() + 1);
+    const { start: today, end: todayEnd } = localDayRange();
+    const tomorrow = new Date(todayEnd.getTime() + 1);
 
     // Get today's completed tasks
     const [visitorsCheckedIn, parcelsLogged, patrolsCompleted, _incidentsReported] = await Promise.all([

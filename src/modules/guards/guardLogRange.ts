@@ -1,26 +1,35 @@
 /** Shared date-range parsing for guard log APIs (`from` / `to` query params). */
 
+import {
+  endOfLocalCalendarDay,
+  localDayRange,
+  parseLocalDateKey,
+  startOfLocalCalendarDay,
+} from "../../lib/societyTime";
+
 export type GuardLogRangeOk = { ok: true; start: Date; endInclusive: Date };
 export type GuardLogRangeErr = { ok: false; message: string };
 export type GuardLogRangeResult = GuardLogRangeOk | GuardLogRangeErr;
 
 const MAX_RANGE_MS = 90 * 24 * 60 * 60 * 1000;
 
-function startOfLocalDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(0, 0, 0, 0);
-  return x;
-}
-
-function endOfLocalDay(d: Date): Date {
-  const x = new Date(d);
-  x.setHours(23, 59, 59, 999);
-  return x;
+function parseQueryDate(value: string): Date | null {
+  const trimmed = value.trim();
+  if (!trimmed) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    try {
+      return parseLocalDateKey(trimmed);
+    } catch {
+      return null;
+    }
+  }
+  const d = new Date(trimmed);
+  return Number.isNaN(d.getTime()) ? null : d;
 }
 
 /**
- * No `from`/`to`: today's window [local midnight, local end of day].
- * Both `from` and `to`: inclusive range per calendar day (server local TZ).
+ * No `from`/`to`: today's window [society-local midnight, society-local end of day].
+ * Both `from` and `to`: inclusive range per IST calendar day.
  */
 export function resolveGuardLogRange(query: Record<string, unknown>): GuardLogRangeResult {
   const fromRaw = query.from;
@@ -29,9 +38,7 @@ export function resolveGuardLogRange(query: Record<string, unknown>): GuardLogRa
   const toStr = typeof toRaw === "string" ? toRaw.trim() : "";
 
   if (!fromStr && !toStr) {
-    const today = new Date();
-    const start = startOfLocalDay(today);
-    const end = endOfLocalDay(today);
+    const { start, end } = localDayRange();
     return { ok: true, start, endInclusive: end };
   }
 
@@ -39,14 +46,14 @@ export function resolveGuardLogRange(query: Record<string, unknown>): GuardLogRa
     return { ok: false, message: "Both from and to are required for a custom date range" };
   }
 
-  const start = new Date(fromStr);
-  const endParse = new Date(toStr);
-  if (Number.isNaN(start.getTime()) || Number.isNaN(endParse.getTime())) {
+  const startParse = parseQueryDate(fromStr);
+  const endParse = parseQueryDate(toStr);
+  if (!startParse || !endParse) {
     return { ok: false, message: "Invalid from or to date (use ISO date or datetime)" };
   }
 
-  const rangeStart = startOfLocalDay(start);
-  const rangeEnd = endOfLocalDay(endParse);
+  const rangeStart = startOfLocalCalendarDay(startParse);
+  const rangeEnd = endOfLocalCalendarDay(endParse);
 
   if (rangeStart.getTime() > rangeEnd.getTime()) {
     return { ok: false, message: "from must be on or before to" };

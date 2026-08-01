@@ -3,16 +3,16 @@ import { describe, it } from "node:test";
 import {
   bannerEndDateIsActive,
   bannerEndDateStillActiveWhere,
-  bannerIsInActiveWindow,
+  bannerStartDateIsActive,
   endOfUtcDay,
   normalizeBannerEndDate,
   normalizeBannerStartDate,
 } from "./bannerSchedule";
 
 describe("bannerSchedule", () => {
-  it("normalizeBannerEndDate extends midnight to end of UTC day", () => {
+  it("normalizeBannerEndDate extends midnight to end of IST calendar day", () => {
     const raw = new Date("2026-07-31T00:00:00.000Z");
-    assert.equal(normalizeBannerEndDate(raw).toISOString(), "2026-07-31T23:59:59.999Z");
+    assert.equal(normalizeBannerEndDate(raw).toISOString(), "2026-07-31T18:29:59.999Z");
   });
 
   it("bannerEndDateIsActive treats legacy midnight end as full calendar day", () => {
@@ -23,16 +23,15 @@ describe("bannerSchedule", () => {
     assert.equal(bannerEndDateIsActive(endDate, nextDay), false);
   });
 
-  it("bannerIsInActiveWindow matches admin intent for Jul 30–31 range on Jul 31", () => {
-    const banner = {
-      isActive: true,
-      startDate: normalizeBannerStartDate(new Date("2026-07-30T00:00:00.000Z")),
-      endDate: new Date("2026-07-31T00:00:00.000Z"), // legacy midnight from admin date picker
-    };
-    assert.equal(bannerIsInActiveWindow(banner), true);
+  it("active window covers Jul 30–31 inclusive on Jul 31 midday IST", () => {
+    const startDate = normalizeBannerStartDate(new Date("2026-07-30T00:00:00.000Z"));
+    const endDate = new Date("2026-07-31T00:00:00.000Z");
+    const middayJul31 = new Date("2026-07-31T12:00:00.000Z");
+    assert.equal(bannerStartDateIsActive(startDate, middayJul31), true);
+    assert.equal(bannerEndDateIsActive(endDate, middayJul31), true);
   });
 
-  it("bannerEndDateStillActiveWhere matches legacy midnight end on same UTC day", () => {
+  it("bannerEndDateStillActiveWhere matches legacy midnight end on same IST day", () => {
     const now = new Date("2026-07-31T12:00:00.000Z");
     const where = bannerEndDateStillActiveWhere(now);
     const legacyEnd = new Date("2026-07-31T00:00:00.000Z");
@@ -46,6 +45,6 @@ describe("bannerSchedule", () => {
     assert.ok(legacyLte);
     assert.equal(legacyEnd >= gteNow, false);
     assert.equal(legacyEnd >= legacyGte && legacyEnd <= legacyLte, true);
-    assert.equal(endOfUtcDay(legacyEnd).toISOString(), "2026-07-31T23:59:59.999Z");
+    assert.equal(endOfUtcDay(legacyEnd).toISOString(), "2026-07-31T18:29:59.999Z");
   });
 });

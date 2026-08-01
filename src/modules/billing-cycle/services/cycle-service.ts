@@ -19,6 +19,7 @@ import {
   pendingDuesToCurrentCycleShape,
 } from "./resident-pending-dues";
 import { autoPublishDueBillingCycles } from "./billing-cycle-publish.service";
+import { localDateKey, localHour } from "../../../lib/societyTime";
 
 /** Residents and payment flows only see billing cycles after admin publishes them. */
 export const publishedBillingCycleFilter = { publishedAt: { not: null } } as const;
@@ -586,16 +587,13 @@ export async function runBillingReminderJobs(nowUtc = new Date()): Promise<void>
 
   // IST is UTC+5:30 (fixed offset, no DST). Avoid toLocaleString which is
   // implementation-defined and may not round-trip through new Date().
-  const indiaNow = new Date(nowUtc.getTime() + 5.5 * 60 * 60 * 1000);
-  const slotHour = indiaNow.getHours();
+  const slotHour = localHour(nowUtc);
   const runSlot = slotHour === 9 || slotHour === 19;
   if (!runSlot) {
     return;
   }
   const slot = slotHour === 9 ? "morning" : "evening";
-  const dateKey = `${indiaNow.getFullYear()}-${String(indiaNow.getMonth() + 1).padStart(2, "0")}-${String(
-    indiaNow.getDate(),
-  ).padStart(2, "0")}`;
+  const dateKey = localDateKey(nowUtc);
 
   const societies = [...new Set(cycles.map((c) => c.societyId))];
   for (const societyId of societies) {

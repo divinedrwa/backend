@@ -25,23 +25,14 @@ import {
   buildFyMaintenanceStatementPdf,
   monthYearWithinFinancialYear,
 } from "../../lib/maintenanceStatementPdf";
+import { parseMonthYearFromQuery } from "../../lib/societyTime";
 
 const router = Router();
 
 router.use(requireAuth);
 
 function parseMonthYear(query: Record<string, unknown>) {
-  const now = new Date();
-  const rawM = query?.month;
-  const rawY = query?.year;
-  const mPick = Array.isArray(rawM) ? rawM[0] : rawM;
-  const yPick = Array.isArray(rawY) ? rawY[0] : rawY;
-  const month = Number(mPick ?? now.getMonth() + 1);
-  const year = Number(yPick ?? now.getFullYear());
-  return {
-    month: Number.isFinite(month) && month >= 1 && month <= 12 ? month : now.getMonth() + 1,
-    year: Number.isFinite(year) && year >= 2000 ? year : now.getFullYear(),
-  };
+  return parseMonthYearFromQuery(query);
 }
 
 function snapshotTotalExpected(expectedAmount: unknown, lateFeeAmount: unknown): number {
@@ -111,7 +102,8 @@ function parseCycleMonthYear(cycleKey: string, dueDate: Date | null): { month: n
     };
   }
   const now = new Date();
-  return { month: now.getMonth() + 1, year: now.getFullYear() };
+  const { month, year } = parseMonthYearFromQuery({});
+  return { month, year };
 }
 
 async function buildResidentLedgerRows(societyId: string, userId: string): Promise<ResidentLedgerRow[]> {
@@ -703,9 +695,7 @@ router.get("/maintenance-summary", requireRole(UserRole.RESIDENT, UserRole.ADMIN
       .reduce((sum, m) => sum + Number(m.amount), 0);
 
     // Get current month status
-    const now = new Date();
-    const currentMonth = now.getMonth() + 1;
-    const currentYear = now.getFullYear();
+    const { month: currentMonth, year: currentYear } = parseMonthYearFromQuery({});
 
     const currentMonthMaintenance = await prisma.maintenance.findFirst({
       where: {

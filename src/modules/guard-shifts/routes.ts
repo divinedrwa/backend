@@ -8,6 +8,7 @@ import {
   buildRosterShiftRows,
   ROSTER_SHIFT_DURATIONS_HOURS,
 } from "../../lib/guardShiftRoster";
+import { startOfLocalCalendarDay } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
@@ -18,8 +19,7 @@ function buildRecurringAnchorTimes(recurringStartMinutes: number, recurringEndMi
   startTime: Date;
   endTime: Date;
 } {
-  const base = new Date();
-  base.setHours(0, 0, 0, 0);
+  const base = startOfLocalCalendarDay(new Date());
 
   const startTime = new Date(base);
   startTime.setMinutes(recurringStartMinutes);

@@ -11,6 +11,7 @@ import { findActiveShiftsForSociety } from "../../lib/guardShiftActive";
 import { resolveGuardDutyPhone } from "../../lib/guardDutyPhone";
 import { profileImageMemory } from "../../lib/profileImageUpload";
 import { getCachedMoneySnapshot } from "../../lib/societyFinance";
+import { nowLocalYmd } from "../../lib/societyTime";
 import {
   buildPendingDuesFromLedger,
   reconcileVillaLedgersForRecentCycles,
@@ -249,9 +250,8 @@ router.get("/dashboard", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (
     const maintenanceBillingExcluded =
       user?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
 
+    const { month, year } = nowLocalYmd();
     const now = new Date();
-    const month = now.getMonth() + 1;
-    const year = now.getFullYear();
 
     let personalPendingCount = 0;
     let personalPendingAmount = 0;
