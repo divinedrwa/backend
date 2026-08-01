@@ -18,6 +18,7 @@ import {
   buildPendingDuesFromLedger,
   pendingDuesToCurrentCycleShape,
 } from "./resident-pending-dues";
+import { autoPublishDueBillingCycles } from "./billing-cycle-publish.service";
 
 /** Residents and payment flows only see billing cycles after admin publishes them. */
 export const publishedBillingCycleFilter = { publishedAt: { not: null } } as const;
@@ -95,6 +96,8 @@ export async function invalidateDisplayCycleHint(societyId: string): Promise<voi
 
 /** Latest cycleKey in the active FY → fallback to latest cycleKey overall. */
 export async function findDisplayCycle(societyId: string, nowUtc = new Date()): Promise<BillingCycle | null> {
+  await autoPublishDueBillingCycles(nowUtc, { societyId });
+
   const k = `${DISPLAY_CYCLE_KEY_PREFIX}${encodeURIComponent(societyId)}`;
   const cachedId = await billingCacheGet(k);
   if (cachedId) {
@@ -113,6 +116,8 @@ export async function findDisplayCycle(societyId: string, nowUtc = new Date()): 
 
 /** Hourly cron: persist enum + invalidate cache hints. */
 export async function syncAllBillingCycleStatuses(nowUtc = new Date()): Promise<number> {
+  await autoPublishDueBillingCycles(nowUtc);
+
   const rows = await prisma.billingCycle.findMany({
     select: { id: true, societyId: true, paymentStartDate: true, paymentEndDate: true, status: true },
   });

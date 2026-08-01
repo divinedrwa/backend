@@ -3,6 +3,7 @@ import { prisma } from "../../../lib/prisma";
 import { deriveCycleStatusUtc, isAppVisibleBillingCycle } from "../domain/cycleStatus";
 import { ensureVillaLedgersAligned } from "../billing-collection-link";
 import { computeUserBillingLedger, publishedBillingCycleFilter } from "./cycle-service";
+import { autoPublishDueBillingCycles } from "./billing-cycle-publish.service";
 
 export type UserPendingDueRow = {
   cycleId: string;
@@ -93,6 +94,8 @@ export async function buildPendingDuesFromLedger(
   userId: string,
   nowUtc = new Date(),
 ): Promise<UserPendingDueRow[]> {
+  await autoPublishDueBillingCycles(nowUtc, { societyId });
+
   const billingSubject = await prisma.user.findFirst({
     where: { id: userId, societyId },
     select: { maintenanceBillingRole: true },

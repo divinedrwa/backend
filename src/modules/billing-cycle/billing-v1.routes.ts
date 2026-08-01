@@ -27,7 +27,7 @@ import {
   postMarkCashToMaintenanceLedger,
 } from "./billing-collection-link";
 import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
-import { deriveCycleStatusUtc, isAppVisibleBillingCycle } from "./domain/cycleStatus";
+import { deriveCycleStatusUtc, isAppVisibleBillingCycle, normalizeBillingPaymentWindow } from "./domain/cycleStatus";
 import {
   buildCurrentCycleResponse,
   computeUserBillingLedger,
@@ -35,6 +35,7 @@ import {
   publishedBillingCycleFilter,
   syncAllBillingCycleStatuses,
 } from "./services/cycle-service";
+import { publishBillingCycle } from "./services/billing-cycle-publish.service";
 import { reconcileVillaLedgersForRecentCycles, invalidateReconcileCache } from "./services/resident-pending-dues";
 import { auditFromRequest } from "../../services/audit.service";
 import { notifyVillaMaintenanceLedgerUpdate } from "../../lib/maintenanceLedgerNotify";
@@ -164,8 +165,12 @@ router.post(
         return;
       }
 
-      const pStart = new Date(paymentStartDate);
-      const pEnd = new Date(paymentEndDate);
+      const pStartRaw = new Date(paymentStartDate);
+      const pEndRaw = new Date(paymentEndDate);
+      const { paymentStartDate: pStart, paymentEndDate: pEnd } = normalizeBillingPaymentWindow(
+        pStartRaw,
+        pEndRaw,
+      );
       const status = deriveCycleStatusUtc(new Date(), pStart, pEnd);
 
       const existing = await prisma.billingCycle.findUnique({
@@ -243,13 +248,19 @@ router.put(
       if (body.amount !== undefined) data.amount = body.amount;
       if (body.lateFee !== undefined) data.lateFee = body.lateFee;
       if (body.gracePeriodDays !== undefined) data.gracePeriodDays = body.gracePeriodDays;
-      if (body.paymentStartDate !== undefined) data.paymentStartDate = new Date(body.paymentStartDate);
-      if (body.paymentEndDate !== undefined) data.paymentEndDate = new Date(body.paymentEndDate);
-
       if (body.paymentStartDate !== undefined || body.paymentEndDate !== undefined) {
-        const pStart = body.paymentStartDate ? new Date(body.paymentStartDate) : found.paymentStartDate;
-        const pEnd = body.paymentEndDate ? new Date(body.paymentEndDate) : found.paymentEndDate;
-        data.status = deriveCycleStatusUtc(new Date(), pStart, pEnd);
+        const pStartRaw = body.paymentStartDate
+          ? new Date(body.paymentStartDate)
+          : found.paymentStartDate;
+        const pEndRaw = body.paymentEndDate ? new Date(body.paymentEndDate) : found.paymentEndDate;
+        const normalized = normalizeBillingPaymentWindow(pStartRaw, pEndRaw);
+        if (body.paymentStartDate !== undefined) {
+          data.paymentStartDate = normalized.paymentStartDate;
+        }
+        if (body.paymentEndDate !== undefined) {
+          data.paymentEndDate = normalized.paymentEndDate;
+        }
+        data.status = deriveCycleStatusUtc(new Date(), normalized.paymentStartDate, normalized.paymentEndDate);
       }
 
       const cycle = await prisma.billingCycle.update({
@@ -370,9 +381,9 @@ router.post(
         return;
       }
 
-      const cycle = await prisma.billingCycle.update({
-        where: { id },
-        data: { publishedAt: new Date() },
+      const cycle = await publishBillingCycle({
+        societyId: auth.societyId,
+        cycleId: id,
       });
 
       auditFromRequest(req, {
@@ -384,46 +395,6 @@ router.post(
         metadata: { cycleKey: found.cycleKey, title: found.title },
       });
 
-      // Generate maintenance snapshots for every billed (primary-occupant) villa so
-      // admin Outstanding Dues + reconciliation reflect the cycle immediately on publish.
-      // Idempotent (collection cycle is upserted; per-villa snapshots skip when already
-      // present, so existing/paid rows are never overwritten) and best-effort so a sync
-      // failure never blocks publishing. Only runs when the cycle is linked to a financial year.
-      if (found.financialYearId) {
-        try {
-          await prisma.$transaction((tx) =>
-            generateSnapshotsForBillingCycle(tx, {
-              societyId: auth.societyId,
-              billingCycleId: id,
-              cycleAmount: Number(found.amount),
-            }),
-          );
-        } catch (snapErr) {
-          logger.error(
-            { err: snapErr },
-            "[billing-cycle.publish] maintenance snapshot generation failed",
-          );
-        }
-      }
-
-      try {
-        await notifySocietyRoles({
-          societyId: auth.societyId,
-          roles: [...RESIDENT_LIKE_ROLES],
-          category: NotificationCategory.MAINTENANCE,
-          title: "New maintenance billing cycle",
-          body: `${found.title} (${found.cycleKey}) has been published. Please review and pay within the cycle window.`,
-          data: {
-            type: "BILLING_CYCLE_CREATED",
-            cycleId: cycle.id,
-            cycleKey: found.cycleKey,
-          },
-        });
-      } catch (notifyErr) {
-        logger.error({ err: notifyErr }, "[billing-cycle.publish] resident notify failed");
-      }
-
-      await invalidateReconcileCache(auth.societyId);
       res.json({ cycle });
     } catch (e) {
       next(e);

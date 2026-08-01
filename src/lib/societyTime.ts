@@ -133,3 +133,17 @@ export function startOfLocalMonth(monthKey: string, timeZone = DEFAULT_TZ): Date
   const [y, m] = monthKey.split("-").map(Number);
   return zonedDayStartUtc(y, m - 1, 1, timeZone);
 }
+
+/** Local midnight for the calendar day containing `instant` in `timeZone`. */
+export function startOfLocalCalendarDay(instant: Date, timeZone = DEFAULT_TZ): Date {
+  const key = localDateKey(instant, timeZone);
+  const [y, m, d] = key.split("-").map(Number);
+  return zonedDayStartUtc(y, m - 1, d, timeZone);
+}
+
+/** Last millisecond of the local calendar day containing `instant` in `timeZone`. */
+export function endOfLocalCalendarDay(instant: Date, timeZone = DEFAULT_TZ): Date {
+  const key = localDateKey(instant, timeZone);
+  const [y, m, d] = key.split("-").map(Number);
+  return new Date(zonedDayStartUtc(y, m - 1, d + 1, timeZone).getTime() - 1);
+}
