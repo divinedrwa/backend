@@ -9,10 +9,10 @@ import {
   verifyPhonePeCallback,
   verifyPhonePeV2Webhook,
 } from "../../services/phonepe-billing";
-import { notifyUser } from "../../services/notification.service";
 import {
   applyGatewayPaymentSuccess,
   isPayAllGatewayPayment,
+  notifyGatewayPaymentParties,
   resolveGatewayMaintenanceAmount,
 } from "./gateway-payment-settle";
 
@@ -313,27 +313,27 @@ async function settlePhonePePayment(params: {
       "[phonepe webhook] payment settled",
     );
 
-    return { action: "settled" as const, userId: row.userId, cycleId: cycle.id, isSuccess };
+    return {
+      action: "settled" as const,
+      userId: row.userId,
+      cycleId: cycle.id,
+      societyId: cycle.societyId,
+      maintenanceAmount: maintenanceAmountNum,
+      payAllPending,
+      isSuccess,
+    };
   }, { timeout: 30_000 });
 
   if (result.action === "settled" && result.userId) {
-    try {
-      if (result.isSuccess) {
-        await notifyUser(result.userId, {
-          title: "Payment received",
-          body: "Your maintenance payment was recorded successfully.",
-          data: { cycleId: result.cycleId, type: "billing_payment_success" },
-        });
-      } else {
-        await notifyUser(result.userId, {
-          title: "Payment failed",
-          body: "Your maintenance payment could not be processed. Please try again.",
-          data: { cycleId: result.cycleId, type: "billing_payment_failed" },
-        });
-      }
-    } catch {
-      /* optional push */
-    }
+    await notifyGatewayPaymentParties({
+      userId: result.userId,
+      cycleId: result.cycleId,
+      societyId: result.societyId,
+      maintenanceAmount: result.maintenanceAmount,
+      paymentMode: PaymentMode.PHONEPE,
+      payAllPending: result.payAllPending,
+      outcome: result.isSuccess ? "success" : "failed",
+    });
   }
 }
 

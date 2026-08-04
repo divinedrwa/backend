@@ -8,6 +8,7 @@ import { logger } from "../../lib/logger";
 import { invalidateMoneySnapshotCache } from "../../lib/societyFinance";
 import { prisma } from "../../lib/prisma";
 import { notifyUser } from "../../services/notification.service";
+import { notifyAdminsResidentOnlinePaymentSuccess } from "../../lib/residentOnlinePaymentAdminNotify";
 import { recordPaymentAndSyncLedgers } from "../maintenance-payments/record-payment";
 import { invalidateReconcileCache } from "./services/resident-pending-dues";
 import {
@@ -57,8 +58,35 @@ export async function isPayAllGatewayPayment(
 async function notifyGatewayBillingPayment(
   userId: string,
   cycleId: string,
+  societyId: string,
+  maintenanceAmount: number,
+  paymentMode: PaymentMode,
+  payAllPending: boolean,
   outcome: "success" | "failed",
 ): Promise<void> {
+  await notifyGatewayPaymentParties({
+    userId,
+    cycleId,
+    societyId,
+    maintenanceAmount,
+    paymentMode,
+    payAllPending,
+    outcome,
+  });
+}
+
+/** Resident + admin push after gateway settle (webhooks and poll reconciliation). */
+export async function notifyGatewayPaymentParties(params: {
+  userId: string;
+  cycleId: string;
+  societyId: string;
+  maintenanceAmount: number;
+  paymentMode: PaymentMode;
+  payAllPending: boolean;
+  outcome: "success" | "failed";
+}): Promise<void> {
+  const { userId, cycleId, societyId, maintenanceAmount, paymentMode, payAllPending, outcome } =
+    params;
   try {
     if (outcome === "success") {
       await notifyUser(userId, {
@@ -66,6 +94,22 @@ async function notifyGatewayBillingPayment(
         body: "Your maintenance payment was recorded successfully.",
         data: { cycleId, type: "billing_payment_success" },
       });
+
+      const payer = await prisma.user.findUnique({
+        where: { id: userId },
+        select: { villaId: true },
+      });
+      if (payer?.villaId) {
+        await notifyAdminsResidentOnlinePaymentSuccess({
+          societyId,
+          residentUserId: userId,
+          villaId: payer.villaId,
+          amount: maintenanceAmount,
+          cycleId,
+          paymentMode,
+          payAllPending,
+        });
+      }
     } else {
       await notifyUser(userId, {
         title: "Payment failed",
@@ -115,7 +159,15 @@ async function markGatewayPaymentFailed(
   });
 
   if (transitioned && row.userId) {
-    await notifyGatewayBillingPayment(row.userId, row.cycle.id, "failed");
+    await notifyGatewayPaymentParties({
+      userId: row.userId,
+      cycleId: row.cycle.id,
+      societyId: row.cycle.societyId,
+      maintenanceAmount: 0,
+      paymentMode: PaymentMode.ONLINE,
+      payAllPending: false,
+      outcome: "failed",
+    });
   }
   return transitioned;
 }
@@ -534,7 +586,16 @@ async function settleGatewayPayment(
     );
 
     if (newlySettled && row.userId) {
-      await notifyGatewayBillingPayment(row.userId, row.cycle.id, "success");
+      const payAllPending = await isPayAllGatewayPayment(row, params.payAllInitiateStatus);
+      await notifyGatewayBillingPayment(
+        row.userId,
+        row.cycle.id,
+        row.cycle.societyId,
+        maintenanceAmount,
+        params.paymentMode,
+        payAllPending,
+        "success",
+      );
       invalidateMoneySnapshotCache(row.cycle.societyId);
       const villa = await prisma.user.findUnique({
         where: { id: row.userId },

@@ -4,8 +4,7 @@ import { logger } from "../../lib/logger";
 import { prisma } from "../../lib/prisma";
 import { verifyRazorpayWebhookSignature, verifyRazorpayWebhookSignatureWithSecret } from "./services/razorpay-webhook-verify";
 import { getWebhookSecretForSociety } from "./services/razorpay-billing";
-import { notifyUser } from "../../services/notification.service";
-import { applyGatewayPaymentSuccess, isPayAllGatewayPayment, resolveGatewayMaintenanceAmount } from "./gateway-payment-settle";
+import { applyGatewayPaymentSuccess, isPayAllGatewayPayment, notifyGatewayPaymentParties, resolveGatewayMaintenanceAmount } from "./gateway-payment-settle";
 import { parseRazorpayOrderNoteAmounts } from "./services/razorpay-order-notes";
 import {
   isRazorpayWebhookFailEvent,
@@ -282,7 +281,15 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
         "[billing webhook] payment settled",
       );
 
-      return { action: "settled" as const, userId: row.userId, cycleId: cycle.id, isFailure };
+      return {
+        action: "settled" as const,
+        userId: row.userId,
+        cycleId: cycle.id,
+        societyId: cycle.societyId,
+        maintenanceAmount: maintenanceAmountNum,
+        payAllPending,
+        isFailure,
+      };
     });
 
     if (result.action === "skip") {
@@ -295,23 +302,15 @@ export async function billingPaymentWebhookHandler(req: Request, res: Response):
     }
 
     if (result.userId) {
-      try {
-        if (!result.isFailure) {
-          await notifyUser(result.userId, {
-            title: "Payment received",
-            body: "Your maintenance payment was recorded successfully.",
-            data: { cycleId: result.cycleId, type: "billing_payment_success" },
-          });
-        } else {
-          await notifyUser(result.userId, {
-            title: "Payment failed",
-            body: "Your maintenance payment could not be processed. Please try again.",
-            data: { cycleId: result.cycleId, type: "billing_payment_failed" },
-          });
-        }
-      } catch {
-        /* optional push */
-      }
+      await notifyGatewayPaymentParties({
+        userId: result.userId,
+        cycleId: result.cycleId,
+        societyId: result.societyId,
+        maintenanceAmount: result.maintenanceAmount,
+        paymentMode: PaymentMode.ONLINE,
+        payAllPending: result.payAllPending,
+        outcome: result.isFailure ? "failed" : "success",
+      });
     }
 
     res.status(200).json({ ok: true });

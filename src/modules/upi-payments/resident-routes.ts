@@ -5,7 +5,8 @@ import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { cacheMiddleware } from "../../middlewares/cache";
-import { notifySociety } from "../../services/notification.service";
+import { notifySocietyRoles } from "../../services/notification.service";
+import { ADMIN_PAYMENT_NOTIFY_ROLES } from "../../lib/residentOnlinePaymentAdminNotify";
 import { resolveUpiPayUriFromPayload } from "../../lib/buildUpiPaymentIntent";
 
 const router = Router();
@@ -166,19 +167,17 @@ router.post(
       });
 
       const remarkSuffix = remark ? ` — ${remark}` : ` for ${month}/${year}`;
-      await notifySociety(
+      await notifySocietyRoles({
         societyId,
-        {
-          title: "UPI Payment Submitted",
-          body: `${user?.name ?? "Resident"} (Villa ${villa?.villaNumber ?? ""}) submitted ₹${amount} UPI payment${remarkSuffix}`,
-          data: {
-            type: "UPI_PAYMENT_SUBMITTED",
-            submissionId: submission.id,
-          },
+        roles: ADMIN_PAYMENT_NOTIFY_ROLES,
+        category: NotificationCategory.PAYMENT,
+        title: "UPI Payment Submitted",
+        body: `${user?.name ?? "Resident"} (Villa ${villa?.villaNumber ?? ""}) submitted ₹${amount} UPI payment${remarkSuffix}`,
+        data: {
+          type: "UPI_PAYMENT_SUBMITTED",
+          submissionId: submission.id,
         },
-        UserRole.ADMIN,
-        { category: NotificationCategory.PAYMENT },
-      );
+      });
 
       return res.status(201).json({ submission });
     } catch (error) {
