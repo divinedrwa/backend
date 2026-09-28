@@ -255,6 +255,11 @@ model Society {
   /// A8: when true and active charge heads exist, snapshots sum per-head lines.
   useChargeHeads         Boolean  @default(false)
 
+  autoBillingEnabled            Boolean                      @default(false)
+  autoBillingDayOfMonth         Int?
+  autoBillingTemplateRuleType   AutoBillingTemplateRuleType?
+  autoBillingTemplateBaseAmount Decimal?                     @db.Decimal(12, 2)
+
   chargeHeads         SocietyChargeHead[]
   billingCycles       BillingCycle[]
   billingPaymentLogs  BillingPaymentLog[]
@@ -278,6 +283,14 @@ model Society {
   waterSupplyRequests   WaterSupplyRequest[]
 
   subscription SocietySubscription?
+
+  bankStatementUploads         BankStatementUpload[]
+  expenseBudgets               ExpenseBudget[]
+  maintenanceLineItemTemplates MaintenanceLineItemTemplate[]
+  creditTransactions           CreditTransaction[]
+  lateFeeRules                 LateFeeRule[]
+  reminderRules                ReminderRule[]
+  villaLedgerEntries           VillaLedgerEntry[]
 
   @@index([status])
 }
@@ -470,6 +483,11 @@ model User {
   waterSupplyResolutions WaterSupplyRequest[]  @relation("WaterSupplyRequestResolver")
   legalConsents               UserLegalConsent[]
   notificationCategoryPreferences NotificationCategoryPreference[]
+  notificationPreferences     NotificationPreference[]
+  bankStatementUploads        BankStatementUpload[]
+  maintenanceLateFeeWaivers   MaintenanceLateFeeWaiver[]
+  maintenancePaymentsPaid     MaintenancePayment[] @relation("MaintenancePaymentPaidBy")
+  maintenancePaymentsApproved MaintenancePayment[] @relation("MaintenancePaymentApprovedBy")
 
   @@index([societyId])
   @@index([villaId])
@@ -490,6 +508,7 @@ model Villa {
   ownerEmail            String?
   ownerPhone            String?
   monthlyMaintenance    Decimal  @db.Decimal(10, 2) @default(0)
+  creditBalance         Decimal  @default(0) @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt
 
@@ -515,6 +534,9 @@ model Villa {
   cycleExclusions       CycleVillaExclusion[]
   upiPaymentSubmissions UpiPaymentSubmission[]
   projectContributions  ProjectContribution[]
+  creditTransactions    CreditTransaction[]
+  projectInstallments   ProjectInstallment[]
+  ledgerEntries         VillaLedgerEntry[]
 
   @@unique([societyId, villaNumber])
   @@index([societyId])
@@ -603,11 +625,15 @@ model MaintenancePayment {
   reversalReason       String?
   /// L1: negative offset row points at the original payment.
   reversalOfPaymentId  String?
+  paidByUserId         String?
+  approvedByUserId     String?
   createdAt       DateTime    @default(now())
   updatedAt       DateTime    @updatedAt
 
   society     Society      @relation(fields: [societyId], references: [id], onDelete: Cascade)
   villa       Villa        @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  paidBy      User?        @relation("MaintenancePaymentPaidBy", fields: [paidByUserId], references: [id])
+  approvedBy  User?        @relation("MaintenancePaymentApprovedBy", fields: [approvedByUserId], references: [id])
   bankAccount BankAccount? @relation(fields: [bankAccountId], references: [id], onDelete: SetNull)
   maintenance Maintenance? @relation(fields: [maintenanceId], references: [id], onDelete: SetNull)
 
@@ -631,6 +657,8 @@ model MaintenancePayment {
   @@index([villaId, month, year])
   @@index([financialYearId])
   @@index([reversalOfPaymentId])
+  @@index([paidByUserId])
+  @@index([paymentDate, societyId], map: "idx_maintenance_payment_date")
 }
 
 // ==========================================
@@ -645,6 +673,8 @@ model FinancialYear {
   startDate DateTime            @db.Date
   endDate   DateTime            @db.Date
   status    FinancialYearStatus @default(ACTIVE)
+  openingBalance Decimal        @default(0) @db.Decimal(12, 2)
+  closingBalance Decimal?       @db.Decimal(12, 2)
   createdAt DateTime            @default(now())
   updatedAt DateTime            @updatedAt
 
@@ -714,10 +744,13 @@ model VillaMaintenanceSnapshot {
 
   payments MaintenancePayment[]
   chargeLines VillaCycleChargeLine[]
+  lineItems      MaintenanceLineItem[]
+  lateFeeWaiver  MaintenanceLateFeeWaiver?
 
   @@unique([cycleId, villaId])
   @@index([villaId])
   @@index([cycleId, status])
+  @@index([cycleId, villaId], map: "idx_villa_snapshot_cycle")
 }
 
 /// A8 — configurable bill line (maintenance, sinking fund, parking, etc.) per society.
@@ -816,6 +849,7 @@ model Complaint {
   @@index([category])
   @@index([societyId, createdAt])
   @@index([slaDeadline])
+  @@index([societyId, status, priority, createdAt], map: "idx_complaint_sla")
 }
 
 enum PaymentDisputeStatus {
@@ -878,6 +912,8 @@ model Vendor {
 
   society   Society          @relation(fields: [societyId], references: [id], onDelete: Cascade)
   contracts VendorContract[]
+  expenses        Expense[]
+  projectExpenses ProjectExpense[]
 
   @@index([societyId])
   @@index([isApproved])
@@ -1013,6 +1049,9 @@ model Notice {
   category  NoticeCategory @default(GENERAL)
   priority  NoticePriority @default(NORMAL)
   isUrgent  Boolean        @default(false)
+  scheduledAt DateTime?
+  publishedAt DateTime?
+  isPublished Boolean      @default(true)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -1023,11 +1062,13 @@ model Notice {
   @@index([societyId])
   @@index([category])
   @@index([societyId, createdAt])
+  @@index([isPublished, scheduledAt])
 }
 
 model NoticeRecipient {
   noticeId String
   userId   String
+  readAt   DateTime?
   notice   Notice @relation(fields: [noticeId], references: [id], onDelete: Cascade)
   user     User   @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -1269,6 +1310,8 @@ model Parcel {
   @@index([villaId])
   @@index([status])
   @@index([societyId, receivedAt])
+  @@index([societyId, leftAtGate, status])
+  @@index([villaId, status, receivedAt], map: "idx_parcel_pending")
 }
 
 // Gate Management for Guard Assignment (1 Guard per Gate)
@@ -2117,11 +2160,12 @@ model ExpenseCategory {
   defaultAmount   Float?
   
   expenses        Expense[]
+  budgets         ExpenseBudget[]
 
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
   createdBy       String?
-  
+
   @@index([societyId])
   @@index([type])
   @@unique([societyId, name])
@@ -2161,7 +2205,9 @@ model Expense {
   rejectionReason String?
   notes           String?
   tags            String[]
-  
+  vendorId        String?
+  vendor          Vendor?   @relation(fields: [vendorId], references: [id], onDelete: SetNull)
+
   attachments     ExpenseAttachment[]
   
   deletedAt       DateTime?
@@ -2175,6 +2221,7 @@ model Expense {
   @@index([month, year])
   @@index([status])
   @@index([financialYearId])
+  @@index([vendorId])
 }
 
 // Multiple attachments per expense
@@ -2222,6 +2269,7 @@ model AdditionalFund {
   month        Int?
   year         Int?
   destination  AdditionalFundDestination @default(MERGE_WITH_MAINTENANCE)
+  fundType     FundType                  @default(OTHER)
   source       String?
   notes        String?
   createdBy    String?
@@ -2231,6 +2279,7 @@ model AdditionalFund {
   @@index([societyId])
   @@index([month, year])
   @@index([destination])
+  @@index([fundType])
 }
 
 // ==========================================
@@ -2294,6 +2343,7 @@ model UserCyclePayment {
   @@unique([userId, idempotencyKey])
   @@index([userId])
   @@index([cycleId])
+  @@index([cycleId, userId], map: "idx_ucp_billing_cycle")
   @@map("user_payments")
 }
 
@@ -2399,7 +2449,7 @@ model NotificationCategoryPreference {
   userId      String
   category    NotificationCategory
   pushEnabled Boolean              @default(true)
-  updatedAt   DateTime             @updatedAt
+  updatedAt   DateTime             @default(now()) @updatedAt
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
@@ -2526,6 +2576,7 @@ model SpecialProject {
 
   contributions   ProjectContribution[]
   expenses        ProjectExpense[]
+  installments    ProjectInstallment[]
 
   @@index([societyId, status])
   @@index([societyId])
@@ -2546,6 +2597,7 @@ model ProjectContribution {
   updatedAt DateTime                  @updatedAt
 
   payments  ProjectPayment[]
+  installments ProjectInstallment[]
 
   @@unique([projectId, villaId])
   @@index([projectId])
@@ -2577,6 +2629,8 @@ model ProjectExpense {
   description String
   amount      Decimal        @db.Decimal(12, 2)
   vendor      String?
+  vendorId    String?
+  linkedVendor Vendor?       @relation(fields: [vendorId], references: [id], onDelete: SetNull)
   receiptUrl  String?
   expenseDate DateTime       @default(now())
   createdById String
@@ -2585,6 +2639,7 @@ model ProjectExpense {
   updatedAt   DateTime       @updatedAt
 
   @@index([projectId])
+  @@index([vendorId])
   @@map("project_expenses")
 }
 
@@ -2682,4 +2737,300 @@ model AppAnalyticsEvent {
   @@index([societyId, name, occurredAt])
   @@index([userId, occurredAt])
   @@map("app_analytics_events")
+}
+
+// ==========================================
+// Financial automation (tables created by migrations 20260604–20260715; no API uses them yet)
+// ==========================================
+
+enum AutoBillingTemplateRuleType {
+  FIXED_PER_FLAT
+  PER_SQFT
+  CUSTOM
+}
+
+enum BankStatementMatchStatus {
+  UNMATCHED
+  MATCHED
+  IGNORED
+  MANUAL
+}
+
+enum CreditTransactionType {
+  OVERPAYMENT
+  MANUAL_ADD
+  MANUAL_DEDUCT
+  AUTO_APPLY
+  REFUND
+}
+
+enum FundType {
+  MAINTENANCE
+  SINKING
+  CORPUS
+  RESERVE
+  OTHER
+}
+
+enum LateFeeCalculationType {
+  FLAT
+  PERCENTAGE
+  COMPOUND_MONTHLY
+}
+
+enum LedgerEntryType {
+  BILL
+  PAYMENT
+  CREDIT_APPLY
+  CREDIT_ADD
+  CREDIT_DEDUCT
+  LATE_FEE
+  ADJUSTMENT
+  WAIVER
+  REFUND
+  PROJECT_PAYMENT
+  PROJECT_EXPENSE
+}
+
+enum ProjectInstallmentStatus {
+  UPCOMING
+  DUE
+  OVERDUE
+  PAID
+  PARTIALLY_PAID
+  CANCELLED
+}
+
+enum ReminderChannel {
+  PUSH
+  SMS
+  EMAIL
+  WHATSAPP
+}
+
+enum ReminderTriggerType {
+  DAYS_BEFORE_DUE
+  DAYS_AFTER_DUE
+  FIXED_DAY_OF_MONTH
+}
+
+model VillaLedgerEntry {
+  id             String          @id @default(cuid())
+  villaId        String
+  villa          Villa           @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  societyId      String
+  society        Society         @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  entryDate      DateTime
+  entryType      LedgerEntryType
+  debitAmount    Decimal         @default(0) @db.Decimal(12, 2)
+  creditAmount   Decimal         @default(0) @db.Decimal(12, 2)
+  runningBalance Decimal         @default(0) @db.Decimal(12, 2)
+  description    String
+  referenceType  String?
+  referenceId    String?
+  createdBy      String?
+  createdAt      DateTime        @default(now())
+  reversalOfId   String?
+  reversalOf     VillaLedgerEntry?  @relation("LedgerEntryReversal", fields: [reversalOfId], references: [id])
+  reversals      VillaLedgerEntry[] @relation("LedgerEntryReversal")
+
+  @@index([referenceType, referenceId])
+  @@index([reversalOfId])
+  @@index([societyId, entryDate])
+  @@index([villaId, entryDate])
+  @@map("villa_ledger_entries")
+}
+
+model CreditTransaction {
+  id            String                @id @default(cuid())
+  villaId       String
+  villa         Villa                 @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  societyId     String
+  society       Society               @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  amount        Decimal               @db.Decimal(12, 2)
+  type          CreditTransactionType
+  balanceAfter  Decimal               @db.Decimal(12, 2)
+  description   String
+  referenceType String?
+  referenceId   String?
+  createdBy     String?
+  createdAt     DateTime              @default(now())
+  expiresAt     DateTime?
+
+  @@index([expiresAt])
+  @@index([societyId, createdAt])
+  @@index([villaId, createdAt])
+  @@map("credit_transactions")
+}
+
+model LateFeeRule {
+  id              String                 @id @default(cuid())
+  societyId       String
+  society         Society                @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  calculationType LateFeeCalculationType
+  amount          Decimal?               @db.Decimal(12, 2)
+  rate            Float?
+  graceDays       Int                    @default(15)
+  maxPenalty      Decimal?               @db.Decimal(12, 2)
+  applyToArrears  Boolean                @default(false)
+  isActive        Boolean                @default(true)
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+
+  @@index([societyId])
+  @@map("late_fee_rules")
+}
+
+model ReminderRule {
+  id              String              @id @default(cuid())
+  societyId       String
+  society         Society             @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  triggerType     ReminderTriggerType
+  triggerValue    Int
+  channel         ReminderChannel     @default(PUSH)
+  messageTemplate String?
+  isActive        Boolean             @default(true)
+  lastRunAt       DateTime?
+  createdAt       DateTime            @default(now())
+  updatedAt       DateTime            @updatedAt
+
+  @@index([societyId])
+  @@map("reminder_rules")
+}
+
+model MaintenanceLineItemTemplate {
+  id            String   @id @default(cuid())
+  societyId     String
+  society       Society  @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  componentName String
+  defaultAmount Decimal  @db.Decimal(12, 2)
+  isWaivable    Boolean  @default(false)
+  sortOrder     Int      @default(0)
+  isActive      Boolean  @default(true)
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  @@unique([societyId, componentName])
+  @@index([societyId])
+}
+
+model MaintenanceLineItem {
+  id            String                   @id @default(cuid())
+  snapshotId    String
+  snapshot      VillaMaintenanceSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  componentName String
+  amount        Decimal                  @db.Decimal(12, 2)
+  isWaivable    Boolean                  @default(false)
+  sortOrder     Int                      @default(0)
+  createdAt     DateTime                 @default(now())
+
+  @@index([snapshotId])
+}
+
+model MaintenanceLateFeeWaiver {
+  id              String                   @id @default(cuid())
+  snapshotId      String                   @unique
+  snapshot        VillaMaintenanceSnapshot @relation(fields: [snapshotId], references: [id], onDelete: Cascade)
+  waivedByUserId  String
+  waivedBy        User                     @relation(fields: [waivedByUserId], references: [id])
+  reason          String?
+  originalLateFee Decimal                  @db.Decimal(12, 2)
+  waivedAt        DateTime                 @default(now())
+  createdAt       DateTime                 @default(now())
+}
+
+model BankStatementUpload {
+  id               String             @id @default(cuid())
+  societyId        String
+  society          Society            @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  fileName         String
+  uploadedByUserId String
+  uploadedBy       User               @relation(fields: [uploadedByUserId], references: [id])
+  rowCount         Int                @default(0)
+  matchedCount     Int                @default(0)
+  unmatchedCount   Int                @default(0)
+  createdAt        DateTime           @default(now())
+
+  rows BankStatementRow[]
+
+  @@index([societyId])
+}
+
+model BankStatementRow {
+  id               String                   @id @default(cuid())
+  uploadId         String
+  upload           BankStatementUpload      @relation(fields: [uploadId], references: [id], onDelete: Cascade)
+  transactionDate  DateTime                 @db.Date
+  description      String
+  amount           Decimal                  @db.Decimal(12, 2)
+  isCredit         Boolean
+  reference        String?
+  balance          Decimal?                 @db.Decimal(12, 2)
+  matchStatus      BankStatementMatchStatus @default(UNMATCHED)
+  matchedPaymentId String?
+  matchedExpenseId String?
+  matchConfidence  Decimal?                 @db.Decimal(5, 2)
+  createdAt        DateTime                 @default(now())
+
+  @@index([matchStatus])
+  @@index([uploadId])
+}
+
+model ExpenseBudget {
+  id              String           @id @default(cuid())
+  societyId       String
+  society         Society          @relation(fields: [societyId], references: [id], onDelete: Cascade)
+  categoryId      String?
+  category        ExpenseCategory? @relation(fields: [categoryId], references: [id])
+  month           Int?
+  year            Int
+  budgetAmount    Decimal          @db.Decimal(12, 2)
+  spentAmount     Decimal          @default(0) @db.Decimal(12, 2)
+  remainingAmount Decimal          @default(0) @db.Decimal(12, 2)
+  alertThreshold  Float?           @default(80)
+  alertSent       Boolean          @default(false)
+  createdAt       DateTime         @default(now())
+  updatedAt       DateTime         @updatedAt
+  createdBy       String?
+
+  @@unique([societyId, categoryId, month, year])
+  @@index([societyId])
+}
+
+model ProjectInstallment {
+  id                String                   @id @default(cuid())
+  projectId         String
+  project           SpecialProject           @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  villaId           String
+  villa             Villa                    @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  installmentNumber Int
+  amount            Decimal                  @db.Decimal(12, 2)
+  dueDate           DateTime                 @db.Date
+  status            ProjectInstallmentStatus @default(UPCOMING)
+  paidAmount        Decimal                  @default(0) @db.Decimal(12, 2)
+  contributionId    String?
+  contribution      ProjectContribution?     @relation(fields: [contributionId], references: [id])
+  createdAt         DateTime                 @default(now())
+  updatedAt         DateTime                 @updatedAt
+
+  @@unique([projectId, villaId, installmentNumber])
+  @@index([dueDate, status])
+  @@index([projectId])
+  @@index([villaId])
+  @@map("project_installments")
+}
+
+/// Superseded by NotificationCategoryPreference (which the API uses); kept because the table exists in production.
+model NotificationPreference {
+  id          String               @id @default(cuid())
+  userId      String
+  user        User                 @relation(fields: [userId], references: [id], onDelete: Cascade)
+  category    NotificationCategory
+  pushEnabled Boolean              @default(true)
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  @@unique([userId, category])
+  @@index([userId])
+  @@map("notification_preferences")
 }
