@@ -146,10 +146,16 @@ export async function buildCurrentCycleResponse(input: {
   const nowUtc = input.nowUtc ?? new Date();
   const billingSubject = await prisma.user.findFirst({
     where: { id: input.userId, societyId: input.societyId },
-    select: { maintenanceBillingRole: true, villaId: true },
+    select: {
+      maintenanceBillingRole: true,
+      villaId: true,
+      villa: { select: { maintenanceExemptFromPeriod: true } },
+    },
   });
   const maintenanceBillingExcluded =
     billingSubject?.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED;
+  /** "YYYY-MM" from which the resident's villa is not billed; dues raised before it stay payable. */
+  const villaMaintenanceExemptFrom = billingSubject?.villa?.maintenanceExemptFromPeriod ?? null;
 
   const pendingDues = maintenanceBillingExcluded
     ? []
@@ -217,6 +223,7 @@ export async function buildCurrentCycleResponse(input: {
       pendingDues,
       maintenanceBillingRole: billingSubject?.maintenanceBillingRole ?? null,
       maintenanceBillingExcluded,
+      villaMaintenanceExemptFrom,
     };
   }
 
@@ -305,6 +312,7 @@ export async function buildCurrentCycleResponse(input: {
     pendingDues,
     maintenanceBillingRole: billingSubject?.maintenanceBillingRole ?? null,
     maintenanceBillingExcluded,
+    villaMaintenanceExemptFrom,
   };
 }
 
