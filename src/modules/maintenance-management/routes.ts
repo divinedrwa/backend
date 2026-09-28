@@ -1908,7 +1908,14 @@ router.get("/financial-dashboard", async (req, res, next) => {
       money,
     ] = await Promise.all([
       prisma.villa.findMany({
-        where: { societyId },
+        where: {
+          societyId,
+          // Villas not paying maintenance for this month are not part of its expected total.
+          OR: [
+            { maintenanceExemptFromPeriod: null },
+            { maintenanceExemptFromPeriod: { gt: `${year}-${String(month).padStart(2, "0")}` } },
+          ],
+        },
         select: {
           id: true,
           villaNumber: true,

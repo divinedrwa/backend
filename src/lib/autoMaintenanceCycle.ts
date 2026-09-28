@@ -5,6 +5,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "./prisma";
 import { logger } from "./logger";
+import { excludeNonEnrolledVillasFromCycle } from "../modules/billing-cycle/billing-collection-link";
 
 type Db = typeof prisma;
 
@@ -96,6 +97,9 @@ export async function autoGenerateNextMaintenanceCycles(db: Db = prisma): Promis
       });
       snapshotsGenerated += 1;
     }
+    await db.$transaction((tx) =>
+      excludeNonEnrolledVillasFromCycle(tx, { societyId: society.id, maintenanceCycleId: cycle.id }),
+    );
 
     logger.info(
       { societyId: society.id, cycleId: cycle.id, periodKey },

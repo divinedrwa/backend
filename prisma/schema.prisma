@@ -508,6 +508,9 @@ model Villa {
   ownerEmail            String?
   ownerPhone            String?
   monthlyMaintenance    Decimal  @db.Decimal(10, 2) @default(0)
+  /// "YYYY-MM": villa is not billed for cycles from this period on (null = pays maintenance).
+  /// Earlier cycles keep their dues.
+  maintenanceExemptFromPeriod String?
   creditBalance         Decimal  @default(0) @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
   updatedAt             DateTime @updatedAt

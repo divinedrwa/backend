@@ -8,7 +8,13 @@ import {
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
-import { UserRole } from "@prisma/client";
+import { Prisma, UserRole } from "@prisma/client";
+import { localMonthKey } from "../../lib/societyTime";
+import {
+  excludeNonEnrolledVillasFromCycle,
+  restoreReenrolledVillaCycles,
+} from "../billing-cycle/billing-collection-link";
+import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { validateBody } from "../../middlewares/validate";
 import { auditFromRequest } from "../../services/audit.service";
@@ -98,7 +104,18 @@ const bulkMaintenanceAmountSchema = z.object({
     .default([]),
 });
 
-// GET /api/villas - List all villas (?search= or ?q= filters villaNumber, block, ownerName)
+const maintenanceEnrollmentSchema = z.object({
+  villaIds: z.array(z.string().min(1)).min(1).max(500),
+  enrolled: z.boolean(),
+});
+
+function nextMonthKey(monthKey: string): string {
+  const [y, m] = monthKey.split("-").map(Number);
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, "0")}`;
+}
+
+// GET /api/villas - List all villas (?search= or ?q= filters villaNumber, block, ownerName;
+// ?maintenance=paying|not_paying filters by maintenance enrollment)
 router.get("/", requireAuth, async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
@@ -111,18 +128,18 @@ router.get("/", requireAuth, async (req, res, next) => {
           ? req.query.q
           : "";
     const search = rawSearch.trim();
+    const maintenanceFilter = req.query.maintenance;
 
-    const where =
-      search.length > 0
-        ? {
-            societyId,
-            OR: [
-              { villaNumber: { contains: search, mode: "insensitive" as const } },
-              { block: { contains: search, mode: "insensitive" as const } },
-              { ownerName: { contains: search, mode: "insensitive" as const } },
-            ],
-          }
-        : { societyId };
+    const where: Prisma.VillaWhereInput = { societyId };
+    if (search.length > 0) {
+      where.OR = [
+        { villaNumber: { contains: search, mode: "insensitive" } },
+        { block: { contains: search, mode: "insensitive" } },
+        { ownerName: { contains: search, mode: "insensitive" } },
+      ];
+    }
+    if (maintenanceFilter === "paying") where.maintenanceExemptFromPeriod = null;
+    if (maintenanceFilter === "not_paying") where.maintenanceExemptFromPeriod = { not: null };
     const [villas, total] = await Promise.all([
       prisma.villa.findMany({
         where,
@@ -435,6 +452,110 @@ router.post(
       next(error);
     }
   }
+);
+
+// POST /api/villas/maintenance-enrollment - mark villas as paying / not paying maintenance.
+// Takes effect from next month's cycle; dues already raised stay payable.
+router.post(
+  "/maintenance-enrollment",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  validateBody(maintenanceEnrollmentSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId, userId } = req.auth!;
+      const { villaIds, enrolled } = req.body as z.infer<typeof maintenanceEnrollmentSchema>;
+      const ids = [...new Set(villaIds)];
+
+      const villas = await prisma.villa.findMany({
+        where: { societyId, id: { in: ids } },
+        select: { id: true, villaNumber: true, maintenanceExemptFromPeriod: true },
+      });
+      if (villas.length !== ids.length) {
+        const found = new Set(villas.map((v) => v.id));
+        return res.status(400).json({
+          message: "Some villas are invalid for this society",
+          invalidVillaIds: ids.filter((id) => !found.has(id)),
+        });
+      }
+
+      const fromPeriod = nextMonthKey(localMonthKey(new Date()));
+      const [fromYear, fromMonth] = fromPeriod.split("-").map(Number);
+      const changing = villas.filter((v) =>
+        enrolled ? v.maintenanceExemptFromPeriod != null : v.maintenanceExemptFromPeriod == null,
+      );
+      const changingIds = changing.map((v) => v.id);
+
+      const futureCycleRowsUpdated = await prisma.$transaction(
+        async (tx) => {
+          if (changingIds.length === 0) return 0;
+          let rows = 0;
+          if (!enrolled) {
+            await tx.villa.updateMany({
+              where: { id: { in: changingIds } },
+              data: { maintenanceExemptFromPeriod: fromPeriod },
+            });
+            const futureCycles = await tx.maintenanceCollectionCycle.findMany({
+              where: {
+                societyId,
+                OR: [
+                  { periodYear: { gt: fromYear } },
+                  { periodYear: fromYear, periodMonth: { gte: fromMonth } },
+                ],
+              },
+              select: { id: true },
+            });
+            for (const c of futureCycles) {
+              const excluded = await excludeNonEnrolledVillasFromCycle(tx, {
+                societyId,
+                maintenanceCycleId: c.id,
+                villaIds: changingIds,
+              });
+              rows += excluded.length;
+            }
+          } else {
+            for (const villaId of changingIds) {
+              rows += await restoreReenrolledVillaCycles(tx, { societyId, villaId, fromPeriod });
+            }
+            await tx.villa.updateMany({
+              where: { id: { in: changingIds } },
+              data: { maintenanceExemptFromPeriod: null },
+            });
+          }
+          return rows;
+        },
+        { timeout: 60_000 },
+      );
+
+      changingIds.forEach(invalidateReconcileCache);
+      if (changingIds.length > 0) {
+        auditFromRequest(req, {
+          societyId,
+          adminId: userId,
+          action: enrolled ? "VILLA_MAINTENANCE_ENROLLED" : "VILLA_MAINTENANCE_UNENROLLED",
+          entityType: "Villa",
+          entityId: changingIds.length === 1 ? changingIds[0] : null,
+          metadata: {
+            villaNumbers: changing.map((v) => v.villaNumber),
+            effectiveFromPeriod: fromPeriod,
+            futureCycleRowsUpdated,
+          },
+        });
+      }
+
+      return res.json({
+        message: enrolled
+          ? `Maintenance billing resumes from ${fromPeriod}`
+          : `Maintenance billing stops from ${fromPeriod}; existing dues stay payable`,
+        updated: changingIds.length,
+        unchanged: ids.length - changingIds.length,
+        effectiveFromPeriod: fromPeriod,
+        futureCycleRowsUpdated,
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
 );
 
 // DELETE /api/villas/:id - Delete villa

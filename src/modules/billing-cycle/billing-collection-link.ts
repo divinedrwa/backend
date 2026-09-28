@@ -88,6 +88,12 @@ export async function ensureMaintenanceCollectionForBillingCycle(
     ),
   );
 
+  const existingCycle = await tx.maintenanceCollectionCycle.findUnique({
+    where: {
+      financialYearId_periodKey: { financialYearId: billingCycle.financialYearId, periodKey },
+    },
+    select: { id: true },
+  });
   const maintenanceCycle = await tx.maintenanceCollectionCycle.upsert({
     where: {
       financialYearId_periodKey: {
@@ -131,6 +137,14 @@ export async function ensureMaintenanceCollectionForBillingCycle(
       perSqftRate: ruleShape.perSqftRate,
     },
   });
+
+  // Only on creation, so an admin re-including a villa in a cycle isn't undone later.
+  if (!existingCycle) {
+    await excludeNonEnrolledVillasFromCycle(tx, {
+      societyId: billingCycle.societyId,
+      maintenanceCycleId: maintenanceCycle.id,
+    });
+  }
 
   return { maintenanceCycleId: maintenanceCycle.id, periodKey, dueDate };
 }
@@ -1065,4 +1079,269 @@ export async function reconcileAllVillasForBillingCycle(
   }
 
   return repaired;
+}
+
+/** Marks exclusions created for non-paying villas, so re-enrolling undoes only these. */
+export const NOT_ENROLLED_EXCLUSION_REASON = "Villa not enrolled in maintenance billing";
+
+export function billingPeriodKey(year: number, month: number): string {
+  return `${year}-${String(month).padStart(2, "0")}`;
+}
+
+/**
+ * Excludes non-paying villas (`maintenanceExemptFromPeriod` on or before this cycle's period)
+ * from one collection cycle. A villa that already has money recorded in the cycle stays billed.
+ */
+export async function excludeNonEnrolledVillasFromCycle(
+  tx: Prisma.TransactionClient,
+  params: { societyId: string; maintenanceCycleId: string; villaIds?: string[] },
+): Promise<string[]> {
+  const cycle = await tx.maintenanceCollectionCycle.findUnique({
+    where: { id: params.maintenanceCycleId },
+    select: { id: true, periodYear: true, periodMonth: true, periodKey: true, financialYearId: true },
+  });
+  if (!cycle) return [];
+
+  const villas = await tx.villa.findMany({
+    where: {
+      societyId: params.societyId,
+      maintenanceExemptFromPeriod: {
+        not: null,
+        lte: billingPeriodKey(cycle.periodYear, cycle.periodMonth),
+      },
+      ...(params.villaIds ? { id: { in: params.villaIds } } : {}),
+    },
+    select: { id: true },
+  });
+  if (villas.length === 0) return [];
+  const villaIds = villas.map((v) => v.id);
+
+  const [exclusions, payments, paidSnapshots, billingCycle] = await Promise.all([
+    tx.cycleVillaExclusion.findMany({
+      where: { cycleId: cycle.id, villaId: { in: villaIds } },
+      select: { villaId: true },
+    }),
+    tx.maintenancePayment.findMany({
+      where: { maintenanceCollectionCycleId: cycle.id, villaId: { in: villaIds } },
+      select: { villaId: true },
+      distinct: ["villaId"],
+    }),
+    tx.villaMaintenanceSnapshot.findMany({
+      where: { cycleId: cycle.id, villaId: { in: villaIds }, paidAmount: { gt: 0 } },
+      select: { villaId: true },
+    }),
+    tx.billingCycle.findFirst({
+      where: {
+        societyId: params.societyId,
+        financialYearId: cycle.financialYearId,
+        cycleKey: cycle.periodKey,
+      },
+      select: { id: true },
+    }),
+  ]);
+  const skip = new Set([...exclusions, ...payments, ...paidSnapshots].map((r) => r.villaId));
+  const excluded = villaIds.filter((id) => !skip.has(id));
+  if (excluded.length === 0) return [];
+
+  // Batched on purpose: this can run inside cycle-publish and gateway-settle transactions,
+  // so the query count must not grow with the number of villas.
+  await tx.cycleVillaExclusion.createMany({
+    data: excluded.map((villaId) => ({
+      cycleId: cycle.id,
+      villaId,
+      reason: NOT_ENROLLED_EXCLUSION_REASON,
+    })),
+    skipDuplicates: true,
+  });
+
+  const waived = {
+    expectedAmount: new Prisma.Decimal(0),
+    paidAmount: new Prisma.Decimal(0),
+    status: "WAIVED" as const,
+    breakdown: { excluded: true, notEnrolled: true } as Prisma.InputJsonValue,
+  };
+  const existingSnaps = await tx.villaMaintenanceSnapshot.findMany({
+    where: { cycleId: cycle.id, villaId: { in: excluded } },
+    select: { id: true, villaId: true },
+  });
+  if (existingSnaps.length > 0) {
+    const snapIds = existingSnaps.map((s) => s.id);
+    await tx.villaMaintenanceSnapshot.updateMany({ where: { id: { in: snapIds } }, data: waived });
+    await tx.villaCycleChargeLine.deleteMany({ where: { snapshotId: { in: snapIds } } });
+  }
+  const withSnap = new Set(existingSnaps.map((s) => s.villaId));
+  const missing = excluded.filter((id) => !withSnap.has(id));
+  if (missing.length > 0) {
+    await tx.villaMaintenanceSnapshot.createMany({
+      data: missing.map((villaId) => ({ cycleId: cycle.id, villaId, ...waived })),
+      skipDuplicates: true,
+    });
+  }
+
+  // Same end state as syncBillingUserCyclePaymentsFromSnapshot with a WAIVED snapshot.
+  if (billingCycle) {
+    const residents = await tx.user.findMany({
+      where: {
+        societyId: params.societyId,
+        villaId: { in: excluded },
+        ...residentLikeRoleFilter,
+      },
+      select: { id: true, isActive: true, maintenanceBillingRole: true },
+    });
+    const excludedResidentIds = residents
+      .filter((u) => u.maintenanceBillingRole === MaintenanceBillingRole.EXCLUDED)
+      .map((u) => u.id);
+    const primaryIds = residents
+      .filter((u) => u.isActive && u.maintenanceBillingRole === MaintenanceBillingRole.PRIMARY)
+      .map((u) => u.id);
+    if (excludedResidentIds.length > 0) {
+      await tx.userCyclePayment.deleteMany({
+        where: { cycleId: billingCycle.id, userId: { in: excludedResidentIds } },
+      });
+    }
+    if (primaryIds.length > 0) {
+      const settled = {
+        amountPaid: new Prisma.Decimal(0),
+        paymentStatus: BillingUserPaymentStatus.SUCCESS,
+        source: BillingPaymentSource.CASH_MANUAL,
+        paidAt: new Date(),
+      };
+      await tx.userCyclePayment.createMany({
+        data: primaryIds.map((userId) => ({ userId, cycleId: billingCycle.id, ...settled })),
+        skipDuplicates: true,
+      });
+      await tx.userCyclePayment.updateMany({
+        where: { cycleId: billingCycle.id, userId: { in: primaryIds } },
+        data: settled,
+      });
+    }
+  }
+  return excluded;
+}
+
+/**
+ * Re-bills a re-enrolled villa on cycles from `fromPeriod` onward by removing the automatic
+ * not-enrolled exclusions. Exclusions an admin added by hand are left alone.
+ */
+export async function restoreReenrolledVillaCycles(
+  tx: Prisma.TransactionClient,
+  params: { societyId: string; villaId: string; fromPeriod: string },
+): Promise<number> {
+  const exclusions = await tx.cycleVillaExclusion.findMany({
+    where: {
+      villaId: params.villaId,
+      reason: NOT_ENROLLED_EXCLUSION_REASON,
+      cycle: { societyId: params.societyId },
+    },
+    select: {
+      cycle: {
+        select: {
+          id: true,
+          periodYear: true,
+          periodMonth: true,
+          periodKey: true,
+          financialYearId: true,
+          dueDate: true,
+          rule: true,
+        },
+      },
+    },
+  });
+  const targets = exclusions
+    .map((e) => e.cycle)
+    .filter((c) => billingPeriodKey(c.periodYear, c.periodMonth) >= params.fromPeriod);
+  if (targets.length === 0) return 0;
+
+  const [villa, society] = await Promise.all([
+    tx.villa.findUnique({
+      where: { id: params.villaId },
+      select: { id: true, area: true, monthlyMaintenance: true },
+    }),
+    tx.society.findUnique({
+      where: { id: params.societyId },
+      select: {
+        useChargeHeads: true,
+        chargeHeads: {
+          where: { isActive: true },
+          orderBy: { sortOrder: "asc" },
+          select: {
+            id: true,
+            code: true,
+            label: true,
+            amountType: true,
+            fixedAmount: true,
+            perSqftRate: true,
+            sortOrder: true,
+            isActive: true,
+          },
+        },
+      },
+    }),
+  ]);
+  if (!villa) return 0;
+  const hasPrimaryResident =
+    (await tx.user.count({
+      where: {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        isActive: true,
+        maintenanceBillingRole: MaintenanceBillingRole.PRIMARY,
+        ...residentLikeRoleFilter,
+      },
+    })) > 0;
+
+  for (const cycle of targets) {
+    await tx.cycleVillaExclusion.delete({
+      where: { cycleId_villaId: { cycleId: cycle.id, villaId: params.villaId } },
+    });
+    const billingCycle = await tx.billingCycle.findFirst({
+      where: {
+        societyId: params.societyId,
+        financialYearId: cycle.financialYearId,
+        cycleKey: cycle.periodKey,
+      },
+      select: { id: true },
+    });
+    // Billing cycles only bill villas with a primary resident; otherwise, and when there is no
+    // rule to price the villa yet, drop the zero row and let normal snapshot generation decide.
+    if (!cycle.rule || (billingCycle && !hasPrimaryResident)) {
+      await tx.villaMaintenanceSnapshot.deleteMany({
+        where: { cycleId: cycle.id, villaId: params.villaId, paidAmount: 0 },
+      });
+      continue;
+    }
+    const { expected, breakdown, chargeLines } = resolveVillaSnapshotBilling({
+      cycleRule: cycle.rule,
+      villa,
+      useChargeHeads: society?.useChargeHeads ?? false,
+      chargeHeads: society?.chargeHeads ?? [],
+    });
+    const status = refreshSnapshotStatus(expected, 0, cycle.dueDate);
+    const billed = {
+      expectedAmount: new Prisma.Decimal(expected),
+      paidAmount: new Prisma.Decimal(0),
+      status,
+      breakdown: breakdown as Prisma.InputJsonValue,
+    };
+    const snap = await tx.villaMaintenanceSnapshot.upsert({
+      where: { cycleId_villaId: { cycleId: cycle.id, villaId: params.villaId } },
+      create: { cycleId: cycle.id, villaId: params.villaId, ...billed },
+      update: billed,
+      select: { id: true },
+    });
+    await persistSnapshotChargeLines(tx, snap.id, chargeLines);
+
+    if (billingCycle) {
+      await syncBillingUserCyclePaymentsFromSnapshot(tx, {
+        societyId: params.societyId,
+        villaId: params.villaId,
+        billingCycleId: billingCycle.id,
+        paidAmount: 0,
+        snapStatus: status,
+        source: BillingPaymentSource.CASH_MANUAL,
+        cashPaidAmount: 0,
+      });
+    }
+  }
+  return targets.length;
 }

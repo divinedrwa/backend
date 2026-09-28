@@ -12,7 +12,6 @@ ALTER TABLE public."reminder_rules" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."MaintenanceLineItemTemplate" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."MaintenanceLineItem" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."MaintenanceLateFeeWaiver" ENABLE ROW LEVEL SECURITY;
-ALTER TABLE public."ExpenseBudget" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."BankStatementUpload" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."BankStatementRow" ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public."project_installments" ENABLE ROW LEVEL SECURITY;

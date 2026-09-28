@@ -14,6 +14,7 @@ import { startOfLocalCalendarDay } from "../../lib/societyTime";
 import { validateBody } from "../../middlewares/validate";
 import {
   ensureVillaLedgersAligned,
+  excludeNonEnrolledVillasFromCycle,
   reconcileAllVillasForBillingCycle,
   syncAllUserCyclePaymentsForMaintenanceCycle,
   syncBillingUserCyclePaymentsFromSnapshot,
@@ -285,6 +286,9 @@ router.post("/cycles", validateBody(createCycleSchema), async (req, res, next) =
         dueDate,
       },
     });
+    await prisma.$transaction((tx) =>
+      excludeNonEnrolledVillasFromCycle(tx, { societyId, maintenanceCycleId: cycle.id }),
+    );
     return res.status(201).json({ cycle });
   } catch (e) {
     next(e);
@@ -810,6 +814,12 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
       )
     );
 
+    const existingCycle = await prisma.maintenanceCollectionCycle.findUnique({
+      where: {
+        financialYearId_periodKey: { financialYearId: billingCycle.financialYearId, periodKey },
+      },
+      select: { id: true },
+    });
     const maintenanceCycle = await prisma.maintenanceCollectionCycle.upsert({
       where: {
         financialYearId_periodKey: {
@@ -835,6 +845,11 @@ router.post("/billing-cycles/:billingCycleId/sync", async (req, res, next) => {
         status: billingCycle.status === "CLOSED" ? "CLOSED" : "OPEN",
       },
     });
+    if (!existingCycle) {
+      await prisma.$transaction((tx) =>
+        excludeNonEnrolledVillasFromCycle(tx, { societyId, maintenanceCycleId: maintenanceCycle.id }),
+      );
+    }
 
     const [existingRule, paymentCount] = await Promise.all([
       prisma.maintenanceCycleRule.findUnique({ where: { cycleId: maintenanceCycle.id } }),
@@ -1219,7 +1234,10 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       cashByVilla.set(p.villaId, (cashByVilla.get(p.villaId) ?? 0) + Number(p.amount));
     }
 
-    const villaPayments = villas.map((villa) => {
+    // Billing cycles only raise snapshots for villas with a primary resident, so villas
+    // without one have no row for this cycle.
+    const billedVillas = villas.filter((villa) => snapByVilla.has(villa.id));
+    const villaPayments = billedVillas.map((villa) => {
       const s = snapByVilla.get(villa.id)!;
       const pay = lastPayByVilla.get(villa.id);
       const expected = Number(s.expectedAmount);

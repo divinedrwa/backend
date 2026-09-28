@@ -545,9 +545,15 @@ router.post(
     const { societyId } = req.auth!;
     const { month, year, dueDate } = req.body;
 
-    // Get all villas
+    // Villas paying maintenance for this month
     const villas = await prisma.villa.findMany({
-      where: { societyId },
+      where: {
+        societyId,
+        OR: [
+          { maintenanceExemptFromPeriod: null },
+          { maintenanceExemptFromPeriod: { gt: `${year}-${String(month).padStart(2, "0")}` } },
+        ],
+      },
     });
 
     // Check if bills already exist
