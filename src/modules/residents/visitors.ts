@@ -786,6 +786,16 @@ async function applyResidentVisitorDecision(params: {
   const runDecisionTx = async () =>
     prisma.$transaction(
       async (tx) => {
+        // Re-check inside the transaction: the guard may have admitted or marked
+        // exit between our read above and now.
+        const fresh = await tx.visitor.findUnique({
+          where: { id: params.visitorId },
+          select: { status: true },
+        });
+        if (fresh?.status !== VISITOR_PENDING_APPROVAL) {
+          return { updated: { count: 0 }, hydrated: null, transitioned: false, stale: true };
+        }
+
         const upd = await tx.visitorVilla.updateMany({
           where: {
             id: row.id,
@@ -799,16 +809,22 @@ async function applyResidentVisitorDecision(params: {
         });
 
         if (upd.count === 0) {
-          return { updated: upd, hydrated: null, transitioned: false };
+          return { updated: upd, hydrated: null, transitioned: false, stale: false };
         }
 
         const result = await recomputeVisitorAggregateApproval(
           tx,
           params.visitorId,
           params.societyId,
+          params.userId,
         );
 
-        return { updated: upd, hydrated: result.visitor, transitioned: result.transitioned };
+        return {
+          updated: upd,
+          hydrated: result.visitor,
+          transitioned: result.transitioned,
+          stale: false,
+        };
       },
       { isolationLevel: "Serializable" },
     );
@@ -816,17 +832,25 @@ async function applyResidentVisitorDecision(params: {
   let updated: { count: number };
   let hydrated: Awaited<ReturnType<typeof recomputeVisitorAggregateApproval>>["visitor"] | null;
   let transitioned: boolean;
+  let stale: boolean;
   try {
-    ({ updated, hydrated, transitioned } = await runDecisionTx());
+    ({ updated, hydrated, transitioned, stale } = await runDecisionTx());
   } catch (error) {
     if (
       error instanceof Prisma.PrismaClientKnownRequestError &&
       error.code === "P2034"
     ) {
-      ({ updated, hydrated, transitioned } = await runDecisionTx());
+      ({ updated, hydrated, transitioned, stale } = await runDecisionTx());
     } else {
       throw error;
     }
+  }
+
+  if (stale) {
+    return {
+      status: 409 as const,
+      body: { message: "This visitor request is no longer awaiting approval" },
+    };
   }
 
   if (updated.count === 0) {

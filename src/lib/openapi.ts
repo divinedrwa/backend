@@ -314,6 +314,38 @@ registry.registerPath({
 });
 
 registry.registerPath({
+  method: "post",
+  path: "/api/guards/visitor-override-entry",
+  summary: "Guard lets a pending visitor in when residents have not responded",
+  description:
+    "Only for PENDING_APPROVAL visitors. NO_RESPONSE_GUARD_VERIFIED needs a note and the society's guardCanApproveVisitors setting.",
+  tags: ["Guard"],
+  security: [{ [bearerAuth.name]: [] }],
+  request: {
+    body: {
+      content: {
+        "application/json": {
+          schema: z.object({
+            visitorId: z.string(),
+            reason: z.enum(["RESIDENT_CONFIRMED_BY_CALL", "NO_RESPONSE_GUARD_VERIFIED", "EMERGENCY"]),
+            note: z.string().max(300).optional(),
+          }),
+        },
+      },
+    },
+  },
+  responses: {
+    200: {
+      description: "Visitor admitted",
+      content: { "application/json": { schema: GuardVisitorMutationResponse } },
+    },
+    400: { description: "Visitor not waiting for approval", content: { "application/json": { schema: ErrorResponse } } },
+    403: { description: "Society requires resident approval for this reason" },
+    409: { description: "A resident responded concurrently" },
+  },
+});
+
+registry.registerPath({
   method: "get",
   path: "/api/guards/my-visitors",
   summary: "Today's visitors for guard",

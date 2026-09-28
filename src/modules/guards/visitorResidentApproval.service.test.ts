@@ -20,9 +20,9 @@ describe("visitorResidentApproval.service recomputeVisitorAggregateApproval", ()
           villaVisits: [],
           gate: null,
         }),
-        update: async ({ data }: { data: { status: VisitorStatus } }) => {
+        updateMany: async ({ data }: { data: { status: VisitorStatus } }) => {
           updatedTo = data.status;
-          return {};
+          return { count: 1 };
         },
       },
       society: {

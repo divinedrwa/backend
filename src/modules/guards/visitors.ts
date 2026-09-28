@@ -37,9 +37,11 @@ import {
   type VisitorApprovalTarget,
 } from "./visitorResidentApproval.service";
 import {
+  closeUnmarkedExits,
   transitionVisitorState,
   VisitorTransitionType,
 } from "./visitor-state-manager";
+import { localDayRange } from "../../lib/societyTime";
 import {
   fetchGuardVisitorDetail,
   findGuardClientMutation,
@@ -157,10 +159,17 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       if (prior?.visitorId) {
         const completeVisitor = await fetchGuardVisitorDetail(prior.visitorId);
         if (completeVisitor) {
+          // A reused mutation id must describe the same visitor; otherwise the
+          // client would display data that was never saved.
+          if (completeVisitor.phone.trim() !== phone.trim()) {
+            return res.status(409).json({
+              message: "This offline entry id was already used for a different visitor. Please add the visitor again.",
+            });
+          }
           return res.status(201).json({
             message: "Visitor checked in successfully",
             visitor: completeVisitor,
-            awaitResidentApproval: Boolean(awaitResidentApproval),
+            awaitResidentApproval: completeVisitor.status === VISITOR_PENDING_APPROVAL,
             residentApprovalRecipientCount: 0,
             idempotentReplay: true,
           });
@@ -267,7 +276,19 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       residentUserId: r.residentUserId ?? undefined,
     }));
 
-    if (awaitResidentApproval) {
+    const society = await prisma.society.findUnique({
+      where: { id: societyId },
+      select: { guardCanApproveVisitors: true, visitorApprovalRequired: true },
+    });
+
+    // Residents must be asked when the society requires approval, or when guards
+    // are not allowed to approve on their own.
+    const effectiveAwaitResidentApproval =
+      Boolean(awaitResidentApproval) ||
+      Boolean(society?.visitorApprovalRequired) ||
+      society?.guardCanApproveVisitors === false;
+
+    if (effectiveAwaitResidentApproval) {
       const recipientIds = await resolveVisitorApprovalRecipientIds({
         prisma,
         societyId,
@@ -282,17 +303,43 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       }
     }
 
-    // Duplicate check-in prevention: reject if same phone is already checked in
-    const existingActive = await prisma.visitor.findFirst({
+    // Duplicate prevention: only an open entry (waiting, approved, or inside) blocks
+    // a new one. A rejected/cancelled request is closed, so the guard can raise a
+    // fresh request (e.g. the resident tapped Reject by mistake).
+    let existingActive = await prisma.visitor.findFirst({
       where: {
         societyId,
         phone,
         checkOutTime: null,
         checkOutAt: null,
+        status: {
+          in: [VISITOR_PENDING_APPROVAL, VISITOR_APPROVED_FOR_ENTRY, VisitorStatus.CHECKED_IN],
+        },
       },
+      select: { id: true, status: true, checkInTime: true, expectedCheckoutAt: true },
     });
+    // Guards often don't mark exit. A returning visitor whose earlier visit is past
+    // its expected stay (or from an earlier day) has clearly left: close that visit
+    // as "exit not marked" instead of blocking the new entry.
+    if (existingActive?.status === VisitorStatus.CHECKED_IN) {
+      const checkNow = new Date();
+      const stale =
+        (existingActive.expectedCheckoutAt != null &&
+          existingActive.expectedCheckoutAt < checkNow) ||
+        existingActive.checkInTime < localDayRange(checkNow).start;
+      if (stale) {
+        await closeUnmarkedExits(prisma, { id: existingActive.id, societyId }, checkNow);
+        existingActive = null;
+      }
+    }
     if (existingActive) {
-      return res.status(409).json({ message: "This visitor is already checked in. Please check them out first." });
+      const message =
+        existingActive.status === VISITOR_PENDING_APPROVAL
+          ? "This visitor is already waiting for resident approval. Open it from Active entries to admit or mark exit."
+          : existingActive.status === VISITOR_APPROVED_FOR_ENTRY
+            ? "This visitor is already approved. Open it from Active entries to admit."
+            : "This visitor is already checked in. Please check them out first.";
+      return res.status(409).json({ message, existingVisitorId: existingActive.id });
     }
 
     const now = new Date();
@@ -306,7 +353,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
       return res.status(400).json({ message: "No active shift found" });
     }
 
-    const admittedNow = !awaitResidentApproval;
+    const admittedNow = !effectiveAwaitResidentApproval;
     const visitor = await prisma.visitor.create({
       data: {
         societyId,
@@ -322,8 +369,9 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         ...(admittedNow && {
           expectedCheckoutAt: expectedCheckoutAtForVisitorType(visitorType, now),
         }),
-        status: awaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN" as VisitorStatus,
+        status: effectiveAwaitResidentApproval ? VISITOR_PENDING_APPROVAL : "CHECKED_IN" as VisitorStatus,
         createdBy: userId,
+        ...(admittedNow && { checkedInByGuardId: userId }),
       },
     });
 
@@ -333,12 +381,12 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         villaId: r.villaId,
         unitId: r.unitId,
         residentUserId: r.residentUserId,
-        notifiedAt: awaitResidentApproval ? new Date() : null,
+        notifiedAt: effectiveAwaitResidentApproval ? new Date() : null,
       })),
     });
 
     let residentApprovalRecipientCount = 0;
-    if (awaitResidentApproval) {
+    if (effectiveAwaitResidentApproval) {
       // Must await: the response payload (residentApprovalRecipientCount + the
       // "no resident accounts linked" message) depends on the recipient count.
       try {
@@ -379,11 +427,11 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 
     return res.status(201).json({
       message:
-        awaitResidentApproval && residentApprovalRecipientCount == 0
+        effectiveAwaitResidentApproval && residentApprovalRecipientCount == 0
           ? "Visitor request created, but no resident accounts are linked to selected flat(s)"
           : "Visitor checked in successfully",
       visitor: completeVisitor,
-      awaitResidentApproval: Boolean(awaitResidentApproval),
+      awaitResidentApproval: Boolean(effectiveAwaitResidentApproval),
       residentApprovalRecipientCount,
     });
   } catch (error) {
@@ -520,6 +568,101 @@ router.get(["/visitors-today", "/my-visitors"], requireRole(UserRole.GUARD), asy
 const confirmEntrySchema = z.object({
   visitorId: z.string().min(1),
 });
+
+const GUARD_OVERRIDE_REASONS = [
+  "RESIDENT_CONFIRMED_BY_CALL",
+  "NO_RESPONSE_GUARD_VERIFIED",
+  "EMERGENCY",
+] as const;
+
+const overrideEntrySchema = z
+  .object({
+    visitorId: z.string().min(1),
+    reason: z.enum(GUARD_OVERRIDE_REASONS),
+    note: z.string().trim().max(300).optional(),
+  })
+  .refine((d) => d.reason !== "NO_RESPONSE_GUARD_VERIFIED" || (d.note?.length ?? 0) >= 3, {
+    message: "Add a short note on how you verified the visitor",
+    path: ["note"],
+  });
+
+// POST /api/guards/visitor-override-entry — resident has not responded; guard lets the
+// visitor in with a recorded reason. Audited and residents are informed.
+router.post(
+  "/visitor-override-entry",
+  requireRole(UserRole.GUARD),
+  validateBody(overrideEntrySchema),
+  async (req, res, next) => {
+    try {
+      const { userId, societyId } = req.auth!;
+      const { visitorId, reason, note } = req.body as z.infer<typeof overrideEntrySchema>;
+
+      const now = new Date();
+      const shift = await findActiveGuardShift(prisma, { guardId: userId, societyId, now });
+      if (!shift) {
+        return res.status(400).json({ message: "No active shift found" });
+      }
+
+      const [visitor, society] = await Promise.all([
+        prisma.visitor.findFirst({ where: { id: visitorId, societyId } }),
+        prisma.society.findUnique({
+          where: { id: societyId },
+          select: { guardCanApproveVisitors: true },
+        }),
+      ]);
+
+      if (!visitor) {
+        return res.status(404).json({ message: "Visitor not found" });
+      }
+      if (visitorIsCheckedOut(visitor)) {
+        return res.status(400).json({ message: "Visitor already checked out" });
+      }
+      if (visitor.status === VISITOR_APPROVED_FOR_ENTRY) {
+        return res.status(400).json({ message: "Residents already approved — use Confirm guest entered." });
+      }
+      if (visitor.status !== VISITOR_PENDING_APPROVAL) {
+        return res.status(400).json({
+          message:
+            visitor.status === VisitorStatus.DENIED
+              ? "A resident rejected this visitor. Add the visitor again to send a new request."
+              : "This visitor is not waiting for approval.",
+        });
+      }
+
+      // Without guard-approval rights, the guard may only act on a resident's
+      // phone confirmation or a genuine emergency.
+      if (!society?.guardCanApproveVisitors && reason === "NO_RESPONSE_GUARD_VERIFIED") {
+        return res.status(403).json({
+          message:
+            "Your society requires resident approval. Call the resident and choose 'Resident confirmed on call', or use Emergency.",
+        });
+      }
+
+      await prisma.$transaction(async (tx) => {
+        return await transitionVisitorState(tx, {
+          visitorId,
+          fromStatus: VISITOR_PENDING_APPROVAL,
+          toStatus: VisitorStatus.CHECKED_IN,
+          transitionType: VisitorTransitionType.EMERGENCY_OVERRIDE,
+          actorUserId: userId,
+          societyId,
+          timestamp: now,
+          metadata: { overrideReason: reason, ...(note ? { note } : {}) },
+        });
+      });
+
+      const updated = await fetchGuardVisitorDetail(visitorId);
+      return res.json({ message: "Visitor allowed in", visitor: updated });
+    } catch (error) {
+      if (error instanceof Error && error.message === "VISITOR_STATE_CHANGED") {
+        return res
+          .status(409)
+          .json({ message: "A resident just responded to this visitor. Please refresh and try again." });
+      }
+      next(error);
+    }
+  },
+);
 
 // POST /api/guards/visitor-confirm-entry — after residents APPROVED, guard marks guest on premises
 router.post(

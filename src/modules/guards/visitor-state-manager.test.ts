@@ -8,6 +8,21 @@ import {
 } from "@prisma/client";
 import { admitPreApprovedVisitor, recomputeVisitorAggregateApproval } from "./visitor-state-manager.js";
 
+function pendingVisitorMock(
+  onUpdate: (s: VisitorStatus) => void,
+  current: VisitorStatus = VisitorStatus.PENDING_APPROVAL,
+) {
+  return {
+    findFirst: async () => ({ status: current }),
+    findUnique: async () => ({ status: current }),
+    updateMany: async ({ where, data }: { where: { status: VisitorStatus }; data: { status: VisitorStatus } }) => {
+      if (where.status !== current) return { count: 0 };
+      onUpdate(data.status);
+      return { count: 1 };
+    },
+  };
+}
+
 describe("recomputeVisitorAggregateApproval", () => {
   it("returns APPROVED for ANY_ONE when one villa approves", async () => {
     let updatedTo: VisitorStatus | null = null;
@@ -23,12 +38,7 @@ describe("recomputeVisitorAggregateApproval", () => {
           { approvalStatus: VisitorVillaApprovalStatus.APPROVED, villaId: "v2" },
         ],
       },
-      visitor: {
-        update: async ({ data }: { data: { status: VisitorStatus } }) => {
-          updatedTo = data.status;
-          return {};
-        },
-      },
+      visitor: pendingVisitorMock((s) => (updatedTo = s)),
     } as unknown as Prisma.TransactionClient;
 
     const status = await recomputeVisitorAggregateApproval(tx, {
@@ -54,12 +64,7 @@ describe("recomputeVisitorAggregateApproval", () => {
           { approvalStatus: VisitorVillaApprovalStatus.REJECTED, villaId: "v2" },
         ],
       },
-      visitor: {
-        update: async ({ data }: { data: { status: VisitorStatus } }) => {
-          updatedTo = data.status;
-          return {};
-        },
-      },
+      visitor: pendingVisitorMock((s) => (updatedTo = s)),
     } as unknown as Prisma.TransactionClient;
 
     const status = await recomputeVisitorAggregateApproval(tx, {
@@ -69,6 +74,31 @@ describe("recomputeVisitorAggregateApproval", () => {
 
     assert.equal(status, VisitorStatus.DENIED);
     assert.equal(updatedTo, VisitorStatus.DENIED);
+  });
+
+  it("never moves an already admitted visitor back to APPROVED", async () => {
+    let updatedTo: VisitorStatus | null = null;
+    const tx = {
+      society: {
+        findUnique: async () => ({
+          visitorMultiVillaApprovalMode: VisitorMultiVillaApprovalMode.ANY_ONE_APPROVAL,
+        }),
+      },
+      visitorVilla: {
+        findMany: async () => [
+          { approvalStatus: VisitorVillaApprovalStatus.APPROVED, villaId: "v1" },
+        ],
+      },
+      visitor: pendingVisitorMock((s) => (updatedTo = s), VisitorStatus.CHECKED_IN),
+    } as unknown as Prisma.TransactionClient;
+
+    const status = await recomputeVisitorAggregateApproval(tx, {
+      visitorId: "vis3",
+      societyId: "soc3",
+    });
+
+    assert.equal(status, VisitorStatus.CHECKED_IN);
+    assert.equal(updatedTo, null);
   });
 });
 

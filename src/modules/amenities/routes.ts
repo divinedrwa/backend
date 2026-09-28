@@ -111,4 +111,35 @@ router.patch(
   }
 );
 
+// Bookings cascade on amenity delete, so an amenity with booking history is
+// deactivated instead of deleted to keep that history.
+router.delete("/:id", requireRole(UserRole.ADMIN), async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const societyId = req.auth!.societyId;
+
+    const amenity = await prisma.amenity.findFirst({
+      where: { id, societyId },
+      select: { id: true },
+    });
+    if (!amenity) {
+      return res.status(404).json({ message: "Amenity not found" });
+    }
+
+    const bookingCount = await prisma.amenityBooking.count({ where: { amenityId: id } });
+    if (bookingCount > 0) {
+      await prisma.amenity.update({ where: { id }, data: { isActive: false } });
+      return res.json({
+        message: "Amenity has booking history, so it was deactivated instead of deleted",
+        deactivated: true,
+      });
+    }
+
+    await prisma.amenity.delete({ where: { id } });
+    return res.json({ message: "Amenity deleted", deactivated: false });
+  } catch (error) {
+    next(error);
+  }
+});
+
 export default router;

@@ -9,6 +9,7 @@ import {
   ROSTER_SHIFT_DURATIONS_HOURS,
 } from "../../lib/guardShiftRoster";
 import { startOfLocalCalendarDay } from "../../lib/societyTime";
+import { toIstMinuteOfDay } from "../../lib/guardShiftActive";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 
@@ -78,6 +79,9 @@ const updateShiftSchema = z.object({
   shiftType: z.nativeEnum(ShiftType).optional(),
   startTime: z.string().datetime().optional(),
   endTime: z.string().datetime().optional(),
+  recurringDaily: z.boolean().optional(),
+  recurringStartMinutes: z.number().int().min(0).max(1439).optional(),
+  recurringEndMinutes: z.number().int().min(0).max(1440).optional(),
   contactPhone: z.string().trim().min(6).max(20).optional().nullable(),
   notes: z.string().trim().optional(),
 });
@@ -327,12 +331,60 @@ router.patch(
       const body = req.body as z.infer<typeof updateShiftSchema>;
       const { id } = req.params;
 
+      const existing = await prisma.guardShift.findFirst({
+        where: { id, societyId: req.auth!.societyId },
+        select: {
+          recurringDaily: true,
+          recurringStartMinutes: true,
+          recurringEndMinutes: true,
+          startTime: true,
+          endTime: true,
+        },
+      });
+      if (!existing) {
+        return res.status(404).json({ message: "Shift not found" });
+      }
+
       const updateData: Prisma.GuardShiftUncheckedUpdateManyInput = {};
       if (body.guardId) updateData.guardId = body.guardId;
       if (body.gateId) updateData.gateId = body.gateId;
       if (body.shiftType) updateData.shiftType = body.shiftType;
-      if (body.startTime) updateData.startTime = new Date(body.startTime);
-      if (body.endTime) updateData.endTime = new Date(body.endTime);
+
+      // Daily shifts are matched on the stored minute-of-day window, so edits to
+      // their hours must update those fields, not just the anchor timestamps.
+      const recurring = body.recurringDaily ?? existing.recurringDaily;
+      if (recurring) {
+        const startM =
+          body.recurringStartMinutes ??
+          (body.startTime ? Math.floor(toIstMinuteOfDay(new Date(body.startTime))) : null) ??
+          existing.recurringStartMinutes ??
+          Math.floor(toIstMinuteOfDay(existing.startTime));
+        const endM =
+          body.recurringEndMinutes ??
+          (body.endTime ? Math.floor(toIstMinuteOfDay(new Date(body.endTime))) : null) ??
+          existing.recurringEndMinutes ??
+          Math.floor(toIstMinuteOfDay(existing.endTime));
+        if (startM === endM % 1440) {
+          return res.status(400).json({ message: "Shift must have a non-zero duration" });
+        }
+        const anchors = buildRecurringAnchorTimes(startM, endM);
+        updateData.recurringDaily = true;
+        updateData.recurringStartMinutes = startM;
+        updateData.recurringEndMinutes = endM;
+        updateData.startTime = anchors.startTime;
+        updateData.endTime = anchors.endTime;
+      } else {
+        if (existing.recurringDaily && (!body.startTime || !body.endTime)) {
+          return res.status(400).json({
+            message: "Start and end date/time are required to change a daily shift to a one-time shift",
+          });
+        }
+        updateData.recurringDaily = false;
+        updateData.recurringStartMinutes = null;
+        updateData.recurringEndMinutes = null;
+        if (body.startTime) updateData.startTime = new Date(body.startTime);
+        if (body.endTime) updateData.endTime = new Date(body.endTime);
+      }
       if (body.notes !== undefined) updateData.notes = body.notes;
       if (body.contactPhone !== undefined) updateData.contactPhone = body.contactPhone;
 

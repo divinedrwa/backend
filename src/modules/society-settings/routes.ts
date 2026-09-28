@@ -109,7 +109,13 @@ const themeColorsSchema = z
 
 const patchSocietySchema = z
   .object({
-    visitorMultiVillaApprovalMode: z.nativeEnum(VisitorMultiVillaApprovalMode).optional(),
+    // Older admin web/app builds send "ALL_MUST_APPROVE"; the enum value is ALL_VILLAS_REQUIRED.
+    visitorMultiVillaApprovalMode: z
+      .preprocess(
+        (v) => (v === "ALL_MUST_APPROVE" ? VisitorMultiVillaApprovalMode.ALL_VILLAS_REQUIRED : v),
+        z.nativeEnum(VisitorMultiVillaApprovalMode),
+      )
+      .optional(),
     visitorApprovalRequired: z.boolean().optional(),
     guardCanApproveVisitors: z.boolean().optional(),
     upiVpa: z

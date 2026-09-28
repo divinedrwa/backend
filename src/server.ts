@@ -16,6 +16,8 @@ import { autoCloseResolvedComplaints, checkComplaintSlaBreaches } from "./servic
 import { processEscalations } from "./services/sos-coordinator";
 import { processWaterStillOnReminders } from "./services/waterStillOnReminder.service";
 import { processVisitorOverstayAlerts } from "./services/visitorPassAudit.service";
+import { closeUnmarkedExits } from "./modules/guards/visitor-state-manager";
+import { localDayRange } from "./lib/societyTime";
 
 validateProductionEnv();
 
@@ -136,6 +138,37 @@ cron.schedule(
                 if (deactivatedPreApprovals > 0) {
                   logger.info({ deactivatedPreApprovals }, "[billing-cron] Deactivated expired pre-approvals");
                 }
+              },
+            },
+            {
+              name: "expireStaleGateRequests",
+              fn: async () => {
+                // Walk-in requests nobody answered/admitted for 12h are closed so they
+                // stop cluttering the guard queue and don't block a fresh request.
+                const cutoff = new Date(Date.now() - 12 * 60 * 60 * 1000);
+                const { count: expiredGateRequests } = await prisma.visitor.updateMany({
+                  where: {
+                    status: { in: ["PENDING_APPROVAL", "APPROVED"] },
+                    checkOutAt: null,
+                    checkInTime: { lt: cutoff },
+                  },
+                  data: { status: "CANCELLED" },
+                });
+                if (expiredGateRequests > 0) {
+                  logger.info({ expiredGateRequests }, "[billing-cron] Expired stale gate requests");
+                }
+              },
+            },
+            {
+              name: "closeUnmarkedExits",
+              fn: async () => {
+                // Visits from an earlier society-local day, and at least 12h old (so an
+                // overnight guest isn't closed right after midnight).
+                const now = new Date();
+                const todayStart = localDayRange(now).start;
+                const twelveHoursAgo = new Date(now.getTime() - 12 * 60 * 60 * 1000);
+                const cutoff = todayStart < twelveHoursAgo ? todayStart : twelveHoursAgo;
+                await closeUnmarkedExits(prisma, { checkInTime: { lt: cutoff } }, now);
               },
             },
             {

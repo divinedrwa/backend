@@ -1,4 +1,4 @@
-import { Prisma, UserRole, VisitorType } from "@prisma/client";
+import { NotificationCategory, Prisma, UserRole, VisitorStatus, VisitorType } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
@@ -7,6 +7,16 @@ import { prisma } from "../../lib/prisma";
 import { localDayRange } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
+import {
+  transitionVisitorState,
+  VisitorTransitionType,
+} from "../guards/visitor-state-manager";
+import {
+  notifyResidentsVisitorApprovalRequest,
+  resolveVisitorApprovalRecipientIds,
+} from "../guards/visitorResidentApproval.service";
+import { NotificationService } from "../../services/notification.service";
+import { logger } from "../../lib/logger";
 
 const router = Router();
 
@@ -46,6 +56,7 @@ router.get("/", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, ne
       const s = status.trim().toLowerCase();
       if (s === "active") {
         where.checkOutAt = null;
+        where.status = { in: [VisitorStatus.PENDING_APPROVAL, VisitorStatus.APPROVED, VisitorStatus.CHECKED_IN] };
       } else if (s === "checked_out") {
         where.checkOutAt = { not: null };
       }
@@ -251,6 +262,17 @@ router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async
       return res.status(404).json({ message: "Visitor not found or already checked out" });
     }
 
+    const openStatuses: VisitorStatus[] = [
+      VisitorStatus.PENDING_APPROVAL,
+      VisitorStatus.APPROVED,
+      VisitorStatus.CHECKED_IN,
+    ];
+    if (!openStatuses.includes(visitor.status)) {
+      return res.status(400).json({
+        message: "This visitor request is closed. Add the visitor again to create a new entry.",
+      });
+    }
+
     // Verify villa exists
     const villa = await prisma.villa.findFirst({
       where: {
@@ -288,35 +310,81 @@ router.post("/:id/add-villa", requireRole(UserRole.GUARD, UserRole.ADMIN), async
     }
 
     const existingVisit = await prisma.visitorVilla.findFirst({
-      where: {
-        visitorId: id,
-        villaId,
-        unitId: resolvedUnitId,
-      },
+      where: { visitorId: id, villaId, unitId: resolvedUnitId },
+      select: { id: true, approvalStatus: true },
     });
 
-    if (existingVisit) {
+    if (existingVisit && existingVisit.approvalStatus !== "REJECTED") {
       return res.status(400).json({ message: "Visitor already registered for this property/unit" });
     }
 
-    // Add villa visit
-    const villaVisit = await prisma.visitorVilla.create({
-      data: {
-        visitorId: id,
-        villaId,
-        unitId: resolvedUnitId,
-        notes,
-        notifiedAt: new Date()
-      },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true
-          }
+    const villaInclude = { villa: { select: { villaNumber: true, block: true } } } as const;
+    // A rejected row for the same flat is reopened as a fresh request (the row is
+    // unique per visitor+villa+unit, so a second insert would fail).
+    const villaVisit = existingVisit
+      ? await prisma.visitorVilla.update({
+          where: { id: existingVisit.id },
+          data: {
+            approvalStatus: "PENDING",
+            respondedAt: null,
+            respondedByUserId: null,
+            notes,
+            notifiedAt: new Date(),
+          },
+          include: villaInclude,
+        })
+      : await prisma.visitorVilla.create({
+          data: {
+            visitorId: id,
+            villaId,
+            unitId: resolvedUnitId,
+            notes,
+            notifiedAt: new Date(),
+          },
+          include: villaInclude,
+        });
+
+    // The newly added flat must hear about this visitor like the original ones did.
+    try {
+      if (visitor.status === VisitorStatus.PENDING_APPROVAL) {
+        await notifyResidentsVisitorApprovalRequest({
+          prisma,
+          societyId: req.auth!.societyId,
+          visitorId: id,
+          visitorName: visitor.name,
+          purpose: visitor.purpose,
+          villaIds: [villaId],
+          targets: [{ villaId, unitId: resolvedUnitId }],
+          guardUserId: req.auth!.userId,
+          visitorType: visitor.visitorType,
+          visitorPhone: visitor.phone,
+          visitorPhoto: visitor.photo,
+        });
+      } else {
+        const recipientIds = await resolveVisitorApprovalRecipientIds({
+          prisma,
+          societyId: req.auth!.societyId,
+          villaIds: [villaId],
+          targets: [{ villaId, unitId: resolvedUnitId }],
+        });
+        if (recipientIds.length > 0) {
+          await NotificationService.sendToUsers(
+            recipientIds,
+            {
+              title: `Visitor for your flat: ${visitor.name}`,
+              body:
+                visitor.status === VisitorStatus.CHECKED_IN
+                  ? `${visitor.name} is inside the society and is also visiting your flat.`
+                  : `${visitor.name} is at the gate and is also visiting your flat.`,
+              data: { type: "VISITOR_UPDATE", visitorId: id, visitorName: visitor.name },
+            },
+            { category: NotificationCategory.VISITOR },
+          );
         }
       }
-    });
+    } catch (notifyErr) {
+      logger.error({ err: notifyErr, visitorId: id }, "[add-villa] resident notification failed");
+    }
 
     return res.status(201).json({ villaVisit });
   } catch (error) {
@@ -333,22 +401,44 @@ router.patch(
     try {
       const { checkOutAt } = req.body as z.infer<typeof checkOutSchema>;
       const { id } = req.params;
+      const { societyId, userId } = req.auth!;
+      const at = new Date(checkOutAt);
 
-      const visitor = await prisma.visitor.updateMany({
-        where: {
-          id,
-          societyId: req.auth!.societyId,
-          checkOutAt: null
-        },
-        data: { checkOutAt: new Date(checkOutAt), checkOutTime: new Date(checkOutAt) }
+      const current = await prisma.visitor.findFirst({
+        where: { id, societyId, checkOutAt: null },
+        select: { status: true },
       });
-
-      if (visitor.count === 0) {
+      if (!current) {
         return res.status(404).json({ message: "Visitor not found or already checked out" });
+      }
+
+      if (current.status === VisitorStatus.DENIED || current.status === VisitorStatus.CANCELLED) {
+        // Closed requests: just stamp the exit so the rejection/cancellation stays visible.
+        await prisma.visitor.updateMany({
+          where: { id, societyId, checkOutAt: null },
+          data: { checkOutAt: at, checkOutTime: at, checkedOutByGuardId: userId },
+        });
+      } else {
+        await prisma.$transaction((tx) =>
+          transitionVisitorState(tx, {
+            visitorId: id,
+            fromStatus: current.status,
+            toStatus: VisitorStatus.CHECKED_OUT,
+            transitionType: VisitorTransitionType.GUARD_CHECKOUT,
+            actorUserId: userId,
+            societyId,
+            timestamp: at,
+          }),
+        );
       }
 
       return res.json({ message: "Visitor checked out" });
     } catch (error) {
+      if (error instanceof Error && error.message === "VISITOR_STATE_CHANGED") {
+        return res
+          .status(409)
+          .json({ message: "This visitor's status just changed. Please refresh and try again." });
+      }
       next(error);
     }
   }
@@ -358,9 +448,10 @@ router.patch(
 router.get("/active/list", requireRole(UserRole.ADMIN, UserRole.GUARD), async (req, res, next) => {
   try {
     const pagination = getPagination(req);
-    const where = {
+    const where: Prisma.VisitorWhereInput = {
       societyId: req.auth!.societyId,
       checkOutAt: null,
+      status: { in: [VisitorStatus.PENDING_APPROVAL, VisitorStatus.APPROVED, VisitorStatus.CHECKED_IN] },
     };
     const [activeVisitors, total] = await Promise.all([
       prisma.visitor.findMany({

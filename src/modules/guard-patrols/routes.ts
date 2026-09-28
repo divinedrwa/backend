@@ -8,8 +8,10 @@ import { validateBody } from "../../middlewares/validate";
 
 const router = Router();
 
+// Gate ids aren't always cuids (seeded gates use ids like `gate-1`).
 const createPatrolSchema = z.object({
-  gateId: z.string().cuid(),
+  guardId: z.string().min(1).optional(),
+  gateId: z.string().min(1),
   checkpointName: z.string().trim().min(2),
   checkpointLocation: z.string().trim().optional(),
   scheduledTime: z.string().datetime(),
@@ -77,13 +79,34 @@ router.post(
   async (req, res, next) => {
     try {
       const body = req.body as z.infer<typeof createPatrolSchema>;
+      const societyId = req.auth!.societyId;
 
-      // For now, assign to the requesting admin or leave empty
-      // In real scenario, you'd assign to a specific guard
+      const gate = await prisma.gate.findFirst({
+        where: { id: body.gateId, societyId },
+        select: { id: true },
+      });
+      if (!gate) {
+        return res.status(404).json({ message: "Gate not found in this society" });
+      }
+
+      // Older clients don't send a guard; those patrols stay on the creating
+      // admin as before.
+      let guardId = req.auth!.userId;
+      if (body.guardId) {
+        const guard = await prisma.user.findFirst({
+          where: { id: body.guardId, societyId, role: UserRole.GUARD, isActive: true },
+          select: { id: true },
+        });
+        if (!guard) {
+          return res.status(400).json({ message: "Selected guard not found or inactive" });
+        }
+        guardId = guard.id;
+      }
+
       const patrol = await prisma.guardPatrol.create({
         data: {
-          societyId: req.auth!.societyId,
-          guardId: req.auth!.userId, // Temporary - should be specific guard
+          societyId,
+          guardId,
           gateId: body.gateId,
           checkpointName: body.checkpointName,
           checkpointLocation: body.checkpointLocation,
@@ -145,7 +168,7 @@ const updatePatrolSchema = z.object({
   checkpointLocation: z.string().trim().optional(),
   scheduledTime: z.string().datetime().optional(),
   notes: z.string().trim().optional(),
-  gateId: z.string().cuid().optional(),
+  gateId: z.string().min(1).optional(),
 });
 
 router.put(

@@ -374,6 +374,7 @@ export async function recomputeVisitorAggregateApproval(
   prisma: PrismaClient | Prisma.TransactionClient,
   visitorId: string,
   societyId: string,
+  actorUserId?: string,
 ): Promise<{
   previousStatus: string;
   visitor: VisitorForApprovalPayload | null;
@@ -394,12 +395,13 @@ export async function recomputeVisitorAggregateApproval(
     typeof (client as PrismaClient).$transaction === "function"
   ) {
     await (client as PrismaClient).$transaction(async (tx) => {
-      await recomputeFromStateManager(tx, { visitorId, societyId });
+      await recomputeFromStateManager(tx, { visitorId, societyId, actorUserId });
     });
   } else {
     await recomputeFromStateManager(client as Prisma.TransactionClient, {
       visitorId,
       societyId,
+      actorUserId,
     });
   }
 

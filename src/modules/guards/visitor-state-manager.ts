@@ -8,6 +8,7 @@ import {
   VisitorVillaApprovalStatus,
   PreApprovedVisitor,
 } from "@prisma/client";
+import type { PrismaClient } from "@prisma/client";
 import { logger } from "../../lib/logger";
 import { residentLikeRoleFilter } from "../../lib/residentLike";
 import { resolveFamilyVisitorDelegateUserIds } from "../../lib/familyVisitorDelegation";
@@ -70,6 +71,7 @@ export interface VisitorStateTransition {
     otpCode?: string;
     preApprovedId?: string;
     overrideReason?: string;
+    note?: string;
     villaId?: string;
     unitId?: string;
   };
@@ -104,10 +106,12 @@ const VALID_VISITOR_TRANSITIONS: Record<
     [VisitorTransitionType.RESIDENT_REJECT]: [VisitorStatus.DENIED],
     [VisitorTransitionType.EMERGENCY_OVERRIDE]: [VisitorStatus.CHECKED_IN],
     [VisitorTransitionType.GUARD_ADMIT]: [VisitorStatus.CHECKED_IN], // If approval complete
+    [VisitorTransitionType.GUARD_CHECKOUT]: [VisitorStatus.CHECKED_OUT], // Guard can mark exit without resident response
   },
   [VisitorStatus.APPROVED]: {
     [VisitorTransitionType.GUARD_ADMIT]: [VisitorStatus.CHECKED_IN],
     [VisitorTransitionType.EMERGENCY_OVERRIDE]: [VisitorStatus.CHECKED_IN],
+    [VisitorTransitionType.GUARD_CHECKOUT]: [VisitorStatus.CHECKED_OUT], // Visitor left before guard confirmed entry
   },
   [VisitorStatus.CHECKED_IN]: {
     [VisitorTransitionType.GUARD_CHECKOUT]: [VisitorStatus.CHECKED_OUT],
@@ -273,15 +277,26 @@ async function sendVisitorNotifications(
       case VisitorTransitionType.GUARD_CHECKOUT:
       case VisitorTransitionType.AUTO_CHECKOUT:
         title = "Visitor Checked Out";
-        body = `${visitor.name} has left`;
+        body =
+          transition.fromStatus === VisitorStatus.PENDING_APPROVAL ||
+          transition.fromStatus === VisitorStatus.APPROVED
+            ? `${visitor.name} left the gate without entering`
+            : `${visitor.name} has left`;
         notificationType = "VISITOR_CHECKED_OUT";
         break;
 
-      case VisitorTransitionType.EMERGENCY_OVERRIDE:
-        title = "Visitor Entry - Admin Override";
-        body = `${visitor.name} admitted by admin`;
+      case VisitorTransitionType.EMERGENCY_OVERRIDE: {
+        const reason = transition.metadata?.overrideReason;
+        title = "Visitor allowed in by security";
+        body =
+          reason === "RESIDENT_CONFIRMED_BY_CALL"
+            ? `${visitor.name} was let in after security confirmed with your household by phone`
+            : reason === "EMERGENCY"
+              ? `${visitor.name} was let in by security (emergency)`
+              : `${visitor.name} was let in by security without an app response`;
         notificationType = "VISITOR_EMERGENCY_OVERRIDE";
         break;
+      }
     }
 
     await notifyUsers(
@@ -363,10 +378,14 @@ export async function transitionVisitorState(
           transition.timestamp,
         ),
         overstayNotifiedAt: null,
+        checkedInByGuardId: transition.actorUserId,
       }),
       ...(transition.toStatus === VisitorStatus.CHECKED_OUT && {
         checkOutAt: transition.timestamp,
         checkOutTime: transition.timestamp,
+        ...(transition.transitionType === VisitorTransitionType.GUARD_CHECKOUT && {
+          checkedOutByGuardId: transition.actorUserId,
+        }),
       }),
     },
   });
@@ -413,6 +432,69 @@ export async function transitionVisitorState(
 }
 
 // ============================================================================
+// UNMARKED EXITS
+// ============================================================================
+
+/**
+ * Close visits that are still CHECKED_IN because the guard never marked exit.
+ * They are flagged `exitNotMarked` (checkOutAt is the closing time, not a real exit)
+ * and audited; residents are not notified since nothing happened at the gate.
+ */
+export async function closeUnmarkedExits(
+  db: PrismaClient,
+  where: Prisma.VisitorWhereInput,
+  now: Date = new Date(),
+): Promise<number> {
+  const candidates = await db.visitor.findMany({
+    where: {
+      ...where,
+      status: VisitorStatus.CHECKED_IN,
+      checkOutAt: null,
+      checkOutTime: null,
+    },
+    select: { id: true, expectedCheckoutAt: true },
+    orderBy: { checkInTime: "asc" },
+    take: 500,
+  });
+
+  let closed = 0;
+  for (const { id, expectedCheckoutAt } of candidates) {
+    // Close at the end of the expected stay when that's already past, so reports
+    // don't show a multi-day visit just because nobody tapped exit.
+    const closeAt =
+      expectedCheckoutAt && expectedCheckoutAt < now ? expectedCheckoutAt : now;
+    const done = await db.$transaction(async (tx) => {
+      const upd = await tx.visitor.updateMany({
+        where: { id, status: VisitorStatus.CHECKED_IN, checkOutAt: null },
+        data: {
+          status: VisitorStatus.CHECKED_OUT,
+          checkOutAt: closeAt,
+          checkOutTime: closeAt,
+          exitNotMarked: true,
+        },
+      });
+      if (upd.count === 0) return false;
+      await tx.visitorCheckpoint.create({
+        data: {
+          visitorId: id,
+          checkpointType: "EXITED",
+          timestamp: now,
+          actorUserId: null,
+          metadata: { exitNotMarked: true, closedAt: closeAt.toISOString() },
+        },
+      });
+      return true;
+    });
+    if (done) closed++;
+  }
+
+  if (closed > 0) {
+    logger.info({ closed }, "[visitor-state] Closed visits with unmarked exit");
+  }
+  return closed;
+}
+
+// ============================================================================
 // MULTI-VILLA APPROVAL AGGREGATION (Race-Safe)
 // ============================================================================
 
@@ -422,16 +504,32 @@ export async function transitionVisitorState(
  * 
  * Respects society's `visitorMultiVillaApprovalMode`:
  * - ANY_ONE_APPROVAL: Any villa can approve
- * - ALL_MUST_APPROVE: All villas must approve
+ * - ALL_VILLAS_REQUIRED: All villas must approve
+ * Only moves a visitor out of PENDING_APPROVAL; never rewrites a later status.
  */
 export async function recomputeVisitorAggregateApproval(
   tx: Prisma.TransactionClient,
   params: {
     visitorId: string;
     societyId: string;
+    actorUserId?: string;
   }
 ): Promise<VisitorStatus> {
   logger.info({ visitorId: params.visitorId }, "[visitor-approval] Recomputing aggregate");
+
+  const current = await tx.visitor.findFirst({
+    where: { id: params.visitorId, societyId: params.societyId },
+    select: { status: true },
+  });
+  if (!current) {
+    throw new Error("VISITOR_NOT_FOUND");
+  }
+  // Aggregation only decides the outcome of a pending request. Once the guard has
+  // admitted, checked out, or the request was already resolved, a late/duplicate
+  // resident response must never move the visitor backwards (e.g. CHECKED_IN → APPROVED).
+  if (current.status !== VisitorStatus.PENDING_APPROVAL) {
+    return current.status;
+  }
 
   // Get society approval mode
   const society = await tx.society.findUnique({
@@ -478,11 +576,34 @@ export async function recomputeVisitorAggregateApproval(
       : VisitorStatus.PENDING_APPROVAL;
   }
 
-  // Update visitor status
-  await tx.visitor.update({
-    where: { id: params.visitorId },
+  if (aggregateStatus === VisitorStatus.PENDING_APPROVAL) {
+    return aggregateStatus;
+  }
+
+  const updated = await tx.visitor.updateMany({
+    where: { id: params.visitorId, status: VisitorStatus.PENDING_APPROVAL },
     data: { status: aggregateStatus },
   });
+  if (updated.count === 0) {
+    const latest = await tx.visitor.findUnique({
+      where: { id: params.visitorId },
+      select: { status: true },
+    });
+    return latest?.status ?? aggregateStatus;
+  }
+
+  if (params.actorUserId) {
+    await recordVisitorCheckpoint(tx, {
+      visitorId: params.visitorId,
+      checkpointType:
+        aggregateStatus === VisitorStatus.APPROVED
+          ? VisitorCheckpointType.APPROVED
+          : VisitorCheckpointType.REJECTED,
+      timestamp: new Date(),
+      actorUserId: params.actorUserId,
+      metadata: { mode: society.visitorMultiVillaApprovalMode },
+    });
+  }
 
   logger.info(
     {

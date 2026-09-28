@@ -4,7 +4,7 @@ import type { GuardShift, Prisma, PrismaClient } from "@prisma/client";
 const IST_OFFSET_MINUTES = 330;
 
 /** Convert a Date to IST minute-of-day (0-1439). */
-function toIstMinuteOfDay(d: Date): number {
+export function toIstMinuteOfDay(d: Date): number {
   const utcMin = d.getUTCHours() * 60 + d.getUTCMinutes() + d.getUTCSeconds() / 60;
   return (utcMin + IST_OFFSET_MINUTES) % 1440;
 }

@@ -1056,6 +1056,8 @@ model Visitor {
   checkedInByGuardId String?
   /// Guard who checked out the visitor
   checkedOutByGuardId String?
+  /// Closed by the system because the guard never marked exit; checkOutAt is the closing time, not a real exit.
+  exitNotMarked   Boolean     @default(false)
   /// Link back to the pre-approval that was consumed to admit this visitor (audit trail).
   /// NOT unique: a recurring pre-approval pass legitimately admits many visitors.
   preApprovedId   String?
