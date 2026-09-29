@@ -1205,6 +1205,8 @@ router.get("/admin/residents/payments", requireAuth, requireRole(UserRole.ADMIN)
           const cashPaidAmount = ledgerRow?.cashPaidAmount ?? 0;
           const paidAmount = ledgerRow?.paidAmount ?? 0;
           const deltaAmount = ledgerRow?.deltaAmount ?? 0;
+          // Not billed in this cycle (non-paying villa, non-primary member): nothing to show.
+          if (expectedAmount <= 0 && cashPaidAmount <= 0 && deltaAmount === 0) continue;
           const effectiveStatus = deltaAmount > 0 ? "CREDIT" : deltaAmount < 0 ? "DUE" : "SETTLED";
           const settledByLedger = paidAmount >= expectedAmount - 0.005;
           if (paidFilter === "PAID" && !settledByLedger) continue;

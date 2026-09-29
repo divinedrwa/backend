@@ -1,5 +1,6 @@
 import { BillingUserPaymentStatus } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
+import { NOT_ENROLLED_EXCLUSION_REASON } from "../billing-cycle/billing-collection-link";
 import { getVillaCreditForCycleDisplayBulk } from "./credit-walker";
 
 export const FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR =
@@ -98,11 +99,19 @@ export async function buildCycleFinancialDashboardCore(
     }),
     prisma.cycleVillaExclusion.findMany({
       where: { cycleId },
-      select: { villaId: true },
+      select: { villaId: true, reason: true },
     }),
   ]);
 
   const dashExcludedIds = new Set(dashExclusions.map((e) => e.villaId));
+  // Non-paying villas are not part of the cycle: leave them out of the list and totals.
+  const notEnrolledIds = new Set(
+    dashExclusions.filter((e) => e.reason === NOT_ENROLLED_EXCLUSION_REASON).map((e) => e.villaId),
+  );
+  // Only villas billed in this cycle are listed (same as the collection grid); villas with
+  // no bill here (no primary resident, added later, not paying) would otherwise show as ₹0 pending.
+  const billedVillaIds = new Set(snapshots.map((s) => s.villaId));
+  const listedVillas = villas.filter((v) => billedVillaIds.has(v.id) && !notEnrolledIds.has(v.id));
 
   if (snapshots.length === 0) {
     return { error: FINANCIAL_DASHBOARD_NO_SNAPSHOTS_ERROR };
@@ -166,7 +175,7 @@ export async function buildCycleFinancialDashboardCore(
     cashByVilla.set(p.villaId, (cashByVilla.get(p.villaId) ?? 0) + Number(p.amount));
   }
 
-  const residents = villas.map((villa) => {
+  const residents = listedVillas.map((villa) => {
     const s = snapByVilla.get(villa.id);
     const p = lastPayByVilla.get(villa.id);
     const credit = creditBalances.get(villa.id) ?? 0;
@@ -215,7 +224,9 @@ export async function buildCycleFinancialDashboardCore(
   });
 
   const activeSnaps = snapshots.filter((s) => !dashExcludedIds.has(s.villaId));
-  const excludedCount = snapshots.filter((s) => dashExcludedIds.has(s.villaId)).length;
+  const excludedCount = snapshots.filter(
+    (s) => dashExcludedIds.has(s.villaId) && !notEnrolledIds.has(s.villaId),
+  ).length;
   const totalExpected = activeSnaps.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
   const collected = activeSnaps.reduce((sum, s) => sum + Number(s.paidAmount), 0);
   const paidCount = activeSnaps.filter((s) => s.status === "PAID").length;
@@ -253,7 +264,7 @@ export async function buildCycleFinancialDashboardCore(
     residents,
     paymentHistory,
     summary: {
-      totalVillas: villas.length,
+      totalVillas: listedVillas.length,
       paidCount,
       unpaidCount,
       overdueCount,

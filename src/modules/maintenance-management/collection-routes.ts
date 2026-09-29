@@ -15,6 +15,7 @@ import { validateBody } from "../../middlewares/validate";
 import {
   ensureVillaLedgersAligned,
   excludeNonEnrolledVillasFromCycle,
+  NOT_ENROLLED_EXCLUSION_REASON,
   reconcileAllVillasForBillingCycle,
   syncAllUserCyclePaymentsForMaintenanceCycle,
   syncBillingUserCyclePaymentsFromSnapshot,
@@ -1153,11 +1154,16 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       }),
       prisma.cycleVillaExclusion.findMany({
         where: { cycleId },
-        select: { villaId: true },
+        select: { villaId: true, reason: true },
       }),
     ]);
 
     const excludedVillaIds = new Set(exclusions.map((e) => e.villaId));
+    // Villas not paying maintenance aren't part of the cycle at all: hide them.
+    // Manual exclusions stay listed so the admin can include them again.
+    const notEnrolledVillaIds = new Set(
+      exclusions.filter((e) => e.reason === NOT_ENROLLED_EXCLUSION_REASON).map((e) => e.villaId),
+    );
 
     let snapshotsRows = snapshots;
     if (snapshotsRows.length === 0) {
@@ -1236,7 +1242,9 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
 
     // Billing cycles only raise snapshots for villas with a primary resident, so villas
     // without one have no row for this cycle.
-    const billedVillas = villas.filter((villa) => snapByVilla.has(villa.id));
+    const billedVillas = villas.filter(
+      (villa) => snapByVilla.has(villa.id) && !notEnrolledVillaIds.has(villa.id),
+    );
     const villaPayments = billedVillas.map((villa) => {
       const s = snapByVilla.get(villa.id)!;
       const pay = lastPayByVilla.get(villa.id);
@@ -1281,7 +1289,9 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
     });
 
     const activeSnapshots = snapshotsRows.filter((s) => !excludedVillaIds.has(s.villaId));
-    const excludedCount = snapshotsRows.filter((s) => excludedVillaIds.has(s.villaId)).length;
+    const excludedCount = snapshotsRows.filter(
+      (s) => excludedVillaIds.has(s.villaId) && !notEnrolledVillaIds.has(s.villaId),
+    ).length;
     const totalAmount = activeSnapshots.reduce((sum, s) => sum + Number(s.expectedAmount), 0);
     const collectedAmount = activeSnapshots.reduce((sum, s) => sum + Number(s.paidAmount), 0);
     const paidCount = activeSnapshots.filter((s) => s.status === "PAID").length;
@@ -1305,7 +1315,7 @@ router.get("/cycles/:cycleId/grid", async (req, res, next) => {
       summary: {
         year: cycle.periodYear,
         month: cycle.periodMonth,
-        totalVillas: villas.length,
+        totalVillas: villas.filter((v) => !notEnrolledVillaIds.has(v.id)).length,
         paidCount,
         unpaidCount,
         overdueCount,

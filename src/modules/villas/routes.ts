@@ -166,7 +166,7 @@ router.get("/", requireAuth, async (req, res, next) => {
             },
           },
         },
-        orderBy: { villaNumber: "asc" },
+        orderBy: [{ block: "asc" }, { villaNumber: "asc" }, { id: "asc" }],
         take: pagination.take,
         skip: pagination.skip,
       }),
@@ -479,39 +479,61 @@ router.post(
         });
       }
 
-      const fromPeriod = nextMonthKey(localMonthKey(new Date()));
-      const [fromYear, fromMonth] = fromPeriod.split("-").map(Number);
+      const currentPeriod = localMonthKey(new Date());
+      const fromPeriod = nextMonthKey(currentPeriod);
       const changing = villas.filter((v) =>
         enrolled ? v.maintenanceExemptFromPeriod != null : v.maintenanceExemptFromPeriod == null,
       );
       const changingIds = changing.map((v) => v.id);
+
+      // A villa that was never billed has no dues to keep, so it stops from this month
+      // (e.g. a newly added villa); villas already billed stop from next month.
+      const billedVillaIds = new Set<string>();
+      if (!enrolled && changingIds.length > 0) {
+        const billed = await prisma.villaMaintenanceSnapshot.findMany({
+          where: { villaId: { in: changingIds }, expectedAmount: { gt: 0 } },
+          select: { villaId: true },
+          distinct: ["villaId"],
+        });
+        billed.forEach((s) => billedVillaIds.add(s.villaId));
+      }
+      const stopPeriodFor = (villaId: string) =>
+        billedVillaIds.has(villaId) ? fromPeriod : currentPeriod;
 
       const futureCycleRowsUpdated = await prisma.$transaction(
         async (tx) => {
           if (changingIds.length === 0) return 0;
           let rows = 0;
           if (!enrolled) {
-            await tx.villa.updateMany({
-              where: { id: { in: changingIds } },
-              data: { maintenanceExemptFromPeriod: fromPeriod },
-            });
-            const futureCycles = await tx.maintenanceCollectionCycle.findMany({
-              where: {
-                societyId,
-                OR: [
-                  { periodYear: { gt: fromYear } },
-                  { periodYear: fromYear, periodMonth: { gte: fromMonth } },
-                ],
-              },
-              select: { id: true },
-            });
-            for (const c of futureCycles) {
-              const excluded = await excludeNonEnrolledVillasFromCycle(tx, {
-                societyId,
-                maintenanceCycleId: c.id,
-                villaIds: changingIds,
+            const groups = new Map<string, string[]>();
+            for (const id of changingIds) {
+              const period = stopPeriodFor(id);
+              groups.set(period, [...(groups.get(period) ?? []), id]);
+            }
+            for (const [period, groupIds] of groups) {
+              const [year, month] = period.split("-").map(Number);
+              await tx.villa.updateMany({
+                where: { id: { in: groupIds } },
+                data: { maintenanceExemptFromPeriod: period },
               });
-              rows += excluded.length;
+              const futureCycles = await tx.maintenanceCollectionCycle.findMany({
+                where: {
+                  societyId,
+                  OR: [
+                    { periodYear: { gt: year } },
+                    { periodYear: year, periodMonth: { gte: month } },
+                  ],
+                },
+                select: { id: true },
+              });
+              for (const c of futureCycles) {
+                const excluded = await excludeNonEnrolledVillasFromCycle(tx, {
+                  societyId,
+                  maintenanceCycleId: c.id,
+                  villaIds: groupIds,
+                });
+                rows += excluded.length;
+              }
             }
           } else {
             for (const villaId of changingIds) {
@@ -527,6 +549,11 @@ router.post(
         { timeout: 60_000 },
       );
 
+      const effectiveFromPeriod =
+        !enrolled && changingIds.length > 0 && changingIds.every((id) => !billedVillaIds.has(id))
+          ? currentPeriod
+          : fromPeriod;
+
       changingIds.forEach(invalidateReconcileCache);
       if (changingIds.length > 0) {
         auditFromRequest(req, {
@@ -537,7 +564,7 @@ router.post(
           entityId: changingIds.length === 1 ? changingIds[0] : null,
           metadata: {
             villaNumbers: changing.map((v) => v.villaNumber),
-            effectiveFromPeriod: fromPeriod,
+            effectiveFromPeriod,
             futureCycleRowsUpdated,
           },
         });
@@ -546,10 +573,10 @@ router.post(
       return res.json({
         message: enrolled
           ? `Maintenance billing resumes from ${fromPeriod}`
-          : `Maintenance billing stops from ${fromPeriod}; existing dues stay payable`,
+          : `Maintenance billing stops from ${effectiveFromPeriod}; existing dues stay payable`,
         updated: changingIds.length,
         unchanged: ids.length - changingIds.length,
-        effectiveFromPeriod: fromPeriod,
+        effectiveFromPeriod,
         futureCycleRowsUpdated,
       });
     } catch (error) {

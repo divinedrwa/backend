@@ -379,6 +379,7 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
         villaNumber: true,
         ownerName: true,
         monthlyMaintenance: true,
+        maintenanceExemptFromPeriod: true,
       },
     });
 
@@ -409,18 +410,21 @@ router.get("/dashboard", requireAuth, requireRole(UserRole.ADMIN), async (req, r
       allLastPayments.map((p) => [p.villaId, p.paymentDate])
     );
 
-    const villaWise = allVillas.map((villa) => {
-      const bills = pendingByVilla.get(villa.id) ?? [];
-      const totalDue = bills.reduce((sum, bill) => sum + Number(bill.amount), 0);
-      return {
-        villaNumber: villa.villaNumber,
-        ownerName: villa.ownerName,
-        pendingMonths: bills.length,
-        totalDue,
-        lastPayment: lastPaymentByVilla.get(villa.id) ?? null,
-        oldestPending: bills[0]?.dueDate ?? null,
-      };
-    });
+    // Non-paying villas are listed only while they still owe old dues.
+    const villaWise = allVillas
+      .filter((villa) => villa.maintenanceExemptFromPeriod == null || pendingByVilla.has(villa.id))
+      .map((villa) => {
+        const bills = pendingByVilla.get(villa.id) ?? [];
+        const totalDue = bills.reduce((sum, bill) => sum + Number(bill.amount), 0);
+        return {
+          villaNumber: villa.villaNumber,
+          ownerName: villa.ownerName,
+          pendingMonths: bills.length,
+          totalDue,
+          lastPayment: lastPaymentByVilla.get(villa.id) ?? null,
+          oldestPending: bills[0]?.dueDate ?? null,
+        };
+      });
 
     // Sort by pending amount
     villaWise.sort((a, b) => b.totalDue - a.totalDue);

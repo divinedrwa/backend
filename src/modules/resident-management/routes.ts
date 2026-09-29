@@ -47,6 +47,12 @@ router.get("/overview", async (req, res, next) => {
       where.villaId = villaIdParam;
     }
 
+    // Villas marked "not paying maintenance" are left out of the resident overview unless
+    // asked for; they stay in guard flows and user management.
+    if (req.query.includeNotPaying !== "true") {
+      where.AND = [{ OR: [{ villaId: null }, { villa: { maintenanceExemptFromPeriod: null } }] }];
+    }
+
     if (typeof search === "string" && search.trim()) {
       where.OR = [
         { name: { contains: search.trim(), mode: "insensitive" } },

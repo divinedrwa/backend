@@ -137,6 +137,7 @@ router.get("/month/:year/:month", async (req, res, next) => {
         block: true,
         ownerName: true,
         monthlyMaintenance: true,
+        maintenanceExemptFromPeriod: true,
       },
       orderBy: { villaNumber: "asc" },
     });
@@ -176,8 +177,18 @@ router.get("/month/:year/:month", async (req, res, next) => {
       payments.map((p) => [p.villaId, p])
     );
 
+    // Non-paying villas are left out from their stop month on, unless billed for this month.
+    const periodKey = `${year}-${String(month).padStart(2, "0")}`;
+    const listedVillas = villas.filter(
+      (villa) =>
+        villa.maintenanceExemptFromPeriod == null ||
+        villa.maintenanceExemptFromPeriod > periodKey ||
+        maintenanceMap.has(villa.id) ||
+        paymentMap.has(villa.id),
+    );
+
     // Build response with payment status for each villa
-    const villaPayments = villas.map((villa) => {
+    const villaPayments = listedVillas.map((villa) => {
       const maintenance = maintenanceMap.get(villa.id);
       const payment = paymentMap.get(villa.id);
 
@@ -214,14 +225,14 @@ router.get("/month/:year/:month", async (req, res, next) => {
     });
 
     // Calculate summary statistics
-    const totalVillas = villas.length;
+    const totalVillas = listedVillas.length;
     const paidCount = villaPayments.filter((v) => v.status === "PAID").length;
     const unpaidCount = villaPayments.filter(
       (v) => v.status === "PENDING" || v.status === "UNPAID"
     ).length;
     const overdueCount = villaPayments.filter((v) => v.status === "OVERDUE").length;
 
-    const totalAmount = villas.reduce(
+    const totalAmount = listedVillas.reduce(
       (sum, v) => sum + Number(v.monthlyMaintenance),
       0
     );
@@ -2667,7 +2678,13 @@ router.get("/financial-dashboard/report-pdf", async (req, res, next) => {
       // Fallback to old tables for non-cycle months.
       const [villas, monthPayments, globalPending] = await Promise.all([
         prisma.villa.findMany({
-          where: { societyId },
+          where: {
+            societyId,
+            OR: [
+              { maintenanceExemptFromPeriod: null },
+              { maintenanceExemptFromPeriod: { gt: `${year}-${String(month).padStart(2, "0")}` } },
+            ],
+          },
           select: { id: true, monthlyMaintenance: true },
         }),
         prisma.maintenancePayment.findMany({
