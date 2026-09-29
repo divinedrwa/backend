@@ -21,6 +21,7 @@ import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
 import { loadEarlyCycleExpensesPreview } from "./expense-early-cycle-preview";
+import { isVisitorOnlyResident } from "../../lib/visitorOnlyAccess";
 import {
   resolveFamilyMemberLinkedUserId,
 } from "../../lib/familyVisitorDelegation";
@@ -72,6 +73,7 @@ const userMeResponseSelect = {
       block: true,
       ownerName: true,
       monthlyMaintenance: true,
+      maintenanceExemptFromPeriod: true,
     },
   },
   unit: {
@@ -98,7 +100,7 @@ const RESIDENT_TYPE_LABEL: Record<string, string> = {
 
 function formatResidentMeResponse(user: Record<string, unknown>) {
   const villa = user.villa as
-    | { villaNumber?: string | null; block?: string | null }
+    | { villaNumber?: string | null; block?: string | null; maintenanceExemptFromPeriod?: string | null }
     | null
     | undefined;
   const unit = user.unit as { label?: string | null } | null | undefined;
@@ -113,6 +115,8 @@ function formatResidentMeResponse(user: Record<string, unknown>) {
     propertyDisplayName: parts.length ? parts.join(" · ") : null,
     unitDisplayName: unit?.label ?? null,
     occupantRoleLabel: RESIDENT_TYPE_LABEL[rt] ?? rt,
+    // Residents of a villa that doesn't pay maintenance get the visitor features only.
+    visitorOnlyAccess: isVisitorOnlyResident(user.role, villa?.maintenanceExemptFromPeriod),
   };
 }
 

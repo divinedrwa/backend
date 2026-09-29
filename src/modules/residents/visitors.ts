@@ -873,19 +873,17 @@ async function applyResidentVisitorDecision(params: {
     });
   }
 
-  if (
-    transitioned &&
-    hydrated &&
-    (hydrated.status === VISITOR_APPROVED_FOR_ENTRY ||
-      hydrated.status === VISITOR_REJECTED)
-  ) {
+  // An approved walk-in is admitted straight away, so CHECKED_IN here also means approved.
+  const approvedNow =
+    hydrated?.status === VISITOR_APPROVED_FOR_ENTRY ||
+    hydrated?.status === VisitorStatus.CHECKED_IN;
+  if (transitioned && hydrated && (approvedNow || hydrated.status === VISITOR_REJECTED)) {
     void notifyGuardsVisitorApprovalOutcome({
       prisma,
       societyId: params.societyId,
       visitorId: params.visitorId,
       visitorName: hydrated.name,
-      outcome:
-        hydrated.status === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
+      outcome: approvedNow ? "APPROVED" : "REJECTED",
       createdByGuardId: hydrated.createdBy,
     });
 
@@ -898,8 +896,7 @@ async function applyResidentVisitorDecision(params: {
       visitorId: params.visitorId,
       visitorName: hydrated.name,
       villaIds: hydrated.villaVisits.map((vv) => vv.villaId),
-      outcome:
-        hydrated.status === VISITOR_APPROVED_FOR_ENTRY ? "APPROVED" : "REJECTED",
+      outcome: approvedNow ? "APPROVED" : "REJECTED",
       excludeUserId: params.userId,
     });
   }

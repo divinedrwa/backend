@@ -160,7 +160,7 @@ export async function notifyGuardsVisitorApprovalOutcome(params: {
     params.outcome === "APPROVED" ? "Visitor approved" : "Visitor rejected";
   const body =
     params.outcome === "APPROVED"
-      ? `${params.visitorName} — residents approved entry. Admit when ready.`
+      ? `${params.visitorName} — residents approved. Let them in; mark exit when they leave.`
       : `${params.visitorName} — entry was rejected by a resident.`;
 
   const data: Record<string, string> = {

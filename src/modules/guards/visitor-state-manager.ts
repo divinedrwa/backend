@@ -71,6 +71,8 @@ export interface VisitorStateTransition {
     otpCode?: string;
     preApprovedId?: string;
     overrideReason?: string;
+    /** Walk-in admitted automatically when residents approved. */
+    autoAdmittedOnApproval?: boolean;
     note?: string;
     villaId?: string;
     unitId?: string;
@@ -614,6 +616,28 @@ export async function recomputeVisitorAggregateApproval(
     },
     "[visitor-approval] Aggregate computed"
   );
+
+  // A guard-added walk-in is already at the gate, so resident approval lets them in
+  // directly — no separate "admit at gate" step. Recorded as the adding guard's admit.
+  if (aggregateStatus === VisitorStatus.APPROVED) {
+    const walkIn = await tx.visitor.findUnique({
+      where: { id: params.visitorId },
+      select: { createdBy: true, preApprovedId: true },
+    });
+    if (walkIn?.createdBy && !walkIn.preApprovedId) {
+      await transitionVisitorState(tx, {
+        visitorId: params.visitorId,
+        fromStatus: VisitorStatus.APPROVED,
+        toStatus: VisitorStatus.CHECKED_IN,
+        transitionType: VisitorTransitionType.GUARD_ADMIT,
+        actorUserId: walkIn.createdBy,
+        societyId: params.societyId,
+        timestamp: new Date(),
+        metadata: { autoAdmittedOnApproval: true },
+      });
+      return VisitorStatus.CHECKED_IN;
+    }
+  }
 
   return aggregateStatus;
 }

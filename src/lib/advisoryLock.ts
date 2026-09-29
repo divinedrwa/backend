@@ -27,6 +27,19 @@ function getLockPrisma(): PrismaClient {
   return lockPrisma;
 }
 
+let fallbackLockPrisma: PrismaClient | null = null;
+
+function getFallbackLockPrisma(): PrismaClient {
+  if (!fallbackLockPrisma) {
+    const url = process.env.DATABASE_URL;
+    if (!url) {
+      throw new Error("DATABASE_URL is required for advisory locks");
+    }
+    fallbackLockPrisma = new PrismaClient({ datasources: { db: { url } } });
+  }
+  return fallbackLockPrisma;
+}
+
 /**
  * Runs `fn` only if this process can acquire the Postgres advisory lock at
  * `lockKey`. The lock is held on a dedicated session for the entire duration
@@ -38,7 +51,18 @@ export async function withAdvisoryLock<T>(
   lockKey: number,
   fn: () => Promise<T>,
 ): Promise<T | null> {
-  const client = getLockPrisma();
+  let client = getLockPrisma();
+  try {
+    await client.$queryRaw`SELECT 1`;
+  } catch (err) {
+    // A broken DIRECT_URL must not silently stop every cron job. The lock is taken and
+    // released inside one transaction, which also holds on a pooled connection.
+    logger.error(
+      { err, lockKey },
+      "[advisoryLock] lock connection (DIRECT_URL) failed; using DATABASE_URL for this run",
+    );
+    client = getFallbackLockPrisma();
+  }
 
   return client.$transaction(
     async (tx) => {

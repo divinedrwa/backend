@@ -4,6 +4,7 @@ import admin from "firebase-admin";
 import { NotificationCategory, UserRole } from "@prisma/client";
 import { RESIDENT_LIKE_ROLES } from "../lib/residentLike";
 import { isCategoryMutable } from "../lib/notificationPreferences";
+import { withoutVisitorOnlyRecipients } from "../lib/visitorOnlyAccess";
 
 // Initialize Firebase Admin SDK (if not already initialized).
 // Prefer FIREBASE_SERVICE_ACCOUNT_JSON from .env (dotenv must load before this module — see app.ts).
@@ -83,6 +84,12 @@ export class NotificationService {
         dataKeys: payload.data ? Object.keys(payload.data) : [],
         hasImageUrl: Boolean(payload.imageUrl),
       }, "sendToUser target");
+
+      const allowed = await withoutVisitorOnlyRecipients([userId], options?.category, payload.data);
+      if (allowed.length === 0) {
+        logger.debug({ userId }, "sendToUser: visitor-only resident, non-visitor notification skipped");
+        return;
+      }
 
       // Fetch user preferences up-front (also gives us societyId for the inbox row).
       const user = await prisma.user.findUnique({
@@ -178,6 +185,8 @@ export class NotificationService {
     payload: NotificationPayload,
     options?: SendToUserOptions,
   ): Promise<void> {
+    if (userIds.length === 0) return;
+    userIds = await withoutVisitorOnlyRecipients(userIds, options?.category, payload.data);
     if (userIds.length === 0) return;
     logger.info({ userCount: userIds.length }, "Sending notification to users (bulk)");
 
@@ -626,7 +635,11 @@ export async function deliverNoticeNotificationsToResidents(params: {
   /** Defaults to NOTICE (notice board). Use BROADCAST for society-wide banners / campaigns. */
   category?: NotificationCategory;
 }): Promise<{ residentCount: number; deviceTokensSent: number }> {
-  const userIds = [...new Set(params.userIds)];
+  const userIds = await withoutVisitorOnlyRecipients(
+    [...new Set(params.userIds)],
+    params.category ?? NotificationCategory.NOTICE,
+    params.data,
+  );
 
   if (userIds.length === 0) {
     logger.info("Notice delivery skipped because there were no recipient user IDs");

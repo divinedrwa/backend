@@ -50,6 +50,54 @@ describe("recomputeVisitorAggregateApproval", () => {
     assert.equal(updatedTo, VisitorStatus.APPROVED);
   });
 
+  it("admits a guard-added walk-in straight away once residents approve", async () => {
+    let status: VisitorStatus = VisitorStatus.PENDING_APPROVAL;
+    const checkpoints: string[] = [];
+    const tx = {
+      society: {
+        findUnique: async () => ({
+          visitorMultiVillaApprovalMode: VisitorMultiVillaApprovalMode.ANY_ONE_APPROVAL,
+        }),
+      },
+      visitorVilla: {
+        findMany: async () => [{ approvalStatus: VisitorVillaApprovalStatus.APPROVED, villaId: "v1" }],
+      },
+      visitor: {
+        findFirst: async () => ({ status }),
+        findUnique: async () => ({ status, createdBy: "guard1", preApprovedId: null, visitorType: "GUEST" }),
+        findUniqueOrThrow: async () => ({
+          id: "vis4",
+          societyId: "soc4",
+          name: "Walk-in",
+          status,
+          villaVisits: [],
+        }),
+        updateMany: async ({ where, data }: { where: { status?: VisitorStatus }; data: { status: VisitorStatus } }) => {
+          if (where.status && where.status !== status) return { count: 0 };
+          status = data.status;
+          return { count: 1 };
+        },
+      },
+      visitorCheckpoint: {
+        create: async ({ data }: { data: { checkpointType: string } }) => {
+          checkpoints.push(data.checkpointType);
+          return {};
+        },
+      },
+      user: { findMany: async () => [] },
+    } as unknown as Prisma.TransactionClient;
+
+    const result = await recomputeVisitorAggregateApproval(tx, {
+      visitorId: "vis4",
+      societyId: "soc4",
+      actorUserId: "resident1",
+    });
+
+    assert.equal(result, VisitorStatus.CHECKED_IN);
+    assert.equal(status, VisitorStatus.CHECKED_IN);
+    assert.deepEqual(checkpoints, ["APPROVED", "ADMITTED"]);
+  });
+
   it("returns DENIED for ALL_MUST_APPROVE when any villa rejects", async () => {
     let updatedTo: VisitorStatus | null = null;
     const tx = {

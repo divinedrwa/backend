@@ -1,7 +1,8 @@
 import { Router } from "express";
 import { z } from "zod";
-import { NotificationCategory, PushPlatform, UserRole } from "@prisma/client";
+import { NotificationCategory, Prisma, PushPlatform, UserRole } from "@prisma/client";
 import { logger } from "../../lib/logger";
+import { isVisitorOnlyUser, VISITOR_ONLY_NOTIFICATION_CATEGORIES } from "../../lib/visitorOnlyAccess";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
@@ -165,15 +166,21 @@ router.get("/", async (req, res, next) => {
     const take = Math.min(Number(req.query.limit ?? 30), 100);
     const skip = Number(req.query.skip ?? 0);
 
+    // Visitor-only residents (non-paying villa) see only their gate notifications.
+    const where: Prisma.UserNotificationWhereInput = { userId, societyId };
+    if (await isVisitorOnlyUser(userId)) {
+      where.category = { in: VISITOR_ONLY_NOTIFICATION_CATEGORIES };
+    }
+
     const [items, unreadCount] = await Promise.all([
       prisma.userNotification.findMany({
-        where: { userId, societyId },
+        where,
         orderBy: { createdAt: "desc" },
         take,
         skip,
       }),
       prisma.userNotification.count({
-        where: { userId, societyId, readAt: null },
+        where: { ...where, readAt: null },
       }),
     ]);
 

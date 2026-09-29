@@ -84,7 +84,7 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
             {
               title: atGate ? "Parcel left at gate" : "New parcel received",
               body: atGate
-                ? `A ${deliveryService ?? "delivery"} parcel is waiting at the gate for villa ${villa.villaNumber}. Please collect it.`
+                ? `${deliveryService ? `Your ${deliveryService}` : "A"} parcel is waiting at the gate for villa ${villa.villaNumber}. Please collect it.`
                 : `A parcel has been received at security for villa ${villa.villaNumber}.${description ? ` (${description})` : ""}`,
               data: {
                 type: atGate ? "PARCEL_LEFT_AT_GATE" : "PARCEL_RECEIVED",
