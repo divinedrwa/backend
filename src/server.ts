@@ -178,11 +178,15 @@ cron.schedule(
             {
               name: "purgeExpiredRefreshTokens",
               fn: async () => {
+                // Rotated tokens are kept for an hour so the refresh grace window
+                // can still find them.
+                const rotatedCutoff = new Date(Date.now() - 60 * 60 * 1000);
                 const { count: purgedTokens } = await prisma.refreshToken.deleteMany({
                   where: {
                     OR: [
                       { expiresAt: { lt: new Date() }, revoked: false },
-                      { revoked: true },
+                      { revoked: true, rotatedAt: null },
+                      { revoked: true, rotatedAt: { lt: rotatedCutoff } },
                     ],
                   },
                 });

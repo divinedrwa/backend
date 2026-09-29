@@ -613,8 +613,8 @@ router.patch(
       // If password was changed, revoke all refresh tokens to force re-login.
       if (data.passwordHash) {
         await prisma.refreshToken.updateMany({
-          where: { userId: id, revoked: false },
-          data: { revoked: true },
+          where: { userId: id },
+          data: { revoked: true, rotatedAt: null },
         });
       }
 

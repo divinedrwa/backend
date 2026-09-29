@@ -2521,6 +2521,9 @@ model RefreshToken {
   user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
   expiresAt DateTime
   revoked   Boolean  @default(false)
+  /// Set when revoked by rotation on /auth/refresh (not by logout/password change);
+  /// allows a short grace window for concurrent refreshes with the same token.
+  rotatedAt DateTime?
   createdAt DateTime @default(now())
 
   @@index([userId])

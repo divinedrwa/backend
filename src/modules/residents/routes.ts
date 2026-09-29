@@ -1208,8 +1208,8 @@ router.patch("/change-password", requireRole(UserRole.RESIDENT, UserRole.ADMIN),
 
     // Revoke all refresh tokens to force re-login on other devices.
     await prisma.refreshToken.updateMany({
-      where: { userId, revoked: false },
-      data: { revoked: true },
+      where: { userId },
+      data: { revoked: true, rotatedAt: null },
     });
 
     return res.json({ message: "Password changed successfully" });

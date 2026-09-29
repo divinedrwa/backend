@@ -40,6 +40,16 @@ export function generateRefreshToken(): string {
   return crypto.randomBytes(40).toString("hex");
 }
 
+/** How long a refresh token stays usable after being rotated (concurrent refreshes). */
+export const REFRESH_ROTATION_GRACE_MS = 2 * 60 * 1000;
+
+/** True when a token revoked by rotation at [rotatedAt] may still be exchanged. */
+export function isWithinRotationGrace(rotatedAt: Date | null, now: Date): boolean {
+  if (rotatedAt == null) return false;
+  const age = now.getTime() - rotatedAt.getTime();
+  return age >= 0 && age < REFRESH_ROTATION_GRACE_MS;
+}
+
 /** Hash a refresh token for DB storage (SHA-256). */
 export function hashRefreshToken(token: string): string {
   return crypto.createHash("sha256").update(token).digest("hex");

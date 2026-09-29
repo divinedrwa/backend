@@ -21,7 +21,12 @@ import {
 import { invalidateAuthCache } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import crypto from "crypto";
-import { signAuthToken, generateRefreshToken, hashRefreshToken } from "../../utils/jwt";
+import {
+  signAuthToken,
+  generateRefreshToken,
+  hashRefreshToken,
+  isWithinRotationGrace,
+} from "../../utils/jwt";
 import { passwordSchema } from "../../lib/passwordSchema";
 import {
   throttleKey,
@@ -292,17 +297,24 @@ router.post("/logout", validateBody(logoutSchema), async (req, res, next) => {
     const refreshRaw = body.refreshToken ?? cookieRefresh ?? undefined;
 
     if (refreshRaw) {
-      // Revoke the specific refresh token.
+      // Revoke the specific refresh token (and end its rotation grace).
       const hashed = hashRefreshToken(refreshRaw);
       await prisma.refreshToken.updateMany({
-        where: { token: hashed, revoked: false },
-        data: { revoked: true },
+        where: { token: hashed },
+        data: { revoked: true, rotatedAt: null },
       });
+      if (userId) {
+        // Recently rotated predecessors must not be able to mint a new session.
+        await prisma.refreshToken.updateMany({
+          where: { userId, rotatedAt: { not: null } },
+          data: { rotatedAt: null },
+        });
+      }
     } else if (userId) {
       // No specific token provided — revoke ALL tokens for this user.
       await prisma.refreshToken.updateMany({
-        where: { userId, revoked: false },
-        data: { revoked: true },
+        where: { userId },
+        data: { revoked: true, rotatedAt: null },
       });
     }
 
@@ -717,7 +729,14 @@ router.post("/refresh", refreshRateLimiter, validateBody(refreshSchema), async (
       },
     });
 
-    if (!stored || stored.revoked || stored.expiresAt <= new Date()) {
+    const now = new Date();
+    if (!stored || stored.expiresAt <= now) {
+      return res.status(401).json({ message: "Invalid or expired refresh token" });
+    }
+    // A token rotated moments ago is still honoured: the app can refresh from
+    // two places at once (launch + a 401), and rejecting the slower one used to
+    // log users out. Tokens revoked by logout / password change have no grace.
+    if (stored.revoked && !isWithinRotationGrace(stored.rotatedAt, now)) {
       return res.status(401).json({ message: "Invalid or expired refresh token" });
     }
 
@@ -725,11 +744,13 @@ router.post("/refresh", refreshRateLimiter, validateBody(refreshSchema), async (
       return res.status(401).json({ message: "Account is inactive" });
     }
 
-    // Revoke old token (rotation)
-    await prisma.refreshToken.update({
-      where: { id: stored.id },
-      data: { revoked: true },
-    });
+    if (!stored.revoked) {
+      // Revoke old token (rotation)
+      await prisma.refreshToken.updateMany({
+        where: { id: stored.id, revoked: false },
+        data: { revoked: true, rotatedAt: now },
+      });
+    }
 
     const authBody = await serializeAuthUser(stored.user);
     setTenantAuthCookies(res, {
@@ -858,8 +879,8 @@ router.post(
         }),
         // Revoke all refresh tokens to force re-login on all devices.
         prisma.refreshToken.updateMany({
-          where: { userId: stored.user.id, revoked: false },
-          data: { revoked: true },
+          where: { userId: stored.user.id },
+          data: { revoked: true, rotatedAt: null },
         }),
       ]);
 

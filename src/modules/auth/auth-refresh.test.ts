@@ -9,7 +9,35 @@
  */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { generateRefreshToken, hashRefreshToken } from "../../utils/jwt.js";
+import {
+  generateRefreshToken,
+  hashRefreshToken,
+  isWithinRotationGrace,
+  REFRESH_ROTATION_GRACE_MS,
+} from "../../utils/jwt.js";
+
+describe("isWithinRotationGrace", () => {
+  const now = new Date("2026-09-29T10:00:00.000Z");
+
+  it("allows a token rotated moments ago (concurrent refresh)", () => {
+    assert.equal(isWithinRotationGrace(new Date(now.getTime() - 5_000), now), true);
+  });
+
+  it("rejects a token rotated longer ago than the grace window", () => {
+    assert.equal(
+      isWithinRotationGrace(new Date(now.getTime() - REFRESH_ROTATION_GRACE_MS - 1), now),
+      false,
+    );
+  });
+
+  it("rejects tokens revoked by logout / password change (no rotatedAt)", () => {
+    assert.equal(isWithinRotationGrace(null, now), false);
+  });
+
+  it("rejects a rotation time in the future", () => {
+    assert.equal(isWithinRotationGrace(new Date(now.getTime() + 60_000), now), false);
+  });
+});
 
 describe("generateRefreshToken", () => {
   it("returns an 80-char hex string (40 random bytes)", () => {
