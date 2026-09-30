@@ -234,7 +234,11 @@ export async function buildPeopleAndApp(db: Db, societyId: string, p: Period) {
     const label = PLATFORM_LABELS[d.platform] ?? d.platform;
     platformCounts.set(label, (platformCounts.get(label) ?? 0) + 1);
     const model = d.deviceName?.trim();
-    if (model && model !== "Unknown Device") modelCounts.set(model, (modelCounts.get(model) ?? 0) + 1);
+    // Skip developer emulators ("Google sdk_gphone64_arm64", "Android SDK built for x86").
+    const emulator = !model || /sdk_gphone|sdk built for|emulator/i.test(model);
+    if (model && model !== "Unknown Device" && !emulator) {
+      modelCounts.set(model, (modelCounts.get(model) ?? 0) + 1);
+    }
   }
 
   const et = errors.totals;
