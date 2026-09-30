@@ -26,6 +26,7 @@ import {
   isCollectionCycleBackedByBillingCycle,
 } from "../billing-cycle/billing-collection-scope";
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
+import { computeOutstandingDues } from "./outstandingDues";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { getCachedMoneySnapshot, invalidateMoneySnapshotCache } from "../../lib/societyFinance";
@@ -2347,120 +2348,7 @@ router.get("/outstanding-dues", async (req, res, next) => {
       return res.status(403).json({ message: "Tenant context required" });
     }
 
-    const periodKeys = await loadAppVisibleBillingCyclePeriodKeys(prisma, societyId);
-
-    const snapshots = await prisma.villaMaintenanceSnapshot.findMany({
-      where: {
-        cycle: maintenanceCollectionBackedByBillingCycleWhere(societyId, periodKeys),
-        status: { notIn: ["PAID", "WAIVED"] },
-      },
-      include: {
-        cycle: {
-          select: {
-            id: true,
-            title: true,
-            periodMonth: true,
-            periodYear: true,
-            dueDate: true,
-          },
-        },
-        villa: {
-          select: {
-            id: true,
-            villaNumber: true,
-            ownerName: true,
-          },
-        },
-      },
-      orderBy: { cycle: { dueDate: "asc" } },
-    });
-
-    // Group by villa
-    const villaMap = new Map<
-      string,
-      {
-        villaId: string;
-        villaNumber: string;
-        ownerName: string;
-        totalOutstanding: number;
-        pendingCycles: {
-          cycleId: string;
-          cycleTitle: string;
-          month: number;
-          year: number;
-          expectedAmount: number;
-          baseExpectedAmount: number;
-          lateFeeAmount: number;
-          paidAmount: number;
-          remainingDue: number;
-          dueDate: string;
-          status: string;
-          isOverdue: boolean;
-        }[];
-      }
-    >();
-
-    const now = new Date();
-    let totalOutstanding = 0;
-    let totalPendingCycles = 0;
-
-    for (const snap of snapshots) {
-      const baseExpected = Number(snap.expectedAmount);
-      const lateFee = Number(snap.lateFeeAmount ?? 0);
-      // Total owed for the cycle includes any applied late fee — consistent with
-      // the resident ledger and the financial dashboard (which both add it).
-      const expected = baseExpected + lateFee;
-      const paid = Number(snap.paidAmount);
-      const remaining = expected - paid;
-      if (remaining <= 0) continue;
-
-      totalOutstanding += remaining;
-      totalPendingCycles += 1;
-
-      const vid = snap.villa.id;
-      let entry = villaMap.get(vid);
-      if (!entry) {
-        entry = {
-          villaId: vid,
-          villaNumber: snap.villa.villaNumber,
-          ownerName: snap.villa.ownerName ?? "",
-          totalOutstanding: 0,
-          pendingCycles: [],
-        };
-        villaMap.set(vid, entry);
-      }
-      entry.totalOutstanding += remaining;
-
-      const isOverdue =
-        snap.status === "OVERDUE" || new Date(snap.cycle.dueDate) < now;
-
-      entry.pendingCycles.push({
-        cycleId: snap.cycle.id,
-        cycleTitle: snap.cycle.title,
-        month: snap.cycle.periodMonth,
-        year: snap.cycle.periodYear,
-        expectedAmount: expected,
-        baseExpectedAmount: baseExpected,
-        lateFeeAmount: lateFee,
-        paidAmount: paid,
-        remainingDue: remaining,
-        dueDate: snap.cycle.dueDate.toISOString(),
-        status: isOverdue ? "OVERDUE" : snap.status,
-        isOverdue,
-      });
-    }
-
-    // Sort villas by highest total outstanding desc
-    const villas = Array.from(villaMap.values()).sort(
-      (a, b) => b.totalOutstanding - a.totalOutstanding
-    );
-
-    return res.json({
-      villas,
-      totalOutstanding,
-      villasWithDuesCount: villas.length,
-      totalPendingCycles,
-    });
+    return res.json(await computeOutstandingDues(prisma, societyId));
   } catch (error) {
     next(error);
   }

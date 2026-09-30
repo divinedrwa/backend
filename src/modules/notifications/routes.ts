@@ -88,8 +88,8 @@ router.post("/devices/remove", validateBody(removeDeviceSchema), async (req, res
       await removePushDevice(userId, deviceId);
     } else if (body.token) {
       await prisma.pushDevice.updateMany({
-        where: { userId, token: body.token },
-        data: { isActive: false },
+        where: { userId, token: body.token, isActive: true },
+        data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: "LOGGED_OUT" },
       });
     }
     return res.json({ ok: true });

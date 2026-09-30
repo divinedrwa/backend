@@ -21,6 +21,7 @@ import { auditFromRequest } from "../../services/audit.service";
 import { compareSemver } from "../../lib/semver";
 import { computeOnboardingStatus } from "../../lib/societyOnboarding";
 import { aggregatePlatformRevenue } from "../../lib/platformRevenue";
+import { buildPlatformGrowth } from "../app-analytics/overview/growth";
 import { societyIsSandboxColumnExists } from "../../lib/sandboxSociety";
 
 const router = Router();
@@ -230,6 +231,18 @@ router.get("/platform-revenue", async (_req, res, next) => {
   try {
     const revenue = await aggregatePlatformRevenue();
     res.json(revenue);
+  } catch (e) {
+    next(e);
+  }
+});
+
+/**
+ * GET /api/super/growth-signals — per-society app reach and weekly trend,
+ * weakest first, so the operator sees which societies need help.
+ */
+router.get("/growth-signals", async (_req, res, next) => {
+  try {
+    res.json(await buildPlatformGrowth(prisma));
   } catch (e) {
     next(e);
   }

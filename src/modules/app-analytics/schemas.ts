@@ -44,7 +44,12 @@ export const summaryQuerySchema = z.object({
 export type StartSessionInput = z.infer<typeof startSessionSchema>;
 export type AnalyticsEventInput = z.infer<typeof analyticsEventSchema>;
 
-export const ADMIN_READ_ROLES = [UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] as const;
+/** Server-recorded LOGIN event for a real password sign-in (the app's own "login" also fired on app open). */
+export const PASSWORD_SIGN_IN_EVENT = "password_sign_in";
+/** When server-side sign-in and uninstall tracking started. */
+export const SIGN_IN_TRACKING_SINCE = "2026-09-30";
+
+export const ADMIN_READ_ROLES =[UserRole.ADMIN, UserRole.RESIDENT_CUM_ADMIN] as const;
 
 export const INGEST_ROLES = [
   UserRole.ADMIN,

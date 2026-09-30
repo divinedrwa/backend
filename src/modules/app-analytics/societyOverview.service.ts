@@ -1,29 +1,38 @@
-import { ComplaintStatus, PaymentMode, SOSStatus, type Prisma } from "@prisma/client";
-import { prisma } from "../../lib/prisma";
-import { startOfLocalDayDaysAgo } from "../../lib/societyTime";
-import { ADMITTED, INSIDE_NOW, WAITING_NOW } from "../gate-analytics/visitorFilters";
-import { loadSupply, minutesOf } from "../water-supply-analytics/loadSupply";
-import { longestGapMinutes } from "../water-supply-analytics/supplyIntervals";
-import { isWaterTurnedOn } from "../water-supply-analytics/waterEventAction";
-import {
-  getAppAnalyticsDailyTrend,
-  getAppAnalyticsErrors,
-  getAppAnalyticsRoleAdoption,
-} from "./appAnalytics.service";
+import { SOSStatus } from "@prisma/client";
 import { getBusinessActionCounts } from "./businessActions";
+import {
+  type Change,
+  type Db,
+  type Tone,
+  DAY_MS,
+  countChange,
+  formatDuration,
+  formatRupees,
+  pct,
+  periodFor,
+  plural,
+  toneFor,
+} from "./overview/common";
+import { buildGate, buildSecurity, OPEN_SOS } from "./overview/gateSecurity";
+import { buildGrowth } from "./overview/growth";
+import { buildMoney } from "./overview/money";
+import { buildPeopleAndApp } from "./overview/peopleApp";
+import { buildService, OVERDUE_DAYS } from "./overview/service";
+import { buildWeeklySummary } from "./overview/summary";
+import { buildWater } from "./overview/water";
 
-type Db = typeof prisma | Prisma.TransactionClient;
+export { countChange, formatDuration, formatRupees };
 
-type Tone = "good" | "watch" | "critical" | "neutral";
-
-/** Something the admin should look at now. Ordered critical → warning → info. */
+/** Something the admin should act on. Ordered critical → warning → info. */
 type AttentionItem = {
   id: string;
   severity: "critical" | "warning" | "info";
   title: string;
   detail: string;
-  /** Analytics tab that explains it: gate | complaints | water | app. */
+  /** Screen that explains it: gate | complaints | water | dues | sos | app | amenities. */
   area: string;
+  /** Outreach list with the people to contact, when there is one. */
+  list?: "duesPending" | "neverOpened" | "cantGetAlerts" | "flatsWithoutApp" | "regularVisitors";
 };
 
 /** One headline card per part of society life. */
@@ -34,8 +43,7 @@ type AreaCard = {
   label: string;
   detail: string;
   tone: Tone;
-  /** Change vs the previous period of the same length, when comparable. */
-  change: { label: string; direction: "up" | "down" | "flat"; good: boolean } | null;
+  change: Change;
 };
 
 /** A self-service feature and how many flats (or requests) use it. */
@@ -50,240 +58,257 @@ type FeatureUse = {
   tip: string;
 };
 
-const DAY_MS = 24 * 60 * 60 * 1000;
-/** Open complaints this old are overdue. */
-const OVERDUE_DAYS = 7;
 /** Unresolved SOS alerts older than this are treated as stale test data. */
 const SOS_RECENT_DAYS = 7;
-const OPEN_SOS: SOSStatus[] = [
-  SOSStatus.CREATED,
-  SOSStatus.ACKNOWLEDGED,
-  SOSStatus.IN_PROGRESS,
-  SOSStatus.PENDING,
-  SOSStatus.ACTIVE,
-];
-const ONLINE_MODES: PaymentMode[] = [PaymentMode.ONLINE, PaymentMode.PHONEPE];
-
-const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
-const plural = (n: number, one: string, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
-
-function toneFor(value: number, good: number, watch: number): Tone {
-  if (value >= good) return "good";
-  if (value >= watch) return "watch";
-  return "critical";
-}
-
-/** "1 h 9 min", "45 min", "2 days". */
-export function formatDuration(minutes: number): string {
-  const m = Math.round(minutes);
-  if (m >= 48 * 60) return plural(Math.round(m / (24 * 60)), "day");
-  if (m >= 60) {
-    const h = Math.floor(m / 60);
-    const rest = m % 60;
-    return rest ? `${h} h ${rest} min` : `${h} h`;
-  }
-  return `${m} min`;
-}
-
-/** Indian grouping, no paise: ₹1,25,000. */
-export function formatRupees(amount: number): string {
-  return `₹${Math.round(amount).toLocaleString("en-IN")}`;
-}
-
-/** Count change vs the previous period, as a short label. */
-export function countChange(
-  current: number,
-  previous: number,
-  higherIsGood = true,
-): AreaCard["change"] {
-  if (current === previous) {
-    return current === 0 ? null : { label: "Same as before", direction: "flat", good: true };
-  }
-  const direction = current > previous ? "up" : "down";
-  const good = higherIsGood ? direction === "up" : direction === "down";
-  if (previous === 0) return { label: "New this period", direction, good };
-  const change = Math.round((Math.abs(current - previous) / previous) * 100);
-  return { label: `${direction === "up" ? "+" : "−"}${change}% vs before`, direction, good };
-}
-
-/** Net money received (reversals and their offset rows excluded) and who paid. */
-async function paymentsIn(db: Db, societyId: string, from: Date, to: Date) {
-  const rows = await db.maintenancePayment.findMany({
-    where: {
-      societyId,
-      paymentDate: { gte: from, lt: to },
-      reversedAt: null,
-      reversalOfPaymentId: null,
-    },
-    select: { amount: true, villaId: true, paymentMode: true },
-  });
-  const flats = new Set(rows.map((r) => r.villaId));
-  const onlineFlats = new Set(
-    rows.filter((r) => ONLINE_MODES.includes(r.paymentMode)).map((r) => r.villaId),
-  );
-  return {
-    amount: rows.reduce((s, r) => s + Number(r.amount), 0),
-    payments: rows.length,
-    flats: flats.size,
-    onlineFlats: onlineFlats.size,
-  };
-}
 
 /**
- * One plain-language summary of the society for the Analytics "Overview" tab.
- * Every number uses the same rules as its own tab (gate, complaints, water),
- * over "the last N days including today".
+ * Everything an admin needs to run and grow the society, in plain language:
+ * what needs attention, money, gate & security, service, people & app, growth
+ * and who to contact. Numbers use the same rules as their own screens, over
+ * "the last N days including today".
  */
 export async function getSocietyOverview(db: Db, societyId: string, days: number) {
-  const now = new Date();
-  const from = startOfLocalDayDaysAgo(days - 1);
-  const prevFrom = new Date(from.getTime() - days * DAY_MS);
+  const p = periodFor(days);
 
-  const [
-    letIn,
-    prevLetIn,
-    requests,
-    insideNow,
-    waitingNow,
-    openComplaints,
-    filed,
-    resolved,
-    money,
-    prevMoney,
-    openSos,
-    supply,
-    business,
-    adoption,
-    errors,
-    trend,
-  ] = await Promise.all([
-    db.visitor.count({ where: { societyId, createdAt: { gte: from }, ...ADMITTED } }),
-    db.visitor.count({ where: { societyId, createdAt: { gte: prevFrom, lt: from }, ...ADMITTED } }),
-    db.visitor.count({ where: { societyId, createdAt: { gte: from } } }),
-    db.visitor.count({ where: { societyId, ...INSIDE_NOW } }),
-    db.visitor.count({ where: { societyId, ...WAITING_NOW } }),
-    db.complaint.findMany({
-      where: { societyId, status: { in: [ComplaintStatus.OPEN, ComplaintStatus.IN_PROGRESS] } },
-      select: { createdAt: true },
-    }),
-    db.complaint.count({ where: { societyId, createdAt: { gte: from } } }),
-    db.complaint.count({
-      where: {
-        societyId,
-        status: { in: [ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED] },
-        resolvedAt: { gte: from },
-      },
-    }),
-    paymentsIn(db, societyId, from, now),
-    paymentsIn(db, societyId, prevFrom, from),
+  const [money, gate, security, service, water, pa, growth, summary, business, recentSos] = await Promise.all([
+    buildMoney(db, societyId, p),
+    buildGate(db, societyId, p),
+    buildSecurity(db, societyId, p),
+    buildService(db, societyId, p),
+    buildWater(societyId, p),
+    buildPeopleAndApp(db, societyId, p),
+    buildGrowth(db, societyId),
+    buildWeeklySummary(db, societyId),
+    getBusinessActionCounts(db, societyId, p.from, p.now),
     db.sOSAlert.count({
       where: {
         societyId,
-        status: { in: OPEN_SOS },
-        createdAt: { gte: new Date(now.getTime() - SOS_RECENT_DAYS * DAY_MS) },
+        status: { in: OPEN_SOS as SOSStatus[] },
+        createdAt: { gte: new Date(p.now.getTime() - SOS_RECENT_DAYS * DAY_MS) },
       },
     }),
-    loadSupply(societyId, days),
-    getBusinessActionCounts(db, societyId, from, now),
-    // These helpers count "N days ago" from the start of that day, so pass N-1.
-    getAppAnalyticsRoleAdoption(db, societyId, days - 1, 1),
-    getAppAnalyticsErrors(db, societyId, days - 1),
-    getAppAnalyticsDailyTrend(db, societyId, Math.min(days, 14)),
   ]);
+  const { people, app, outreach } = pa;
 
-  // ── Gate ───────────────────────────────────────────────────────────
-  const answeredPct = pct(business.gateRequestsAnsweredInApp, business.gateRequests);
+  // ── Needs attention ────────────────────────────────────────────────
+  const attention: AttentionItem[] = [];
+  const add = (item: AttentionItem) => attention.push(item);
 
-  // ── Complaints ─────────────────────────────────────────────────────
-  const overdue = openComplaints.filter(
-    (c) => now.getTime() - c.createdAt.getTime() > OVERDUE_DAYS * DAY_MS,
-  ).length;
+  if (recentSos > 0) {
+    add({
+      id: "sos_open",
+      severity: "critical",
+      title: `${plural(recentSos, "emergency alert")} not resolved`,
+      detail: "Open the SOS screen and close each alert once it's handled.",
+      area: "sos",
+    });
+  }
+  if (money.monthsOfCover != null && money.monthsOfCover < 1) {
+    add({
+      id: "fund_low",
+      severity: "critical",
+      title: `Society fund covers less than a month of expenses`,
+      detail: `Balance ${money.fundBalance}. Collect pending dues before the next big payment.`,
+      area: "dues",
+    });
+  }
+  if (money.pending.flats > 0) {
+    add({
+      id: "dues_pending",
+      severity: money.pending.chronicFlats > 0 ? "warning" : "info",
+      title: `${plural(money.pending.flats, "flat")} owe ${money.pending.amount}`,
+      detail:
+        money.pending.chronicFlats > 0
+          ? `${plural(money.pending.chronicFlats, "flat")} owe for 2 or more months. Call them first.`
+          : "Send a reminder with the Pay link.",
+      area: "dues",
+      list: "duesPending",
+    });
+  }
+  if (money.onlinePayments.failed + money.onlinePayments.abandoned > 0) {
+    add({
+      id: "payments_failed",
+      severity: "warning",
+      title: `${plural(money.onlinePayments.failed + money.onlinePayments.abandoned, "online payment")} didn't go through`,
+      detail: `${money.onlinePayments.failed} failed, ${money.onlinePayments.abandoned} started but not finished. Check the payment gateway and follow up.`,
+      area: "dues",
+    });
+  }
+  if (service.complaints.overdue > 0) {
+    add({
+      id: "complaints_overdue",
+      severity: "warning",
+      title: `${plural(service.complaints.overdue, "complaint")} open for over ${OVERDUE_DAYS} days`,
+      detail: "Residents are waiting — assign or resolve the oldest first.",
+      area: "complaints",
+    });
+  }
+  if (gate.waitingNow > 0) {
+    add({
+      id: "visitors_waiting",
+      severity: "warning",
+      title: `${plural(gate.waitingNow, "visitor")} waiting at the gate`,
+      detail: "No resident has replied yet. Guards can call the flat after 3 minutes.",
+      area: "gate",
+    });
+  }
+  if (gate.deliveries.waitingOverADay > 0) {
+    add({
+      id: "parcels_waiting",
+      severity: "warning",
+      title: `${plural(gate.deliveries.waitingOverADay, "parcel")} at the gate for over a day`,
+      detail: "Remind the flats to collect them.",
+      area: "gate",
+    });
+  }
+  if (security.patrols.missed > 0) {
+    add({
+      id: "patrols_missed",
+      severity: "warning",
+      title: `${plural(security.patrols.missed, "patrol round")} missed`,
+      detail: `${security.patrols.done} of ${security.patrols.planned} planned rounds done in ${p.days} days.`,
+      area: "security",
+    });
+  }
+  if (water.stale && water.daysSinceLog != null && water.daysSinceLog < days) {
+    add({
+      id: "water_not_logged",
+      severity: "info",
+      title: `Water supply not logged for ${plural(water.daysSinceLog, "day")}`,
+      detail: "Residents only see water updates when guards tap ON/OFF at the gate.",
+      area: "water",
+    });
+  } else if (water.tracked && water.longestDryMinutes != null && water.longestDryMinutes >= 24 * 60) {
+    add({
+      id: "water_gap",
+      severity: "warning",
+      title: `No water for ${water.longestDry} at a stretch`,
+      detail: "Check with the supplier, or remind guards to log water ON/OFF.",
+      area: "water",
+    });
+  }
+  if (business.gateRequests >= 5 && gate.answeredInAppPct < 60) {
+    add({
+      id: "gate_unanswered",
+      severity: "warning",
+      title: `Only ${gate.answeredInAppPct}% of gate requests were answered in the app`,
+      detail: "Guards had to phone residents for the rest. Ask residents to keep notifications on.",
+      area: "gate",
+    });
+  }
+  for (const c of service.contractsEnding.filter((c) => c.daysLeft <= 14)) {
+    add({
+      id: `contract_${c.title}`,
+      severity: "warning",
+      title: `${c.vendor} contract ends in ${plural(c.daysLeft, "day")}`,
+      detail: `"${c.title}" — renew or find a replacement.`,
+      area: "vendors",
+    });
+  }
+  if (growth.signal.tone === "critical") {
+    add({ id: "usage_drop", severity: "warning", title: growth.signal.text, detail: "See growth below.", area: "app" });
+  }
+  if (people.occupiedFlats > 0 && pct(people.flatsWithoutApp, people.occupiedFlats) >= 25) {
+    add({
+      id: "flats_without_app",
+      severity: "warning",
+      title: `${plural(people.flatsWithoutApp, "flat")} didn't use the app in ${days} days`,
+      detail: "Visitors to these flats always need a phone call. Help them install and sign in.",
+      area: "app",
+      list: "flatsWithoutApp",
+    });
+  }
+  if (outreach.cantGetAlerts.length > 0) {
+    add({
+      id: "no_alerts",
+      severity: "info",
+      title: `${plural(outreach.cantGetAlerts.length, "resident")} can't get alerts on their phone`,
+      detail: "They signed out or removed the app, so gate requests and notices don't reach them.",
+      area: "app",
+      list: "cantGetAlerts",
+    });
+  }
+  if (people.never > 0) {
+    add({
+      id: "never_used",
+      severity: "info",
+      title: `${plural(people.never, "account")} never opened the app`,
+      detail: "Share the download link and login help with them.",
+      area: "app",
+      list: "neverOpened",
+    });
+  }
+  if (people.versions.onOld > 0 && people.versions.latest) {
+    add({
+      id: "old_version",
+      severity: "info",
+      title: `${plural(people.versions.onOld, "person", "people")} on an older app version`,
+      detail: `Ask them to update to ${people.versions.latest} from the Play Store / App Store.`,
+      area: "app",
+    });
+  }
+  if (gate.regularVisitors.length > 0) {
+    add({
+      id: "regular_visitors",
+      severity: "info",
+      title: `${plural(gate.regularVisitors.length, "regular visitor")} could get a standing pass`,
+      detail: "They visit the same flat often. A pre-approved pass saves a call every time.",
+      area: "gate",
+      list: "regularVisitors",
+    });
+  }
+  if (app.health.problemFreePct < 70 && app.health.sessions >= 10) {
+    const network = app.health.connectionProblems >= app.health.appErrors;
+    add({
+      id: "app_errors",
+      severity: "info",
+      title: `${100 - app.health.problemFreePct}% of app visits hit a problem`,
+      detail: network ? "Mostly slow or dropped connections, not app bugs." : "See App health below.",
+      area: "app",
+    });
+  }
+  const rank = { critical: 0, warning: 1, info: 2 } as const;
+  attention.sort((a, b) => rank[a.severity] - rank[b.severity]);
 
-  // ── Water ──────────────────────────────────────────────────────────
-  const intervals = supply.perGate.flatMap((g) => g.intervals);
-  const supplyPerDay = supply.tracked ? minutesOf(intervals) / supply.trackedDays : 0;
-  // Once guards stop logging, the time since is unknown — not a dry spell.
-  const trackedTo = supply.stale && supply.lastLoggedAt ? supply.lastLoggedAt : now;
-  const dryStretch = intervals.length ? longestGapMinutes(intervals, supply.trackedFrom, trackedTo) : null;
-  const daysSinceLog = supply.lastLoggedAt
-    ? Math.floor((now.getTime() - supply.lastLoggedAt.getTime()) / DAY_MS)
-    : null;
-  const runningNow = supply.perGate.filter((g) => g.last && isWaterTurnedOn(g.last)).length;
-
-  // ── People ─────────────────────────────────────────────────────────
-  const roles = adoption.roles
-    .filter((r) => r.registered > 0)
-    .map((r) => ({
-      role: r.role,
-      label: r.label,
-      total: r.registered,
-      using: r.active,
-      stopped: r.dormant,
-      never: r.neverUsed,
-      usingPct: pct(r.active, r.registered),
-    }));
-  const people = {
-    total: roles.reduce((s, r) => s + r.total, 0),
-    using: roles.reduce((s, r) => s + r.using, 0),
-    stopped: roles.reduce((s, r) => s + r.stopped, 0),
-    never: roles.reduce((s, r) => s + r.never, 0),
-  };
-  const usingPct = pct(people.using, people.total);
-
+  // ── Headline cards (kept for the previous app version) ────────────
   const areas: AreaCard[] = [
     {
       id: "gate",
       title: "Gate & visitors",
-      value: String(letIn),
-      label: letIn === 1 ? "person let in" : "people let in",
-      detail: `${plural(requests, "gate request")} · ${insideNow} inside now`,
+      value: String(gate.letIn),
+      label: gate.letIn === 1 ? "person let in" : "people let in",
+      detail: `${plural(gate.requests, "gate request")} · ${gate.insideNow} inside now`,
       tone: "neutral",
-      change: countChange(letIn, prevLetIn),
+      change: gate.letInChange,
     },
     {
       id: "complaints",
       title: "Complaints",
-      value: String(openComplaints.length),
-      label: openComplaints.length === 1 ? "complaint open" : "complaints open",
-      detail: `${filed} filed · ${resolved} resolved in ${days} days`,
-      tone: overdue > 0 ? "critical" : openComplaints.length > 0 ? "watch" : "good",
+      value: String(service.complaints.open),
+      label: service.complaints.open === 1 ? "complaint open" : "complaints open",
+      detail: `${service.complaints.filed} filed · ${service.complaints.resolved} resolved in ${days} days`,
+      tone: service.complaints.overdue > 0 ? "critical" : service.complaints.open > 0 ? "watch" : "good",
       change: null,
     },
     {
       id: "dues",
       title: "Maintenance",
-      value: formatRupees(money.amount),
+      value: money.received.amount,
       label: "received",
       detail:
-        money.payments > 0
-          ? `${plural(money.flats, "flat")} paid · ${pct(money.onlineFlats, money.flats)}% online`
+        money.received.payments > 0
+          ? `${plural(money.received.flats, "flat")} paid · ${money.received.onlinePct}% online`
           : `No payments in ${days} days`,
       tone: "neutral",
-      change: countChange(Math.round(money.amount), Math.round(prevMoney.amount)),
+      change: money.received.change,
     },
     {
       id: "water",
       title: "Water supply",
-      value: supply.tracked ? formatDuration(supplyPerDay) : "—",
-      label: supply.tracked ? "supply per day" : "not tracked yet",
-      detail: !supply.tracked
-        ? `Guards haven't logged water ON/OFF in ${days} days.`
-        : supply.stale
-          ? `Not logged for ${plural(daysSinceLog ?? 0, "day")} — ask guards to tap ON/OFF`
-          : runningNow > 0
-            ? "Water is running now"
-            : dryStretch != null
-              ? `Longest without water: ${formatDuration(dryStretch)}`
-              : "No supply logged in this period",
-      tone: !supply.tracked
-        ? "neutral"
-        : supply.stale
-          ? "watch"
-          : dryStretch == null || dryStretch >= 48 * 60
-            ? "critical"
-            : dryStretch >= 24 * 60
-              ? "watch"
-              : "good",
+      value: water.perDay ?? "—",
+      label: water.tracked ? "supply per day" : "not tracked yet",
+      detail: water.detail,
+      tone: water.tone,
       change: null,
     },
     {
@@ -291,94 +316,13 @@ export async function getSocietyOverview(db: Db, societyId: string, days: number
       title: "App usage",
       value: `${people.using} of ${people.total}`,
       label: "people used the app",
-      detail:
-        people.never > 0
-          ? `${plural(people.never, "account")} never opened it`
-          : "Everyone has opened the app",
-      tone: toneFor(usingPct, 60, 35),
+      detail: people.never > 0 ? `${plural(people.never, "account")} never opened it` : "Everyone has opened the app",
+      tone: toneFor(people.usingPct, 60, 35),
       change: null,
     },
   ];
 
-  // ── Needs attention ────────────────────────────────────────────────
-  const attention: AttentionItem[] = [];
-  if (openSos > 0) {
-    attention.push({
-      id: "sos_open",
-      severity: "critical",
-      title: `${plural(openSos, "emergency alert")} not resolved`,
-      detail: "Open the SOS screen and close each alert once it's handled.",
-      area: "sos",
-    });
-  }
-  if (overdue > 0) {
-    attention.push({
-      id: "complaints_overdue",
-      severity: "warning",
-      title: `${plural(overdue, "complaint")} open for over ${OVERDUE_DAYS} days`,
-      detail: "Residents are waiting — assign or resolve the oldest first.",
-      area: "complaints",
-    });
-  }
-  if (waitingNow > 0) {
-    attention.push({
-      id: "visitors_waiting",
-      severity: "warning",
-      title: `${plural(waitingNow, "visitor")} waiting at the gate`,
-      detail: "No resident has replied yet. Guards can call the flat after 3 minutes.",
-      area: "gate",
-    });
-  }
-  if (supply.stale && daysSinceLog != null && daysSinceLog < days) {
-    attention.push({
-      id: "water_not_logged",
-      severity: "info",
-      title: `Water supply not logged for ${plural(daysSinceLog, "day")}`,
-      detail: "Residents only see water updates when guards tap ON/OFF at the gate.",
-      area: "water",
-    });
-  } else if (supply.tracked && dryStretch != null && dryStretch >= 24 * 60) {
-    attention.push({
-      id: "water_gap",
-      severity: "warning",
-      title: `No water for ${formatDuration(dryStretch)} at a stretch`,
-      detail: "Check with the supplier, or remind guards to log water ON/OFF.",
-      area: "water",
-    });
-  }
-  if (business.gateRequests >= 5 && answeredPct < 60) {
-    attention.push({
-      id: "gate_unanswered",
-      severity: "warning",
-      title: `Only ${answeredPct}% of gate requests were answered in the app`,
-      detail: "Guards had to phone residents for the rest. Ask residents to keep notifications on.",
-      area: "gate",
-    });
-  }
-  if (people.total > 0 && pct(people.never, people.total) >= 25) {
-    attention.push({
-      id: "never_used",
-      severity: "info",
-      title: `${plural(people.never, "account")} never opened the app`,
-      detail: "Share the download link and login help with them.",
-      area: "app",
-    });
-  }
-  const errorRate = errors.totals.errorRatePct ?? 0;
-  if (errorRate >= 30) {
-    const network = pct(errors.totals.networkErrors, errors.totals.events) >= 60;
-    attention.push({
-      id: "app_errors",
-      severity: "info",
-      title: `${errorRate}% of app visits hit a problem`,
-      detail: network
-        ? "Mostly slow or dropped connections, not app bugs."
-        : "See the technical details below.",
-      area: "app",
-    });
-  }
-
-  // ── Features ───────────────────────────────────────────────────────
+  // ── Features residents use ─────────────────────────────────────────
   const flats = business.occupiedFlats;
   const features: FeatureUse[] = [
     {
@@ -391,46 +335,54 @@ export async function getSocietyOverview(db: Db, societyId: string, days: number
       tone: toneFor(pct(business.preApprovalFlats, flats), 30, 10),
       tip: "Invited guests walk straight in — no call to the flat.",
     },
+    ...(gate.gateRequests > 0
+      ? [
+          {
+            id: "answer_in_app",
+            label: "Answer gate requests in the app",
+            used: gate.answeredInApp,
+            of: gate.gateRequests,
+            unit: "requests" as const,
+            pct: gate.answeredInAppPct,
+            tone: toneFor(gate.answeredInAppPct, 75, 50),
+            tip: "Each unanswered request means the guard phones the resident.",
+          },
+        ]
+      : []),
     {
       id: "pay_online",
       label: "Pay maintenance online",
-      used: money.onlineFlats,
+      used: money.received.onlineFlats,
       of: flats,
       unit: "flats",
-      pct: pct(money.onlineFlats, flats),
-      tone: toneFor(pct(money.onlineFlats, flats), 40, 15),
+      pct: pct(money.received.onlineFlats, flats),
+      tone: toneFor(pct(money.received.onlineFlats, flats), 40, 15),
       tip: "Add the Pay link to the next dues reminder to cut cash collection.",
     },
   ];
-  if (business.gateRequests > 0) {
-    features.splice(1, 0, {
-      id: "answer_in_app",
-      label: "Answer gate requests in the app",
-      used: business.gateRequestsAnsweredInApp,
-      of: business.gateRequests,
-      unit: "requests",
-      pct: answeredPct,
-      tone: toneFor(answeredPct, 75, 50),
-      tip: "Each unanswered request means the guard phones the resident.",
-    });
-  }
 
   return {
-    period: { days, startDate: from.toISOString(), endDate: now.toISOString() },
+    period: { days, startDate: p.from.toISOString(), endDate: p.now.toISOString() },
+    generatedAt: p.now.toISOString(),
+    summary,
     attention,
     areas,
-    people: { ...people, usingPct, roles },
+    money,
+    gate,
+    security,
+    service,
+    water,
+    people,
+    app,
+    growth,
     features,
-    dailyActive: trend.trendData.map((t) => ({
-      date: t.date,
-      label: shortDay(t.date),
-      count: t.activeUsers,
-    })),
+    outreach: {
+      duesPending: money.pending.top,
+      neverOpened: outreach.neverOpened,
+      cantGetAlerts: outreach.cantGetAlerts,
+      flatsWithoutApp: outreach.flatsWithoutApp,
+      regularVisitors: gate.regularVisitors,
+    },
+    dailyActive: app.daily.map((d) => ({ date: d.date, label: d.label, count: d.active })),
   };
-}
-
-/** "2026-09-30" → "30/9". */
-function shortDay(key: string): string {
-  const [, m, d] = key.split("-");
-  return `${Number(d)}/${Number(m)}`;
 }

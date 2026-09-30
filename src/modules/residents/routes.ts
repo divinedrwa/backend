@@ -570,8 +570,8 @@ router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req,
         prisma.familyMember.deleteMany({ where: { residentId: userId } }),
         prisma.emergencyContact.deleteMany({ where: { residentId: userId } }),
         prisma.pushDevice.updateMany({
-          where: { userId },
-          data: { isActive: false },
+          where: { userId, isActive: true },
+          data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: "ACCOUNT_CLOSED" },
         }),
         prisma.user.update({
           where: { id: userId },
@@ -613,8 +613,8 @@ router.delete("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req,
         },
       }),
       prisma.pushDevice.updateMany({
-        where: { userId },
-        data: { isActive: false },
+        where: { userId, isActive: true },
+        data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: "ACCOUNT_CLOSED" },
       }),
     ]);
 

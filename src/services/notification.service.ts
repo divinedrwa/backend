@@ -490,9 +490,10 @@ export class NotificationService {
    */
   private static async markDeviceInactive(token: string): Promise<void> {
     try {
+      // FCM only rejects a token like this once the app is gone (or its data cleared).
       await prisma.pushDevice.updateMany({
-        where: { token },
-        data: { isActive: false },
+        where: { token, isActive: true },
+        data: { isActive: false, deactivatedAt: new Date(), deactivatedReason: "UNINSTALLED" },
       });
       logger.warn({ tokenPreview: `${token.substring(0, 20)}...` }, "Marked device as inactive");
     } catch (error) {
@@ -521,9 +522,12 @@ export class NotificationService {
         where: {
           userId,
           deviceId,
+          isActive: true,
         },
         data: {
           isActive: false,
+          deactivatedAt: new Date(),
+          deactivatedReason: "LOGGED_OUT",
         },
       });
       logger.info({ userId, deviceId }, "Removed push device for user");
@@ -775,6 +779,8 @@ export async function registerPushDevice(input: {
         platform: input.platform ?? "ANDROID",
         isActive: true,
         lastUsedAt: new Date(),
+        deactivatedAt: null,
+        deactivatedReason: null,
       },
     });
   }

@@ -331,7 +331,13 @@ router.get("/growth-dashboard", requireRole(...ADMIN_READ_ROLES), async (req, re
   }
 });
 
-// Plain-language society summary for the Analytics "Overview" tab.
+const OVERVIEW_CACHE_MS = 60_000;
+const overviewCache = new Map<
+  string,
+  { overview: Awaited<ReturnType<typeof getSocietyOverview>>; expiresAt: number }
+>();
+
+// Plain-language society summary for the Analytics "Overview" tab. `?fresh=1` skips the cache.
 router.get("/society-overview", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
   try {
     const societyId = tenantSocietyId(req);
@@ -339,7 +345,14 @@ router.get("/society-overview", requireRole(...ADMIN_READ_ROLES), async (req, re
       return res.status(403).json({ message: "Tenant context required" });
     }
     const days = parseDays(req.query.days);
+    // The overview runs ~40 queries; a short cache keeps tab switches instant.
+    const key = `${societyId}:${days}`;
+    const hit = overviewCache.get(key);
+    if (hit && hit.expiresAt > Date.now() && req.query.fresh !== "1") {
+      return res.json({ overview: hit.overview });
+    }
     const overview = await getSocietyOverview(prisma, societyId, days);
+    overviewCache.set(key, { overview, expiresAt: Date.now() + OVERVIEW_CACHE_MS });
     return res.json({ overview });
   } catch (error) {
     next(error);

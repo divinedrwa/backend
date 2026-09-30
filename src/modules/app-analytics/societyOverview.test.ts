@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { countChange, formatDuration, formatRupees } from "./societyOverview.service.js";
+import { countChange, formatDuration, formatRupees } from "./overview/common.js";
 
 describe("society overview formatting", () => {
   it("formats durations the way admins read them", () => {

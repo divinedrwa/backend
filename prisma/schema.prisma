@@ -370,12 +370,18 @@ model PushDevice {
   platform   PushPlatform @default(ANDROID)
   isActive   Boolean      @default(true)
   lastUsedAt DateTime     @default(now())
+  /// When and why the device stopped receiving alerts: LOGGED_OUT (user signed
+  /// out), UNINSTALLED (FCM said the token is gone — app removed or data cleared)
+  /// or ACCOUNT_CLOSED (account deactivated/deleted).
+  deactivatedAt     DateTime?
+  deactivatedReason String?
   createdAt  DateTime     @default(now())
   updatedAt  DateTime     @updatedAt
 
   @@unique([userId, deviceId])
   @@index([userId])
   @@index([token])
+  @@index([deactivatedAt])
 }
 
 model UserNotification {

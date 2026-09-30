@@ -3,6 +3,8 @@ import { Router } from "express";
 import rateLimit from "express-rate-limit";
 import { z } from "zod";
 import {
+  AppAnalyticsEventKind,
+  AppAnalyticsPlatform,
   InvitationStatus,
   Prisma,
   ResidentType,
@@ -10,6 +12,8 @@ import {
   UserRole,
 } from "@prisma/client";
 import { logger } from "../../lib/logger";
+import { recordAnalyticsEvent } from "../app-analytics/appAnalytics.service";
+import { PASSWORD_SIGN_IN_EVENT } from "../app-analytics/schemas";
 import { prisma } from "../../lib/prisma";
 import { getLegalConsentStatus } from "../../lib/legalVersions";
 import {
@@ -123,6 +127,8 @@ async function applyLoginDevice(opts: {
         deviceName: deviceName,
         isActive: true,
         lastUsedAt: new Date(),
+        deactivatedAt: null,
+        deactivatedReason: null,
       },
     });
   } catch (deviceError) {
@@ -565,6 +571,7 @@ router.post("/super-admin/login", loginRateLimiter, validateBody(superAdminLogin
 
     clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
+    recordPasswordSignIn(user, deviceType);
     return res.json(await serializeAuthUser(user));
   } catch (error) {
     next(error);
@@ -647,6 +654,32 @@ const tenantLoginSchema = z
 /**
  * POST /auth/login — resident/guard mobile (society-scoped).
  */
+/** Records a real sign-in for analytics. Never blocks or fails the login. */
+function recordPasswordSignIn(
+  user: { id: string; societyId: string | null; role: UserRole },
+  deviceType: string | null | undefined,
+): void {
+  if (!user.societyId) return;
+  const platform =
+    deviceType === "IOS"
+      ? AppAnalyticsPlatform.IOS
+      : deviceType === "ANDROID"
+        ? AppAnalyticsPlatform.ANDROID
+        : AppAnalyticsPlatform.WEB;
+  recordAnalyticsEvent(prisma, {
+    societyId: user.societyId,
+    userId: user.id,
+    role: user.role,
+    defaultPlatform: platform,
+    event: {
+      kind: AppAnalyticsEventKind.LOGIN,
+      name: PASSWORD_SIGN_IN_EVENT,
+      clientEventId: `srv-signin-${user.id}-${Date.now()}`,
+      platform,
+    },
+  }).catch((err) => logger.warn({ err }, "[auth] could not record sign-in event"));
+}
+
 router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (req, res, next) => {
   try {
     const { societyId, username, password, fcmToken, deviceId, deviceType, deviceName } =
@@ -697,6 +730,7 @@ router.post("/login", loginRateLimiter, validateBody(tenantLoginSchema), async (
 
     clearLoginThrottle(tKey);
     await applyLoginDevice({ userId: user.id, fcmToken, deviceId, deviceType, deviceName });
+    recordPasswordSignIn(user, deviceType);
     return res.json(await serializeAuthUser(user));
   } catch (error) {
     next(error);
