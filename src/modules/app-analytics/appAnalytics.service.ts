@@ -5,7 +5,7 @@ import {
   UserRole,
 } from "@prisma/client";
 import { prisma } from "../../lib/prisma";
-import { startOfLocalDayDaysAgo } from "../../lib/societyTime";
+import { localDateKey, localHour, startOfLocalDayDaysAgo } from "../../lib/societyTime";
 import type { AnalyticsEventInput, StartSessionInput } from "./schemas";
 import {
   type AnalyticsUserSnapshot,
@@ -239,8 +239,37 @@ export function resolveAnalyticsListLimit(raw: unknown, fallback = 0): number {
   return Math.min(n, 5000);
 }
 
+/** Society-local calendar day ("YYYY-MM-DD") — UTC keys shifted charts by a day in IST. */
 function dayKey(d: Date): string {
-  return d.toISOString().slice(0, 10);
+  return localDateKey(d);
+}
+
+/** Society-local weekday, 0 = Sunday. */
+function localWeekday(d: Date): number {
+  return new Date(`${localDateKey(d)}T00:00:00Z`).getUTCDay();
+}
+
+/** Errors caused by the network or a sleeping server rather than an app bug. */
+const NETWORK_ERROR_NAMES = new Set(["api_timeout", "api_connection_error", "api_unknown"]);
+
+const ERROR_LABELS: Record<string, string> = {
+  api_timeout: "Server took too long to respond",
+  api_connection_error: "No internet / connection dropped",
+  api_unknown: "Network error",
+  api_http_409: "Conflicting update (already changed)",
+  api_http_404: "Item not found",
+  api_http_500: "Server error",
+  api_http_403: "Not allowed",
+  api_http_401: "Session expired",
+};
+
+function humanizeError(name: string): string {
+  return ERROR_LABELS[name] ?? humanizeEventId(name);
+}
+
+/** Background events that aren't features a resident chooses to use. */
+export function isTechnicalAction(name: string): boolean {
+  return name.startsWith("notification_") || name.startsWith("app_") || name.startsWith("session_");
 }
 
 function avgDurationMs(
@@ -492,10 +521,12 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
   const todayStart = startOfLocalDayDaysAgo(0);
   const weekStart = startOfLocalDayDaysAgo(7);
   const monthStart = startOfLocalDayDaysAgo(30);
+  // DAU/WAU/MAU need their own full windows even when the period is shorter.
+  const windowStart = since < monthStart ? since : monthStart;
 
-  const [sessions, events, pushDevices, usersByRole, usageSignals] = await Promise.all([
+  const [allSessions, allEvents, pushDevices, usersByRole, usageSignals] = await Promise.all([
     db.appAnalyticsSession.findMany({
-      where: { societyId, startedAt: { gte: since } },
+      where: { societyId, lastSeenAt: { gte: windowStart } },
       select: {
         id: true,
         userId: true,
@@ -510,7 +541,7 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
       },
     }),
     db.appAnalyticsEvent.findMany({
-      where: { societyId, occurredAt: { gte: since } },
+      where: { societyId, occurredAt: { gte: windowStart } },
       select: {
         userId: true,
         role: true,
@@ -536,8 +567,11 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
       where: { societyId, isActive: true },
       _count: true,
     }),
-    loadAppUsageSignals(db, societyId, since),
+    loadAppUsageSignals(db, societyId, windowStart),
   ]);
+  // Period totals only count the selected period.
+  const sessions = allSessions.filter((s) => s.startedAt >= since);
+  const events = allEvents.filter((e) => e.occurredAt >= since);
 
   const activeUserIdsPeriod = new Set<string>();
   const activeUserIdsToday = new Set<string>();
@@ -550,14 +584,14 @@ export async function getAppAnalyticsSummary(db: Db, societyId: string, days: nu
     month: new Set<string>(),
   };
 
-  for (const s of sessions) {
-    activeTargets.period.add(s.userId);
+  for (const s of allSessions) {
+    if (s.lastSeenAt >= since) activeTargets.period.add(s.userId);
     if (s.lastSeenAt >= todayStart) activeTargets.today.add(s.userId);
     if (s.lastSeenAt >= weekStart) activeTargets.week.add(s.userId);
     if (s.lastSeenAt >= monthStart) activeTargets.month.add(s.userId);
   }
-  for (const e of events) {
-    activeTargets.period.add(e.userId);
+  for (const e of allEvents) {
+    if (e.occurredAt >= since) activeTargets.period.add(e.userId);
     if (e.occurredAt >= todayStart) activeTargets.today.add(e.userId);
     if (e.occurredAt >= weekStart) activeTargets.week.add(e.userId);
     if (e.occurredAt >= monthStart) activeTargets.month.add(e.userId);
@@ -761,6 +795,8 @@ export async function getAppAnalyticsActions(
     { action: string; label: string; count: number; uniqueUsers: Set<string>; byRole: Record<string, number> }
   >();
   for (const e of events) {
+    // Notification receipts etc. are not features people choose to use.
+    if (isTechnicalAction(e.name)) continue;
     const slot = map.get(e.name) ?? {
       action: e.name,
       label: BUSINESS_ACTION_LABELS[e.name] ?? e.name.replace(/_/g, " "),
@@ -798,7 +834,7 @@ export async function getAppAnalyticsErrors(db: Db, societyId: string, days: num
       kind: AppAnalyticsEventKind.ERROR,
       occurredAt: { gte: since },
     },
-    select: { name: true, userId: true, role: true, occurredAt: true, appVersion: true },
+    select: { name: true, userId: true, role: true, occurredAt: true, appVersion: true, sessionId: true },
     orderBy: { occurredAt: "desc" },
   });
 
@@ -830,11 +866,15 @@ export async function getAppAnalyticsErrors(db: Db, societyId: string, days: num
   const sessionsInPeriod = await db.appAnalyticsSession.count({
     where: { societyId, startedAt: { gte: since } },
   });
+  const sessionsWithError = new Set(events.map((e) => e.sessionId).filter(Boolean)).size;
+  const networkErrors = events.filter((e) => NETWORK_ERROR_NAMES.has(e.name)).length;
 
   return {
     errors: [...map.values()]
       .map((e) => ({
         error: e.error,
+        label: humanizeError(e.error),
+        isNetwork: NETWORK_ERROR_NAMES.has(e.error),
         count: e.count,
         uniqueUsers: e.uniqueUsers.size,
         lastOccurredAt: e.lastOccurredAt.toISOString(),
@@ -845,8 +885,16 @@ export async function getAppAnalyticsErrors(db: Db, societyId: string, days: num
     totals: {
       events: events.length,
       distinctErrors: map.size,
-      errorRatePct:
-        sessionsInPeriod > 0 ? Math.round((events.length / sessionsInPeriod) * 100) : 0,
+      sessions: sessionsInPeriod,
+      sessionsWithError,
+      networkErrors,
+      appErrors: events.length - networkErrors,
+      /** % of app sessions that hit at least one error (was errors ÷ sessions, which could exceed 100). */
+      errorRatePct: sessionsInPeriod > 0 ? Math.round((sessionsWithError / sessionsInPeriod) * 100) : 0,
+      errorFreeSessionPct:
+        sessionsInPeriod > 0
+          ? Math.round(((sessionsInPeriod - sessionsWithError) / sessionsInPeriod) * 100)
+          : 100,
     },
   };
 }
@@ -856,14 +904,15 @@ export async function getAppAnalyticsInsights(db: Db, societyId: string, days: n
   const todayStart = startOfLocalDayDaysAgo(0);
   const weekStart = startOfLocalDayDaysAgo(7);
   const monthStart = startOfLocalDayDaysAgo(30);
+  const windowStart = since < monthStart ? since : monthStart;
 
   const [sessions, events, firstSessions] = await Promise.all([
     db.appAnalyticsSession.findMany({
-      where: { societyId, startedAt: { gte: since } },
+      where: { societyId, lastSeenAt: { gte: windowStart } },
       select: { userId: true, startedAt: true, lastSeenAt: true, role: true },
     }),
     db.appAnalyticsEvent.findMany({
-      where: { societyId, occurredAt: { gte: since } },
+      where: { societyId, occurredAt: { gte: windowStart } },
       select: { userId: true, occurredAt: true, role: true },
     }),
     db.appAnalyticsSession.groupBy({
@@ -881,7 +930,8 @@ export async function getAppAnalyticsInsights(db: Db, societyId: string, days: n
   const activeToday = new Set<string>();
   const activeWeek = new Set<string>();
   const activeMonth = new Set<string>();
-  const hourly = Array.from({ length: 24 }, (_, hour) => ({ hour, label: `${hour}:00`, count: 0 }));
+  const hourLabel = (h: number) => `${h % 12 === 0 ? 12 : h % 12} ${h < 12 ? "AM" : "PM"}`;
+  const hourly = Array.from({ length: 24 }, (_, hour) => ({ hour, label: hourLabel(hour), count: 0 }));
   const weekday = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label, day) => ({
     day,
     label,
@@ -892,9 +942,11 @@ export async function getAppAnalyticsInsights(db: Db, societyId: string, days: n
     if (s.lastSeenAt >= todayStart) activeToday.add(s.userId);
     if (s.lastSeenAt >= weekStart) activeWeek.add(s.userId);
     if (s.lastSeenAt >= monthStart) activeMonth.add(s.userId);
-    const h = s.startedAt.getHours();
-    hourly[h]!.count += 1;
-    weekday[s.startedAt.getDay()]!.count += 1;
+    // Busy hours/days use the selected period, in society-local time.
+    if (s.startedAt >= since) {
+      hourly[localHour(s.startedAt)]!.count += 1;
+      weekday[localWeekday(s.startedAt)]!.count += 1;
+    }
   }
   for (const e of events) {
     if (e.occurredAt >= todayStart) activeToday.add(e.userId);
@@ -927,6 +979,7 @@ export async function getAppAnalyticsInsights(db: Db, societyId: string, days: n
 
   const sessionsByRole: Record<string, number> = {};
   for (const s of sessions) {
+    if (s.startedAt < since) continue;
     sessionsByRole[s.role] = (sessionsByRole[s.role] ?? 0) + 1;
   }
 

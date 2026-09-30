@@ -1,8 +1,15 @@
-import { Prisma, UserRole } from "@prisma/client";
+import { ComplaintStatus, Prisma, UserRole } from "@prisma/client";
 import { Router } from "express";
 import { z } from "zod";
 import { prisma } from "../../lib/prisma";
-import { localMonthKey, localMonthKeysForLastMonths, startOfLocalMonth } from "../../lib/societyTime";
+import {
+  endOfLocalCalendarDay,
+  localMonthKey,
+  localMonthKeysForLastMonths,
+  parseLocalDateKey,
+  startOfLocalDayDaysAgo,
+  startOfLocalMonth,
+} from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { validateBody } from "../../middlewares/validate";
 import { notifyResidentsComplaintStatusChanged } from "../../services/complaintStatusNotification.service";
@@ -10,140 +17,109 @@ import { buildComplaintStatusUpdate } from "../../services/complaintLifecycle.se
 
 const router = Router();
 
-type ComplaintCategoryStats = {
-  category: string;
-  totalCount: number;
-  resolvedCount: number;
-  pendingCount: number;
-  inProgressCount: number;
-  totalResolutionTime: number;
-  resolvedWithTimeCount: number;
-};
-
-type ComplaintTrendStats = {
-  month: string;
-  totalComplaints: number;
-  resolvedComplaints: number;
-  totalResolutionTime: number;
-  resolvedWithTimeCount: number;
-};
-
 router.use(requireAuth);
 router.use(requireRole(UserRole.ADMIN));
 
+/** Resolved complaints are auto-closed later, so CLOSED counts as resolved too. */
+const DONE: ComplaintStatus[] = [ComplaintStatus.RESOLVED, ComplaintStatus.CLOSED];
+const isDone = (s: ComplaintStatus) => DONE.includes(s);
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+const pct = (n: number, d: number) => (d > 0 ? Math.round((n / d) * 100) : 0);
+const round1 = (n: number) => Math.round(n * 10) / 10;
+
+function median(values: number[]): number {
+  if (values.length === 0) return 0;
+  const s = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(s.length / 2);
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
+/** Days from filing to resolution, for done complaints that have a resolution time. */
+function resolutionDays(c: { status: ComplaintStatus; createdAt: Date; resolvedAt: Date | null }) {
+  if (!isDone(c.status) || !c.resolvedAt) return null;
+  const d = (c.resolvedAt.getTime() - c.createdAt.getTime()) / DAY_MS;
+  return d >= 0 ? d : null;
+}
+
+/** Period filter: explicit YYYY-MM-DD range (whole local days) or the last N days incl. today. */
+function periodFilter(query: Record<string, unknown>) {
+  const { startDate, endDate } = query;
+  const days = Math.min(Math.max(parseInt(String(query.days ?? "")) || 30, 1), 365);
+  if (typeof startDate === "string" && typeof endDate === "string" && startDate && endDate) {
+    const start = /^\d{4}-\d{2}-\d{2}$/.test(startDate) ? parseLocalDateKey(startDate) : new Date(startDate);
+    const endBase = /^\d{4}-\d{2}-\d{2}$/.test(endDate) ? parseLocalDateKey(endDate) : new Date(endDate);
+    const end = endOfLocalCalendarDay(endBase);
+    return { start, end, days, where: { createdAt: { gte: start, lte: end } } };
+  }
+  const start = startOfLocalDayDaysAgo(days - 1);
+  return { start, end: new Date(), days, where: { createdAt: { gte: start } } };
+}
+
+function performanceFor(avgDays: number, resolved: number) {
+  if (resolved === 0) return { performance: "none", performanceStatus: "No resolutions yet" };
+  if (avgDays > 5) return { performance: "slow", performanceStatus: "Slow" };
+  if (avgDays > 3) return { performance: "fair", performanceStatus: "Fair" };
+  return { performance: "good", performanceStatus: "Good" };
+}
+
 // GET /api/complaint-analytics/summary
-// Get overall complaint statistics with optional date range
 router.get("/summary", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { startDate, endDate, days = "30" } = req.query;
-    let periodStart: Date | null = null;
-    let periodEnd: Date | null = null;
+    const period = periodFilter(req.query as Record<string, unknown>);
 
-    // Calculate date range
-    let dateFilter: Prisma.ComplaintWhereInput = {};
-    if (startDate && endDate) {
-      periodStart = new Date(startDate as string);
-      periodEnd = new Date(endDate as string);
-      dateFilter = {
-        createdAt: {
-          gte: periodStart,
-          lte: periodEnd,
+    const [complaints, openNow] = await Promise.all([
+      prisma.complaint.findMany({
+        where: { societyId, ...(period.where as Prisma.ComplaintWhereInput) },
+        select: {
+          status: true,
+          priority: true,
+          createdAt: true,
+          resolvedAt: true,
+          slaDeadline: true,
         },
-      };
-    } else {
-      const daysAgo = parseInt(days as string) || 30;
-      periodStart = new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000);
-      periodEnd = new Date();
-      dateFilter = {
-        createdAt: {
-          gte: periodStart,
-        },
-      };
-    }
+      }),
+      // Everything still open today, regardless of when it was filed.
+      prisma.complaint.findMany({
+        where: { societyId, status: { in: [ComplaintStatus.OPEN, ComplaintStatus.IN_PROGRESS] } },
+        select: { createdAt: true, slaDeadline: true },
+      }),
+    ]);
 
-    // Get all complaints in date range
-    const complaints = await prisma.complaint.findMany({
-      where: {
-        societyId,
-        ...dateFilter,
-      },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            ownerName: true,
-          },
-        },
-      },
-      orderBy: { createdAt: "desc" },
-    });
-
-    // Calculate statistics
     const totalComplaints = complaints.length;
-    const resolvedCount = complaints.filter((c) => c.status === "RESOLVED" || c.status === "CLOSED").length;
+    const done = complaints.filter((c) => isDone(c.status));
+    const resolvedCount = done.length;
     const inProgressCount = complaints.filter((c) => c.status === "IN_PROGRESS").length;
     const pendingCount = complaints.filter((c) => c.status === "OPEN").length;
+    const times = complaints.map(resolutionDays).filter((d): d is number => d != null);
 
-    const resolutionRate = totalComplaints > 0 
-      ? Math.round((resolvedCount / totalComplaints) * 100) 
-      : 0;
-
-    // Calculate average resolution time (for resolved complaints)
-    const resolvedComplaints = complaints.filter((c) => c.status === "RESOLVED");
-    let avgResolutionTime = 0;
-    
-    if (resolvedComplaints.length > 0) {
-      const totalResolutionTime = resolvedComplaints.reduce((sum, c) => {
-        if (c.resolvedAt) {
-          const timeDiff = new Date(c.resolvedAt).getTime() - new Date(c.createdAt).getTime();
-          return sum + timeDiff / (1000 * 60 * 60 * 24); // Convert to days
-        }
-        return sum;
-      }, 0);
-      avgResolutionTime = totalResolutionTime / resolvedComplaints.length;
-    }
-
-    // SLA compliance
     const now = new Date();
-    const openComplaints = complaints.filter(
-      (c) => c.status === "OPEN" || c.status === "IN_PROGRESS"
-    );
-    const slaBreached = openComplaints.filter(
-      (c) => c.slaDeadline && new Date(c.slaDeadline) < now
-    ).length;
-    const resolvedWithSla = resolvedComplaints.filter((c) => c.slaDeadline);
-    const resolvedWithinSla = resolvedWithSla.filter(
-      (c) => c.resolvedAt && c.slaDeadline && new Date(c.resolvedAt) <= new Date(c.slaDeadline)
-    ).length;
-    const slaComplianceRate = resolvedWithSla.length > 0
-      ? Math.round((resolvedWithinSla / resolvedWithSla.length) * 100)
-      : 100;
-
-    // Priority breakdown
-    const byPriority = {
-      LOW: complaints.filter((c) => c.priority === "LOW").length,
-      MEDIUM: complaints.filter((c) => c.priority === "MEDIUM").length,
-      HIGH: complaints.filter((c) => c.priority === "HIGH").length,
-      URGENT: complaints.filter((c) => c.priority === "URGENT").length,
-    };
+    const slaBreached = openNow.filter((c) => c.slaDeadline && c.slaDeadline < now).length;
+    const doneWithSla = done.filter((c) => c.slaDeadline && c.resolvedAt);
+    const withinSla = doneWithSla.filter((c) => c.resolvedAt! <= c.slaDeadline!).length;
 
     return res.json({
-      period: {
-        startDate: periodStart,
-        endDate: periodEnd,
-        days: parseInt(days as string) || 30,
-      },
+      period: { startDate: period.start, endDate: period.end, days: period.days },
       summary: {
         totalComplaints,
         resolvedCount,
         inProgressCount,
         pendingCount,
-        resolutionRate,
-        avgResolutionTime: Math.round(avgResolutionTime * 10) / 10,
+        resolutionRate: pct(resolvedCount, totalComplaints),
+        avgResolutionTime: times.length ? round1(times.reduce((s, d) => s + d, 0) / times.length) : 0,
+        medianResolutionDays: round1(median(times)),
         slaBreached,
-        slaComplianceRate,
-        byPriority,
+        /** Null when nothing with an SLA was resolved in the period (was a misleading 100%). */
+        slaComplianceRate: doneWithSla.length > 0 ? pct(withinSla, doneWithSla.length) : null,
+        openNow: openNow.length,
+        openOver7Days: openNow.filter((c) => now.getTime() - c.createdAt.getTime() > 7 * DAY_MS).length,
+        byPriority: {
+          LOW: complaints.filter((c) => c.priority === "LOW").length,
+          MEDIUM: complaints.filter((c) => c.priority === "MEDIUM").length,
+          HIGH: complaints.filter((c) => c.priority === "HIGH").length,
+          URGENT: complaints.filter((c) => c.priority === "URGENT").length,
+        },
       },
     });
   } catch (error) {
@@ -152,162 +128,77 @@ router.get("/summary", async (req, res, next) => {
 });
 
 // GET /api/complaint-analytics/by-category
-// Get complaints breakdown by category
 router.get("/by-category", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { days = "30" } = req.query;
+    const period = periodFilter(req.query as Record<string, unknown>);
 
-    const daysAgo = parseInt(days as string) || 30;
-    const dateFilter = {
-      createdAt: {
-        gte: new Date(Date.now() - daysAgo * 24 * 60 * 60 * 1000),
-      },
-    };
-
-    // Get all complaints
     const complaints = await prisma.complaint.findMany({
-      where: {
-        societyId,
-        ...dateFilter,
-      },
-      select: {
-        category: true,
-        status: true,
-        createdAt: true,
-        resolvedAt: true,
-      },
+      where: { societyId, ...(period.where as Prisma.ComplaintWhereInput) },
+      select: { category: true, status: true, createdAt: true, resolvedAt: true },
     });
 
-    // Group by category
-    const categoryMap = new Map<string, ComplaintCategoryStats>();
+    const byCategory = new Map<string, typeof complaints>();
+    for (const c of complaints) {
+      const key = c.category || "Other";
+      byCategory.set(key, [...(byCategory.get(key) ?? []), c]);
+    }
 
-    complaints.forEach((complaint) => {
-      const category = complaint.category || "Other";
-      
-      if (!categoryMap.has(category)) {
-        categoryMap.set(category, {
-          category,
-          totalCount: 0,
-          resolvedCount: 0,
-          pendingCount: 0,
-          inProgressCount: 0,
-          totalResolutionTime: 0,
-          resolvedWithTimeCount: 0,
-        });
-      }
-
-      const catData = categoryMap.get(category)!;
-      catData.totalCount++;
-
-      if (complaint.status === "RESOLVED") {
-        catData.resolvedCount++;
-        
-        if (complaint.resolvedAt) {
-          const timeDiff = new Date(complaint.resolvedAt).getTime() - new Date(complaint.createdAt).getTime();
-          catData.totalResolutionTime += timeDiff / (1000 * 60 * 60 * 24);
-          catData.resolvedWithTimeCount++;
-        }
-      } else if (complaint.status === "IN_PROGRESS") {
-        catData.inProgressCount++;
-      } else {
-        catData.pendingCount++;
-      }
-    });
-
-    // Calculate averages and format response
-    const categoryStats = Array.from(categoryMap.values()).map((cat) => {
-      const avgResolutionTime = cat.resolvedWithTimeCount > 0
-        ? Math.round((cat.totalResolutionTime / cat.resolvedWithTimeCount) * 10) / 10
+    const categoryStats = [...byCategory.entries()].map(([category, list]) => {
+      const resolvedCount = list.filter((c) => isDone(c.status)).length;
+      const times = list.map(resolutionDays).filter((d): d is number => d != null);
+      const avgResolutionTime = times.length
+        ? round1(times.reduce((s, d) => s + d, 0) / times.length)
         : 0;
-
-      const resolutionRate = cat.totalCount > 0
-        ? Math.round((cat.resolvedCount / cat.totalCount) * 100)
-        : 0;
-
-      // Determine performance status
-      let performanceStatus = "🟢 Good";
-      if (avgResolutionTime > 5) {
-        performanceStatus = "🔴 Slow";
-      } else if (avgResolutionTime > 3) {
-        performanceStatus = "🟡 Fair";
-      }
-
       return {
-        category: cat.category,
-        totalCount: cat.totalCount,
-        resolvedCount: cat.resolvedCount,
-        pendingCount: cat.pendingCount,
-        inProgressCount: cat.inProgressCount,
+        category,
+        totalCount: list.length,
+        resolvedCount,
+        pendingCount: list.filter((c) => c.status === "OPEN").length,
+        inProgressCount: list.filter((c) => c.status === "IN_PROGRESS").length,
         avgResolutionTime,
-        resolutionRate,
-        performanceStatus,
+        resolutionRate: pct(resolvedCount, list.length),
+        ...performanceFor(avgResolutionTime, resolvedCount),
       };
     });
 
-    // Sort by total count descending
     categoryStats.sort((a, b) => b.totalCount - a.totalCount);
-
     return res.json({ categoryStats });
   } catch (error) {
     next(error);
   }
 });
 
-// GET /api/complaint-analytics/pending-list
-// Get list of pending complaints that need attention
+// GET /api/complaint-analytics/pending-list — open complaints, most urgent first.
 router.get("/pending-list", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { limit = "20" } = req.query;
+    const limit = Math.min(Math.max(parseInt(String(req.query.limit ?? "")) || 20, 1), 200);
 
     const pendingComplaints = await prisma.complaint.findMany({
-      where: {
-        societyId,
-        status: {
-          in: ["OPEN", "IN_PROGRESS"],
-        },
-      },
-      include: {
-        villa: {
-          select: {
-            villaNumber: true,
-            block: true,
-            ownerName: true,
-          },
-        },
-      },
-      orderBy: { createdAt: "asc" }, // Oldest first
-      take: Math.min(Math.max(parseInt(limit as string) || 50, 1), 200),
+      where: { societyId, status: { in: [ComplaintStatus.OPEN, ComplaintStatus.IN_PROGRESS] } },
+      include: { villa: { select: { villaNumber: true, block: true, ownerName: true } } },
+      orderBy: { createdAt: "asc" },
+      take: 200,
     });
 
     const now = Date.now();
-    // Calculate days pending and SLA status for each
-    const complaintsWithAge = pendingComplaints.map((complaint) => {
-      const daysPending = Math.floor(
-        (now - new Date(complaint.createdAt).getTime()) / (1000 * 60 * 60 * 24)
-      );
-
-      const slaBreached = complaint.slaDeadline
-        ? new Date(complaint.slaDeadline).getTime() < now
-        : daysPending > 7;
-
-      let urgencyLevel = "normal";
-      if (slaBreached) {
-        urgencyLevel = "critical";
-      } else if (complaint.priority === "URGENT" || complaint.priority === "HIGH") {
-        urgencyLevel = "high";
-      } else if (daysPending > 3) {
-        urgencyLevel = "high";
-      }
-
-      return {
-        ...complaint,
-        daysPending,
-        urgencyLevel,
-        slaBreached,
-      };
-    });
+    const rank = { critical: 0, high: 1, normal: 2 } as const;
+    const complaintsWithAge = pendingComplaints
+      .map((complaint) => {
+        const daysPending = Math.floor((now - complaint.createdAt.getTime()) / DAY_MS);
+        const slaBreached = complaint.slaDeadline
+          ? complaint.slaDeadline.getTime() < now
+          : daysPending > 7;
+        let urgencyLevel: keyof typeof rank = "normal";
+        if (slaBreached) urgencyLevel = "critical";
+        else if (complaint.priority === "URGENT" || complaint.priority === "HIGH" || daysPending > 3) {
+          urgencyLevel = "high";
+        }
+        return { ...complaint, daysPending, urgencyLevel, slaBreached };
+      })
+      .sort((a, b) => rank[a.urgencyLevel] - rank[b.urgencyLevel] || b.daysPending - a.daysPending)
+      .slice(0, limit);
 
     return res.json({ pendingComplaints: complaintsWithAge });
   } catch (error) {
@@ -315,86 +206,35 @@ router.get("/pending-list", async (req, res, next) => {
   }
 });
 
-// GET /api/complaint-analytics/trend
-// Get complaint trend over time (monthly)
+// GET /api/complaint-analytics/trend — monthly filed vs resolved.
 router.get("/trend", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { months = "6" } = req.query;
-
-    const monthsCount = parseInt(months as string) || 6;
+    const monthsCount = Math.min(Math.max(parseInt(String(req.query.months ?? "")) || 6, 1), 24);
     const monthKeys = localMonthKeysForLastMonths(monthsCount);
     const startDate = startOfLocalMonth(monthKeys[0]!);
 
     const complaints = await prisma.complaint.findMany({
-      where: {
-        societyId,
-        createdAt: {
-          gte: startDate,
-        },
-      },
-      select: {
-        createdAt: true,
-        status: true,
-        resolvedAt: true,
-      },
+      where: { societyId, createdAt: { gte: startDate } },
+      select: { createdAt: true, status: true, resolvedAt: true },
     });
 
-    // Group by month
-    const monthMap = new Map<string, ComplaintTrendStats>();
+    const byMonth = new Map<string, typeof complaints>();
+    for (const c of complaints) {
+      const key = localMonthKey(c.createdAt);
+      byMonth.set(key, [...(byMonth.get(key) ?? []), c]);
+    }
 
-    complaints.forEach((complaint) => {
-      const monthKey = localMonthKey(new Date(complaint.createdAt));
-
-      if (!monthMap.has(monthKey)) {
-        monthMap.set(monthKey, {
-          month: monthKey,
-          totalComplaints: 0,
-          resolvedComplaints: 0,
-          totalResolutionTime: 0,
-          resolvedWithTimeCount: 0,
-        });
-      }
-
-      const monthData = monthMap.get(monthKey)!;
-      monthData.totalComplaints++;
-
-      if (complaint.status === "RESOLVED") {
-        monthData.resolvedComplaints++;
-
-        if (complaint.resolvedAt) {
-          const date = new Date(complaint.createdAt);
-          const timeDiff = new Date(complaint.resolvedAt).getTime() - date.getTime();
-          monthData.totalResolutionTime += timeDiff / (1000 * 60 * 60 * 24);
-          monthData.resolvedWithTimeCount++;
-        }
-      }
-    });
-
-    // Fill in missing months and calculate averages
-    const trendData = monthKeys.map((monthKey) => {
-      const monthData = monthMap.get(monthKey) || {
-        month: monthKey,
-        totalComplaints: 0,
-        resolvedComplaints: 0,
-        totalResolutionTime: 0,
-        resolvedWithTimeCount: 0,
-      };
-
-      const avgResolutionTime = monthData.resolvedWithTimeCount > 0
-        ? Math.round((monthData.totalResolutionTime / monthData.resolvedWithTimeCount) * 10) / 10
-        : 0;
-
-      const resolutionRate = monthData.totalComplaints > 0
-        ? Math.round((monthData.resolvedComplaints / monthData.totalComplaints) * 100)
-        : 0;
-
+    const trendData = monthKeys.map((month) => {
+      const list = byMonth.get(month) ?? [];
+      const resolvedComplaints = list.filter((c) => isDone(c.status)).length;
+      const times = list.map(resolutionDays).filter((d): d is number => d != null);
       return {
-        month: monthKey,
-        totalComplaints: monthData.totalComplaints,
-        resolvedComplaints: monthData.resolvedComplaints,
-        avgResolutionTime,
-        resolutionRate,
+        month,
+        totalComplaints: list.length,
+        resolvedComplaints,
+        avgResolutionTime: times.length ? round1(times.reduce((s, d) => s + d, 0) / times.length) : 0,
+        resolutionRate: pct(resolvedComplaints, list.length),
       };
     });
 

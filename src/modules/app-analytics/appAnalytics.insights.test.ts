@@ -51,18 +51,20 @@ describe("appAnalytics enterprise metrics", () => {
     assert.equal(result.actions[0]?.label, "Pre-approve visitor");
   });
 
-  it("aggregates errors with error rate", async () => {
+  it("error rate is the share of sessions with an error, network vs app split", async () => {
+    const at = new Date();
+    const ev = (name: string, sessionId: string) => ({
+      name,
+      userId: "u1",
+      role: UserRole.GUARD,
+      occurredAt: at,
+      appVersion: "1.0.0",
+      sessionId,
+    });
     const fakeDb = {
       appAnalyticsEvent: {
-        findMany: async () => [
-          {
-            name: "api_timeout",
-            userId: "u1",
-            role: UserRole.GUARD,
-            occurredAt: new Date(),
-            appVersion: "1.0.0",
-          },
-        ],
+        // Three errors, but only in one session → 1 of 4 sessions = 25%.
+        findMany: async () => [ev("api_timeout", "s1"), ev("api_timeout", "s1"), ev("api_http_500", "s1")],
       },
       appAnalyticsSession: {
         count: async () => 4,
@@ -70,9 +72,14 @@ describe("appAnalytics enterprise metrics", () => {
     };
 
     const result = await getAppAnalyticsErrors(fakeDb as never, "soc1", 30);
-    assert.equal(result.totals.events, 1);
+    assert.equal(result.totals.events, 3);
+    assert.equal(result.totals.sessionsWithError, 1);
     assert.equal(result.totals.errorRatePct, 25);
+    assert.equal(result.totals.errorFreeSessionPct, 75);
+    assert.equal(result.totals.networkErrors, 2);
+    assert.equal(result.totals.appErrors, 1);
     assert.equal(result.errors[0]?.error, "api_timeout");
+    assert.equal(result.errors[0]?.isNetwork, true);
   });
 
   it("computes stickiness and retention insights", async () => {

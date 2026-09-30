@@ -17,6 +17,7 @@ import {
   getAppAnalyticsRoleAdoption,
   getAppAnalyticsSummary,
 } from "./appAnalytics.service";
+import { getBusinessActionCounts, type BusinessActionCounts } from "./businessActions";
 
 type Db = typeof prisma | Prisma.TransactionClient;
 
@@ -36,6 +37,12 @@ type GrowthKpi = {
   /** Percentage-point or relative growth vs previousValue — sign indicates direction. */
   growthPct?: number;
   trend?: KpiTrend;
+  /** "pct" values change in points ("+12 pts"); "count" values in percent ("+40%"). */
+  unit?: "pct" | "count";
+  /** Ready-to-show change vs the previous period, e.g. "+12 pts" or "−40%". */
+  deltaLabel?: string;
+  /** True when the metric is better lower (errors), so "up" is bad. */
+  lowerIsBetter?: boolean;
 };
 
 type InsightSeverity = "positive" | "warning" | "critical" | "info";
@@ -60,14 +67,35 @@ function pct(n: number, d: number): number {
 function withTrend(kpi: GrowthKpi, previousValue: number | undefined): GrowthKpi {
   if (previousValue === undefined) return kpi;
   const delta = kpi.value - previousValue;
-  const growthPct =
-    previousValue !== 0
-      ? Math.round((delta / Math.abs(previousValue)) * 100)
-      : kpi.value > 0
-        ? 100
-        : 0;
   const trend: KpiTrend = delta > 0 ? "up" : delta < 0 ? "down" : "flat";
-  return { ...kpi, previousValue, growthPct, trend };
+  const sign = delta > 0 ? "+" : delta < 0 ? "−" : "";
+  if (kpi.unit === "pct") {
+    // A rate's change is shown in points — "85% vs 42%" is +43 pts, not "+100%".
+    return {
+      ...kpi,
+      previousValue,
+      growthPct: delta,
+      trend,
+      deltaLabel: delta === 0 ? "No change" : `${sign}${Math.abs(delta)} pts`,
+    };
+  }
+  if (previousValue === 0) {
+    return {
+      ...kpi,
+      previousValue,
+      growthPct: kpi.value > 0 ? 100 : 0,
+      trend,
+      deltaLabel: kpi.value > 0 ? `New (was 0)` : "No change",
+    };
+  }
+  const growthPct = Math.round((delta / Math.abs(previousValue)) * 100);
+  return {
+    ...kpi,
+    previousValue,
+    growthPct,
+    trend,
+    deltaLabel: delta === 0 ? "No change" : `${sign}${Math.abs(growthPct)}%`,
+  };
 }
 
 /**
@@ -79,7 +107,7 @@ async function getPreviousPeriodSnapshot(db: Db, societyId: string, days: number
   const prevStart = new Date(since.getTime() - days * 24 * 60 * 60 * 1000);
   const prevEnd = since;
 
-  const [sessionUserRows, eventUserRows, flowEvents, actionAndErrorEvents, paymentCount, preApprovalCount] =
+  const [sessionUserRows, eventUserRows, flowEvents, errorSessionRows, sessionCount, business] =
     await Promise.all([
       db.appAnalyticsSession.findMany({
         where: { societyId, startedAt: { gte: prevStart, lt: prevEnd } },
@@ -102,27 +130,17 @@ async function getPreviousPeriodSnapshot(db: Db, societyId: string, days: number
       db.appAnalyticsEvent.findMany({
         where: {
           societyId,
-          kind: { in: [AppAnalyticsEventKind.ACTION, AppAnalyticsEventKind.ERROR] },
+          kind: AppAnalyticsEventKind.ERROR,
           occurredAt: { gte: prevStart, lt: prevEnd },
+          sessionId: { not: null },
         },
-        select: { kind: true, userId: true },
+        select: { sessionId: true },
+        distinct: ["sessionId"],
       }),
-      db.appAnalyticsEvent.count({
-        where: {
-          societyId,
-          kind: AppAnalyticsEventKind.ACTION,
-          name: "resident_maintenance_payment",
-          occurredAt: { gte: prevStart, lt: prevEnd },
-        },
+      db.appAnalyticsSession.count({
+        where: { societyId, startedAt: { gte: prevStart, lt: prevEnd } },
       }),
-      db.appAnalyticsEvent.count({
-        where: {
-          societyId,
-          kind: AppAnalyticsEventKind.ACTION,
-          name: "resident_pre_approve_visitor",
-          occurredAt: { gte: prevStart, lt: prevEnd },
-        },
-      }),
+      getBusinessActionCounts(db, societyId, prevStart, prevEnd),
     ]);
 
   const activeUserIds = new Set<string>([
@@ -133,141 +151,157 @@ async function getPreviousPeriodSnapshot(db: Db, societyId: string, days: number
   const flowSuccessCount = flowEvents.filter((f) => f.success !== false).length;
   const guardFlowSuccessPct = pct(flowSuccessCount, flowEvents.length);
 
-  const actionEvents = actionAndErrorEvents.filter((e) => e.kind === AppAnalyticsEventKind.ACTION);
-  const errorEvents = actionAndErrorEvents.filter((e) => e.kind === AppAnalyticsEventKind.ERROR);
-  const errorRatePct = pct(errorEvents.length, actionEvents.length + errorEvents.length);
-  const keyActionUserCount = new Set(actionEvents.map((e) => e.userId)).size;
-
   return {
     activeUserCount: activeUserIds.size,
     guardFlowSuccessPct,
-    errorRatePct,
-    keyActionUserCount,
-    maintenancePayments: paymentCount,
-    preApprovals: preApprovalCount,
+    /** % of sessions with at least one error. */
+    errorRatePct: pct(errorSessionRows.length, sessionCount),
+    hasSessions: sessionCount > 0,
+    business,
   };
+}
+
+/** Adoption of a self-service feature among occupied flats. */
+type AdoptionLever = {
+  action: string;
+  label: string;
+  pillar: GrowthPillar;
+  adoptionPct: number;
+  count: number;
+  recommendation: string;
+};
+
+/** Self-service features, measured from real data, with a plain next step when adoption is low. */
+function buildAdoptionLevers(b: BusinessActionCounts): AdoptionLever[] {
+  const flats = Math.max(b.occupiedFlats, 1);
+  const inAppAnswerPct = pct(b.gateRequestsAnsweredInApp, b.gateRequests);
+  const levers: AdoptionLever[] = [
+    {
+      action: "resident_pre_approve_visitor",
+      label: "Guest pre-approvals",
+      pillar: "communication",
+      adoptionPct: pct(b.preApprovalFlats, flats),
+      count: b.preApprovals,
+      recommendation: "Remind residents they can invite guests from GatePass+ so the gate lets them in without calls.",
+    },
+    {
+      action: "resident_gate_response",
+      label: "Gate requests answered in app",
+      pillar: "operations",
+      adoptionPct: inAppAnswerPct,
+      count: b.gateRequestsAnsweredInApp,
+      recommendation: "Ask residents to keep notifications on — unanswered requests make guards phone them.",
+    },
+    {
+      action: "resident_maintenance_payment",
+      label: "Online maintenance payments",
+      pillar: "monetization",
+      adoptionPct: pct(b.onlinePaymentFlats, flats),
+      count: b.onlinePayments,
+      recommendation: "Share the Pay button in the next dues reminder to cut cash collection.",
+    },
+  ];
+  // Gate-request answering only means something once there were requests.
+  return levers.filter((l) => l.action !== "resident_gate_response" || b.gateRequests > 0);
 }
 
 /** Auto-generated, plain-language insight sentences from period-over-period deltas. */
 function buildSmartInsights(params: {
   days: number;
-  activeRate: number;
   prevActiveUserCount: number;
   activeInPeriod: number;
   errorRate: number;
   prevErrorRate: number;
-  avgGuardSuccess: number;
-  prevGuardSuccess: number;
-  paymentCount: number;
-  prevPaymentCount: number;
-  preApprovalCount: number;
-  prevPreApprovalCount: number;
+  prevHasSessions: boolean;
+  networkErrorShare: number;
+  business: BusinessActionCounts;
+  prevBusiness: BusinessActionCounts;
   retentionD7: number;
-  growthLevers: { label: string; adoptionPct: number }[];
+  levers: AdoptionLever[];
   neverUsedApp: number;
   registered: number;
 }): SmartInsight[] {
   const insights: SmartInsight[] = [];
-  const {
-    days,
-    prevActiveUserCount,
-    activeInPeriod,
-    errorRate,
-    prevErrorRate,
-    avgGuardSuccess,
-    prevGuardSuccess,
-    paymentCount,
-    prevPaymentCount,
-    preApprovalCount,
-    prevPreApprovalCount,
-    retentionD7,
-    growthLevers,
-    neverUsedApp,
-    registered,
-  } = params;
+  const { days, business: b, prevBusiness: pb } = params;
 
-  const pctChange = (curr: number, prev: number): number | null => {
-    if (prev === 0) return curr > 0 ? 100 : null;
-    return Math.round(((curr - prev) / prev) * 100);
-  };
+  const pctChange = (curr: number, prev: number): number | null =>
+    prev === 0 ? null : Math.round(((curr - prev) / prev) * 100);
 
-  const activeUsersDelta = pctChange(activeInPeriod, prevActiveUserCount);
-  if (activeUsersDelta !== null && Math.abs(activeUsersDelta) >= 10) {
+  const activeDelta = pctChange(params.activeInPeriod, params.prevActiveUserCount);
+  if (activeDelta !== null && Math.abs(activeDelta) >= 10) {
     insights.push({
       id: "active_users_delta",
-      severity: activeUsersDelta > 0 ? "positive" : "warning",
-      text: `Active users ${activeUsersDelta > 0 ? "grew" : "dropped"} ${Math.abs(activeUsersDelta)}% vs the previous ${days}-day period.`,
+      severity: activeDelta > 0 ? "positive" : "warning",
+      text: `${params.activeInPeriod} people used the app in the last ${days} days — ${activeDelta > 0 ? "up" : "down"} from ${params.prevActiveUserCount} the period before.`,
     });
   }
 
-  if (errorRate > prevErrorRate && errorRate - prevErrorRate >= 3) {
+  // Errors are judged per session, and network trouble is called out separately.
+  if (params.errorRate >= 15) {
+    const network = params.networkErrorShare >= 60;
     insights.push({
-      id: "error_rate_up",
-      severity: "critical",
-      text: `Error rate rose from ${prevErrorRate}% to ${errorRate}% — investigate recent releases or failing flows.`,
+      id: "errors_high",
+      severity: params.errorRate >= 30 ? "critical" : "warning",
+      text: network
+        ? `${params.errorRate}% of app sessions hit a slow or dropped connection — mostly the server waking up or weak mobile signal, not app bugs.`
+        : `${params.errorRate}% of app sessions hit an error — check the error list below.`,
     });
-  } else if (prevErrorRate > errorRate && prevErrorRate - errorRate >= 3) {
+  } else if (params.prevHasSessions && params.prevErrorRate - params.errorRate >= 5) {
     insights.push({
-      id: "error_rate_down",
+      id: "errors_down",
       severity: "positive",
-      text: `Error rate improved from ${prevErrorRate}% to ${errorRate}%.`,
+      text: `Fewer sessions had errors: ${params.errorRate}% now vs ${params.prevErrorRate}% before.`,
     });
   }
 
-  if (prevGuardSuccess > 0 && avgGuardSuccess < prevGuardSuccess && prevGuardSuccess - avgGuardSuccess >= 5) {
-    insights.push({
-      id: "guard_success_down",
-      severity: "warning",
-      text: `Guard flow success rate dropped ${prevGuardSuccess - avgGuardSuccess}pp (${prevGuardSuccess}% → ${avgGuardSuccess}%) — check gate operations.`,
-    });
-  }
-
-  const paymentDelta = pctChange(paymentCount, prevPaymentCount);
-  if (paymentDelta !== null && paymentDelta <= -20 && prevPaymentCount > 0) {
+  const payDelta = pctChange(b.onlinePayments, pb.onlinePayments);
+  if (payDelta !== null && payDelta <= -30) {
     insights.push({
       id: "payments_down",
-      severity: "critical",
-      text: `Online maintenance payments dropped ${Math.abs(paymentDelta)}% vs the previous period — check payment gateway health.`,
+      severity: "warning",
+      text: `Online payments fell to ${b.onlinePayments} from ${pb.onlinePayments} — check the payment gateway and send a reminder.`,
     });
-  } else if (paymentDelta !== null && paymentDelta >= 20 && prevPaymentCount > 0) {
+  } else if (payDelta !== null && payDelta >= 30) {
     insights.push({
       id: "payments_up",
       severity: "positive",
-      text: `Online maintenance payments grew ${paymentDelta}% vs the previous period.`,
+      text: `Online payments rose to ${b.onlinePayments} from ${pb.onlinePayments}.`,
     });
   }
 
-  const preApprovalDelta = pctChange(preApprovalCount, prevPreApprovalCount);
-  if (preApprovalDelta !== null && preApprovalDelta >= 20 && prevPreApprovalCount > 0) {
-    insights.push({
-      id: "pre_approvals_up",
-      severity: "positive",
-      text: `Visitor pre-approvals grew ${preApprovalDelta}% — residents are adopting self-service gate entry.`,
-    });
+  if (b.gateRequests >= 5) {
+    const answered = pct(b.gateRequestsAnsweredInApp, b.gateRequests);
+    if (answered < 60) {
+      insights.push({
+        id: "gate_unanswered",
+        severity: "warning",
+        text: `Residents answered only ${answered}% of gate requests in the app — guards had to call or wait for the rest.`,
+      });
+    }
   }
 
-  if (retentionD7 > 0 && retentionD7 < 20) {
+  if (params.retentionD7 > 0 && params.retentionD7 < 20) {
     insights.push({
       id: "retention_low",
       severity: "warning",
-      text: `7-day retention is only ${retentionD7}% — most users aren't coming back within a week.`,
+      text: `Only ${params.retentionD7}% of users came back within a week.`,
     });
   }
 
-  const neverUsedPct = pct(neverUsedApp, registered);
-  if (neverUsedPct >= 40 && registered > 0) {
+  const neverUsedPct = pct(params.neverUsedApp, params.registered);
+  if (neverUsedPct >= 25 && params.registered > 0) {
     insights.push({
       id: "never_used_high",
       severity: "warning",
-      text: `${neverUsedPct}% of registered accounts (${neverUsedApp} of ${registered}) have never opened the app.`,
+      text: `${params.neverUsedApp} of ${params.registered} accounts (${neverUsedPct}%) have never opened the app — share the download link and login help.`,
     });
   }
 
-  for (const lever of growthLevers.slice(0, 2)) {
+  for (const lever of params.levers.filter((l) => l.adoptionPct < 30).slice(0, 2)) {
     insights.push({
-      id: `low_adoption_${lever.label}`,
+      id: `low_adoption_${lever.action}`,
       severity: "info",
-      text: `"${lever.label}" has only ${lever.adoptionPct}% adoption — consider promoting it in notices or onboarding.`,
+      text: `${lever.label}: ${lever.adoptionPct}% of flats. ${lever.recommendation}`,
     });
   }
 
@@ -290,14 +324,16 @@ function buildSmartInsights(params: {
 export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, days: number) {
   const since = startOfLocalDayDaysAgo(days);
 
-  const [summary, insights, flowsPayload, errorsPayload, roleAdoption, previous] = await Promise.all([
-    getAppAnalyticsSummary(db, societyId, days),
-    getAppAnalyticsInsights(db, societyId, days),
-    getAppAnalyticsFlows(db, societyId, days),
-    getAppAnalyticsErrors(db, societyId, days),
-    getAppAnalyticsRoleAdoption(db, societyId, days, 0),
-    getPreviousPeriodSnapshot(db, societyId, days, since),
-  ]);
+  const [summary, insights, flowsPayload, errorsPayload, roleAdoption, previous, business] =
+    await Promise.all([
+      getAppAnalyticsSummary(db, societyId, days),
+      getAppAnalyticsInsights(db, societyId, days),
+      getAppAnalyticsFlows(db, societyId, days),
+      getAppAnalyticsErrors(db, societyId, days),
+      getAppAnalyticsRoleAdoption(db, societyId, days, 0),
+      getPreviousPeriodSnapshot(db, societyId, days, since),
+      getBusinessActionCounts(db, societyId, since),
+    ]);
 
   const engagement = summary.engagement;
   const registered = engagement.registeredActiveAccounts;
@@ -311,146 +347,164 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
   const activationRate = pct(everUsed, registered);
   const activeRate = pct(engagement.activeInPeriod, registered);
 
-  const actionUserRows = await db.appAnalyticsEvent.findMany({
-    where: {
-      societyId,
-      kind: AppAnalyticsEventKind.ACTION,
-      occurredAt: { gte: since },
-    },
-    select: { userId: true },
-    distinct: ["userId"],
-  });
-  const keyActionUserCount = actionUserRows.length;
-  const keyActionRate = pct(keyActionUserCount, registered);
-
   const guardFlows = flowsPayload.flows;
   const avgGuardSuccess =
     guardFlows.length > 0
-      ? Math.round(
-          guardFlows.reduce((sum, f) => sum + f.successRate, 0) / guardFlows.length,
-        )
+      ? Math.round(guardFlows.reduce((sum, f) => sum + f.successRate, 0) / guardFlows.length)
       : 0;
 
-  const paymentAction = actions.actions.find((a) => a.action === "resident_maintenance_payment");
-  const preApproveAction = actions.actions.find((a) => a.action === "resident_pre_approve_visitor");
-
   const errorRate = errorsPayload.totals.errorRatePct ?? 0;
+  const errorFree = errorsPayload.totals.errorFreeSessionPct ?? 100;
+  const networkErrorShare = pct(errorsPayload.totals.networkErrors, errorsPayload.totals.events);
+  const levers = buildAdoptionLevers(business);
+  const flats = Math.max(business.occupiedFlats, 1);
+  const prevFlats = Math.max(previous.business.occupiedFlats, 1);
 
+  // Health = activation, weekly stickiness, 7-day return and error-free sessions.
   const healthScore = Math.min(
     100,
     Math.round(
       activationRate * 0.25 +
-        (stickiness.stickinessPct ?? 0) * 0.25 +
+        (stickiness.wauMauPct ?? 0) * 0.25 +
         (retention.d7Pct ?? 0) * 0.25 +
-        Math.max(0, 100 - errorRate) * 0.25,
+        errorFree * 0.25,
     ),
+  );
+
+  // Flats that did at least one self-service action ≈ "key action" reach.
+  const keyActionFlats = Math.min(
+    flats,
+    Math.max(business.preApprovalFlats, business.onlinePaymentFlats),
   );
 
   const kpis: GrowthKpi[] = [
     {
       id: "health_score",
-      label: "Growth health",
+      label: "App health",
       value: healthScore,
       displayValue: `${healthScore}/100`,
       pillar: "engagement",
       status: statusFromPct(healthScore, 70, 45),
-      hint: "Blend of activation, stickiness, retention, and reliability.",
+      hint: "Blend of accounts activated, weekly return, 7-day return and error-free sessions.",
     },
     {
       id: "activation_rate",
-      label: "Activation rate",
+      label: "Accounts that use the app",
       value: activationRate,
       displayValue: `${activationRate}%`,
+      unit: "pct",
       pillar: "acquisition",
       status: statusFromPct(activationRate, 75, 50),
-      hint: "Registered accounts with any app usage signal (analytics, push, or login).",
+      hint: `${everUsed} of ${registered} accounts have opened the app at least once.`,
     },
     withTrend(
       {
         id: "active_rate",
-        label: "Active this period",
+        label: `Active in last ${days} days`,
         value: activeRate,
         displayValue: `${activeRate}%`,
+        unit: "pct",
         pillar: "engagement",
         status: statusFromPct(activeRate, 60, 35),
-        hint: `Users active in the last ${days} days, vs the previous ${days}-day period.`,
+        hint: `${engagement.activeInPeriod} of ${registered} accounts, vs the previous ${days} days.`,
       },
       pct(previous.activeUserCount, registered),
     ),
     {
       id: "stickiness",
-      label: "Stickiness (DAU/MAU)",
-      value: stickiness.stickinessPct ?? 0,
-      displayValue: `${stickiness.stickinessPct ?? 0}%`,
+      label: "Weekly return (WAU/MAU)",
+      value: stickiness.wauMauPct ?? 0,
+      displayValue: `${stickiness.wauMauPct ?? 0}%`,
+      unit: "pct",
       pillar: "engagement",
-      status: statusFromPct(stickiness.stickinessPct ?? 0, 25, 12),
-      hint: "Higher means users return daily within the month.",
+      status: statusFromPct(stickiness.wauMauPct ?? 0, 60, 35),
+      hint: "Of people active this month, how many also used it this week.",
     },
     {
       id: "retention_d7",
-      label: "7-day retention",
+      label: "7-day return",
       value: retention.d7Pct ?? 0,
       displayValue: `${retention.d7Pct ?? 0}%`,
+      unit: "pct",
       pillar: "engagement",
       status: statusFromPct(retention.d7Pct ?? 0, 40, 20),
-      hint: "Users who joined 7+ days ago and returned this week.",
+      hint: "Users who joined 7+ days ago and came back this week.",
     },
     withTrend(
       {
-        id: "guard_success",
-        label: "Guard flow success",
-        value: avgGuardSuccess,
-        displayValue: `${avgGuardSuccess}%`,
+        id: "error_free_sessions",
+        label: "Sessions without errors",
+        value: errorFree,
+        displayValue: `${errorFree}%`,
+        unit: "pct",
         pillar: "operations",
-        status: statusFromPct(avgGuardSuccess, 90, 75),
-        hint: "Average success rate across gate workflows, vs the previous period.",
+        status: statusFromPct(errorFree, 90, 75),
+        hint:
+          networkErrorShare >= 60
+            ? "Most errors are slow/dropped connections (server waking up, weak signal)."
+            : "App sessions that finished without any error.",
       },
-      previous.guardFlowSuccessPct,
-    ),
-    withTrend(
-      {
-        id: "maintenance_payments",
-        label: "Maintenance payments",
-        value: paymentAction?.count ?? 0,
-        displayValue: `${paymentAction?.count ?? 0}`,
-        pillar: "monetization",
-        status: (paymentAction?.count ?? 0) > 0 ? "good" : "watch",
-        hint: "Online payment completions in period, vs the previous period.",
-      },
-      previous.maintenancePayments,
+      previous.hasSessions ? 100 - previous.errorRatePct : undefined,
     ),
     withTrend(
       {
         id: "pre_approvals",
-        label: "Visitor pre-approvals",
-        value: preApproveAction?.count ?? 0,
-        displayValue: `${preApproveAction?.count ?? 0}`,
+        label: "Guest pre-approvals",
+        value: business.preApprovals,
+        displayValue: `${business.preApprovals}`,
+        unit: "count",
         pillar: "communication",
-        status: (preApproveAction?.count ?? 0) > 0 ? "good" : "watch",
-        hint: "Resident-driven gate entries enabled, vs the previous period.",
+        status: pct(business.preApprovalFlats, flats) >= 20 ? "good" : "watch",
+        hint: `${business.preApprovalFlats} of ${business.occupiedFlats} flats invited guests in advance.`,
       },
-      previous.preApprovals,
+      previous.business.preApprovals,
+    ),
+    withTrend(
+      {
+        id: "maintenance_payments",
+        label: "Online payments",
+        value: business.onlinePayments,
+        displayValue: `${business.onlinePayments}`,
+        unit: "count",
+        pillar: "monetization",
+        status: pct(business.onlinePaymentFlats, flats) >= 30 ? "good" : "watch",
+        hint: `${business.onlinePaymentFlats} of ${business.occupiedFlats} flats paid maintenance online (vs ${pct(previous.business.onlinePaymentFlats, prevFlats)}% before).`,
+      },
+      previous.business.onlinePayments,
     ),
   ];
+  if (business.gateRequests > 0) {
+    kpis.push(
+      withTrend(
+        {
+          id: "gate_answered_in_app",
+          label: "Gate requests answered in app",
+          value: pct(business.gateRequestsAnsweredInApp, business.gateRequests),
+          displayValue: `${pct(business.gateRequestsAnsweredInApp, business.gateRequests)}%`,
+          unit: "pct",
+          pillar: "operations",
+          status: statusFromPct(pct(business.gateRequestsAnsweredInApp, business.gateRequests), 75, 50),
+          hint: `${business.gateRequestsAnsweredInApp} of ${business.gateRequests} flat requests got a resident reply in the app.`,
+        },
+        previous.business.gateRequests > 0
+          ? pct(previous.business.gateRequestsAnsweredInApp, previous.business.gateRequests)
+          : undefined,
+      ),
+    );
+  }
 
   const smartInsights = buildSmartInsights({
     days,
-    activeRate,
     prevActiveUserCount: previous.activeUserCount,
     activeInPeriod: engagement.activeInPeriod,
     errorRate,
     prevErrorRate: previous.errorRatePct,
-    avgGuardSuccess,
-    prevGuardSuccess: previous.guardFlowSuccessPct,
-    paymentCount: paymentAction?.count ?? 0,
-    prevPaymentCount: previous.maintenancePayments,
-    preApprovalCount: preApproveAction?.count ?? 0,
-    prevPreApprovalCount: previous.preApprovals,
+    prevHasSessions: previous.hasSessions,
+    networkErrorShare,
+    business,
+    prevBusiness: previous.business,
     retentionD7: retention.d7Pct ?? 0,
-    growthLevers: actions.actions
-      .filter((a) => a.adoptionPct < 40)
-      .slice(0, 5)
-      .map((a) => ({ label: a.label, adoptionPct: a.adoptionPct })),
+    levers,
     neverUsedApp: engagement.neverUsedApp,
     registered,
   });
@@ -459,26 +513,12 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
     { stage: "Registered accounts", count: registered, ratePct: 100 },
     { stage: "Ever used app", count: everUsed, ratePct: activationRate },
     { stage: `Active (${days}d)`, count: engagement.activeInPeriod, ratePct: activeRate },
-    { stage: "Key business action", count: keyActionUserCount, ratePct: keyActionRate },
+    {
+      stage: "Flats using self-service",
+      count: keyActionFlats,
+      ratePct: pct(keyActionFlats, flats),
+    },
   ];
-
-  const growthLevers = actions.actions
-    .filter((a) => a.adoptionPct < 40)
-    .slice(0, 5)
-    .map((a) => {
-      const catalog = BUSINESS_ACTION_CATALOG.find((c) => c.id === a.action);
-      return {
-        action: a.action,
-        label: a.label,
-        pillar: catalog?.pillar ?? "engagement",
-        adoptionPct: a.adoptionPct,
-        count: a.count,
-        recommendation:
-          a.adoptionPct < 15
-            ? "Low adoption — promote in notices or onboarding."
-            : "Moderate adoption — room to grow with reminders.",
-      };
-    });
 
   const pillars = {
     acquisition: {
@@ -489,8 +529,10 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
     },
     engagement: {
       dailyActiveUsers: totals.dailyActiveUsers,
+      weeklyActiveUsers: totals.weeklyActiveUsers,
       monthlyActiveUsers: totals.monthlyActiveUsers,
       stickinessPct: stickiness.stickinessPct,
+      wauMauPct: stickiness.wauMauPct,
       retentionD7Pct: retention.d7Pct,
       retentionD30Pct: retention.d30Pct,
       activeInPeriod: engagement.activeInPeriod,
@@ -500,18 +542,22 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
       guardFlowCompletions: totals.flowCompletions,
       guardFlowSuccessPct: avgGuardSuccess,
       errorRatePct: errorRate,
+      errorFreeSessionPct: errorFree,
+      networkErrors: errorsPayload.totals.networkErrors,
+      appErrors: errorsPayload.totals.appErrors,
       sessions: totals.sessions,
+      gateEntries: business.gateEntries,
+      parcels: business.parcels,
     },
     monetization: {
-      maintenancePayments: paymentAction?.count ?? 0,
-      paymentAdoptionPct: paymentAction?.adoptionPct ?? 0,
+      maintenancePayments: business.onlinePayments,
+      paymentAdoptionPct: pct(business.onlinePaymentFlats, flats),
       billingCyclesPublished:
         actions.actions.find((a) => a.action === "admin_billing_cycle_publish")?.count ?? 0,
     },
     communication: {
-      preApprovals: preApproveAction?.count ?? 0,
-      complaints:
-        actions.actions.find((a) => a.action === "resident_complaint_submit")?.count ?? 0,
+      preApprovals: business.preApprovals,
+      complaints: business.complaints,
       noticesPublished:
         actions.actions.find((a) => a.action === "admin_notice_publish")?.count ?? 0,
     },
@@ -528,7 +574,7 @@ export async function getAppAnalyticsGrowthDashboard(db: Db, societyId: string, 
     smartInsights,
     funnel,
     pillars,
-    growthLevers,
+    growthLevers: levers.filter((l) => l.adoptionPct < 50),
     catalog: BUSINESS_ACTION_CATALOG,
   };
 }
