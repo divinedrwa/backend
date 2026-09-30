@@ -94,9 +94,6 @@ function corsOriginCheck(
     if (
       origin === `https://${firebaseProjectId}.web.app` ||
       origin === `https://${firebaseProjectId}.firebaseapp.com` ||
-      // Admin website: second Hosting site in the same project.
-      origin === `https://${firebaseProjectId}-admin.web.app` ||
-      origin === `https://${firebaseProjectId}-admin.firebaseapp.com` ||
       (origin.startsWith(`https://${firebaseProjectId}--`) && origin.endsWith(".web.app"))
     ) {
       return callback(null, true);
