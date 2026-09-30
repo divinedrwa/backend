@@ -31,6 +31,7 @@ import {
 } from "./schemas";
 import { loadAnalyticsUserSnapshot } from "./userSnapshot";
 import { getAppAnalyticsGrowthDashboard } from "./growthDashboard.service";
+import { getSocietyOverview } from "./societyOverview.service";
 
 const router = Router();
 
@@ -325,6 +326,21 @@ router.get("/growth-dashboard", requireRole(...ADMIN_READ_ROLES), async (req, re
     const days = parseDays(req.query.days);
     const dashboard = await getAppAnalyticsGrowthDashboard(prisma, societyId, days);
     return res.json({ growth: dashboard });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// Plain-language society summary for the Analytics "Overview" tab.
+router.get("/society-overview", requireRole(...ADMIN_READ_ROLES), async (req, res, next) => {
+  try {
+    const societyId = tenantSocietyId(req);
+    if (!societyId) {
+      return res.status(403).json({ message: "Tenant context required" });
+    }
+    const days = parseDays(req.query.days);
+    const overview = await getSocietyOverview(prisma, societyId, days);
+    return res.json({ overview });
   } catch (error) {
     next(error);
   }

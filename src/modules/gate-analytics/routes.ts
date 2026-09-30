@@ -1,4 +1,4 @@
-import { Prisma, UserRole, VisitorCheckpointType, VisitorStatus } from "@prisma/client";
+import { UserRole, VisitorCheckpointType, VisitorStatus } from "@prisma/client";
 import { Router } from "express";
 import { prisma } from "../../lib/prisma";
 import { findActiveGuardShiftAtGate } from "../../lib/guardShiftActive";
@@ -10,6 +10,7 @@ import {
   startOfLocalDayDaysAgo,
 } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
+import { ADMITTED, INSIDE_NOW, WAITING_NOW } from "./visitorFilters";
 
 const router = Router();
 
@@ -23,35 +24,6 @@ function periodDays(raw: unknown, fallback: number): number {
 function periodStart(days: number): Date {
   return startOfLocalDayDaysAgo(days - 1);
 }
-
-/**
- * A visit where the person was actually let in (not a request that was rejected,
- * expired or closed before entry). Older rows lack `checkedInByGuardId`, so an
- * admit/override checkpoint or a pre-approval also counts.
- */
-const ADMITTED: Prisma.VisitorWhereInput = {
-  status: { in: [VisitorStatus.CHECKED_IN, VisitorStatus.CHECKED_OUT] },
-  OR: [
-    { checkedInByGuardId: { not: null } },
-    { preApprovedId: { not: null } },
-    {
-      checkpoints: {
-        some: {
-          checkpointType: {
-            in: [VisitorCheckpointType.ADMITTED, VisitorCheckpointType.EMERGENCY_OVERRIDE],
-          },
-        },
-      },
-    },
-  ],
-};
-
-/** Inside right now: admitted and no exit yet (any day). */
-const INSIDE_NOW: Prisma.VisitorWhereInput = {
-  status: VisitorStatus.CHECKED_IN,
-  checkOutAt: null,
-  checkOutTime: null,
-};
 
 const formatHour = (hour: number) => {
   const period = hour >= 12 ? "PM" : "AM";
@@ -100,7 +72,7 @@ router.get("/overview", async (req, res, next) => {
       }),
       prisma.visitor.groupBy({
         by: ["gateId"],
-        where: { societyId, status: VisitorStatus.PENDING_APPROVAL, checkOutAt: null },
+        where: { societyId, ...WAITING_NOW },
         _count: true,
       }),
     ]);

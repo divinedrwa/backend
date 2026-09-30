@@ -5,16 +5,11 @@ import {
   localDateKey,
   localDateKeysForLastDays,
   localHour,
-  startOfLocalCalendarDay,
   startOfLocalDayDaysAgo,
 } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
-import {
-  longestGapMinutes,
-  supplyIntervals,
-  supplyMinutesByDay,
-  type SupplyInterval,
-} from "./supplyIntervals";
+import { loadSupply, minutesOf } from "./loadSupply";
+import { longestGapMinutes, supplyMinutesByDay } from "./supplyIntervals";
 import { isWaterTurnedOff, isWaterTurnedOn } from "./waterEventAction";
 
 const router = Router();
@@ -27,53 +22,6 @@ function periodDays(raw: unknown, fallback: number): number {
   return Math.min(Math.max(parseInt(String(raw ?? "")) || fallback, 1), 365);
 }
 
-/** Supply intervals per gate for the last N local days (incl. today). */
-async function loadSupply(societyId: string, days: number) {
-  const from = startOfLocalDayDaysAgo(days - 1);
-  const to = new Date();
-  const gates = await prisma.gate.findMany({
-    where: { societyId },
-    select: { id: true, name: true, location: true },
-    orderBy: { name: "asc" },
-  });
-  const perGate = await Promise.all(
-    gates.map(async (gate) => {
-      const [events, before, last] = await Promise.all([
-        prisma.waterSupplyEvent.findMany({
-          where: { societyId, gateId: gate.id, createdAt: { gte: from } },
-          orderBy: { createdAt: "asc" },
-        }),
-        prisma.waterSupplyEvent.findFirst({
-          where: { societyId, gateId: gate.id, createdAt: { lt: from } },
-          orderBy: { createdAt: "desc" },
-        }),
-        prisma.waterSupplyEvent.findFirst({
-          where: { societyId, gateId: gate.id },
-          orderBy: { createdAt: "desc" },
-        }),
-      ]);
-      return { gate, events, last, intervals: supplyIntervals(events, from, to, before) };
-    }),
-  );
-  // Days before the first ever ON/OFF tap are "not tracked", not "no water".
-  const first = await prisma.waterSupplyEvent.findFirst({
-    where: { societyId },
-    orderBy: { createdAt: "asc" },
-    select: { createdAt: true },
-  });
-  const trackedFrom = first && first.createdAt > from ? first.createdAt : from;
-  const trackedDays = Math.min(
-    days,
-    Math.max(
-      1,
-      Math.round((startOfLocalCalendarDay(to).getTime() - startOfLocalCalendarDay(trackedFrom).getTime()) / 86_400_000) + 1,
-    ),
-  );
-  return { from, to, perGate, trackedFrom, trackedDays };
-}
-
-const minutesOf = (ivs: SupplyInterval[]) =>
-  ivs.reduce((s, iv) => s + (iv.end.getTime() - iv.start.getTime()) / 60000, 0);
 
 const formatHour = (hour: number) => {
   const period = hour >= 12 ? "PM" : "AM";
@@ -86,7 +34,12 @@ router.get("/overview", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const daysAgo = periodDays(req.query.days, 7);
-    const { from, to, perGate, trackedFrom, trackedDays } = await loadSupply(societyId, daysAgo);
+    const { from, to, perGate, trackedFrom, trackedDays, stale, lastLoggedAt } = await loadSupply(
+      societyId,
+      daysAgo,
+    );
+    // After guards stop logging, the time since is unknown — not a dry spell.
+    const trackedTo = stale && lastLoggedAt ? lastLoggedAt : to;
 
     const events = perGate.flatMap((g) => g.events);
     const intervals = perGate.flatMap((g) => g.intervals);
@@ -97,7 +50,7 @@ router.get("/overview", async (req, res, next) => {
       : 0;
 
     return res.json({
-      period: { days: daysAgo, startDate: from, endDate: to, trackedFrom, trackedDays },
+      period: { days: daysAgo, startDate: from, endDate: to, trackedFrom, trackedDays, stale, lastLoggedAt },
       summary: {
         totalEvents: events.length,
         onEvents: events.filter((e) => isWaterTurnedOn(e)).length,
@@ -110,7 +63,7 @@ router.get("/overview", async (req, res, next) => {
         avgSupplyMinutesPerDay: Math.round(supplyMinutes / trackedDays),
         longestSupplyMinutes: longestRun,
         /** Longest stretch without water since tracking began; null when no supply was logged. */
-        longestGapMinutes: intervals.length ? longestGapMinutes(intervals, trackedFrom, to) : null,
+        longestGapMinutes: intervals.length ? longestGapMinutes(intervals, trackedFrom, trackedTo) : null,
         runningNow: perGate.filter((g) => g.last && isWaterTurnedOn(g.last)).length,
       },
       gateStats: perGate
