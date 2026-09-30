@@ -770,6 +770,13 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
               select: {
                 villaNumber: true,
                 block: true,
+                // Who the guard can call when a request gets no reply.
+                users: {
+                  where: { isActive: true, ...residentLikeRoleFilter },
+                  select: { id: true, name: true, phone: true },
+                  orderBy: { maintenanceBillingRole: "asc" },
+                  take: 4,
+                },
               },
             },
           },
@@ -783,6 +790,63 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
     }
 
     return res.json({ visitors: pending, count: pending.length });
+  } catch (error) {
+    next(error);
+  }
+});
+
+// GET /api/guards/visitor-lookup?phone= — details from this visitor's earlier visits, so the
+// guard can re-enter a regular (maid, driver, courier) in a couple of taps.
+router.get("/visitor-lookup", requireRole(UserRole.GUARD), async (req, res, next) => {
+  try {
+    const { societyId } = req.auth!;
+    const digits = String(req.query.phone ?? "").replace(/\D/g, "");
+    const last10 = digits.slice(-10);
+    if (last10.length < 10) {
+      return res.status(400).json({ message: "Enter a 10-digit phone number" });
+    }
+
+    const where = { societyId, phone: { endsWith: last10 } };
+    const [recent, visitCount] = await Promise.all([
+      prisma.visitor.findMany({
+        where,
+        orderBy: { checkInTime: "desc" },
+        take: 5,
+        select: {
+          name: true,
+          visitorType: true,
+          vehicleNumber: true,
+          checkInTime: true,
+          villaVisits: {
+            select: { villa: { select: { id: true, villaNumber: true, block: true } } },
+          },
+        },
+      }),
+      prisma.visitor.count({ where }),
+    ]);
+    if (recent.length === 0) {
+      return res.json({ found: false });
+    }
+
+    const last = recent[0];
+    const flats = last.villaVisits
+      .map((vv) => vv.villa)
+      .filter((v): v is NonNullable<typeof v> => v != null)
+      .map((v) => ({
+        villaId: v.id,
+        label: v.block ? `${v.block}-${v.villaNumber}` : v.villaNumber,
+      }));
+    const vehicleNumber = recent.find((r) => r.vehicleNumber?.trim())?.vehicleNumber ?? null;
+
+    return res.json({
+      found: true,
+      name: last.name,
+      visitorType: last.visitorType,
+      vehicleNumber,
+      lastFlats: flats,
+      lastVisitAt: last.checkInTime,
+      visitCount,
+    });
   } catch (error) {
     next(error);
   }
