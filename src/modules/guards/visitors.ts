@@ -782,7 +782,8 @@ router.get("/pending-visitors", requireRole(UserRole.GUARD), async (req, res, ne
           },
         },
       },
-      orderBy: { checkInTime: "asc" },
+      // Newest first: the visitor the guard just added is at the top.
+      orderBy: { checkInTime: "desc" },
       take: ON_SITE_CAP,
     });
     if (pending.length === ON_SITE_CAP) {
