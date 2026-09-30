@@ -5,6 +5,7 @@ import {
   localDateKey,
   localDateKeysForLastDays,
   localHour,
+  startOfLocalCalendarDay,
   startOfLocalDayDaysAgo,
 } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -54,7 +55,21 @@ async function loadSupply(societyId: string, days: number) {
       return { gate, events, last, intervals: supplyIntervals(events, from, to, before) };
     }),
   );
-  return { from, to, perGate };
+  // Days before the first ever ON/OFF tap are "not tracked", not "no water".
+  const first = await prisma.waterSupplyEvent.findFirst({
+    where: { societyId },
+    orderBy: { createdAt: "asc" },
+    select: { createdAt: true },
+  });
+  const trackedFrom = first && first.createdAt > from ? first.createdAt : from;
+  const trackedDays = Math.min(
+    days,
+    Math.max(
+      1,
+      Math.round((startOfLocalCalendarDay(to).getTime() - startOfLocalCalendarDay(trackedFrom).getTime()) / 86_400_000) + 1,
+    ),
+  );
+  return { from, to, perGate, trackedFrom, trackedDays };
 }
 
 const minutesOf = (ivs: SupplyInterval[]) =>
@@ -71,7 +86,7 @@ router.get("/overview", async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
     const daysAgo = periodDays(req.query.days, 7);
-    const { from, to, perGate } = await loadSupply(societyId, daysAgo);
+    const { from, to, perGate, trackedFrom, trackedDays } = await loadSupply(societyId, daysAgo);
 
     const events = perGate.flatMap((g) => g.events);
     const intervals = perGate.flatMap((g) => g.intervals);
@@ -82,7 +97,7 @@ router.get("/overview", async (req, res, next) => {
       : 0;
 
     return res.json({
-      period: { days: daysAgo, startDate: from, endDate: to },
+      period: { days: daysAgo, startDate: from, endDate: to, trackedFrom, trackedDays },
       summary: {
         totalEvents: events.length,
         onEvents: events.filter((e) => isWaterTurnedOn(e)).length,
@@ -91,10 +106,11 @@ router.get("/overview", async (req, res, next) => {
         avgDurationMinutes: completed.length ? Math.round(minutesOf(completed) / completed.length) : 0,
         completedCycles: completed.length,
         supplyMinutes,
-        avgSupplyMinutesPerDay: Math.round(supplyMinutes / daysAgo),
+        /** Per tracked day: days before the first ever ON/OFF tap don't count. */
+        avgSupplyMinutesPerDay: Math.round(supplyMinutes / trackedDays),
         longestSupplyMinutes: longestRun,
-        /** Longest stretch without water in the period; null when no supply was logged. */
-        longestGapMinutes: intervals.length ? longestGapMinutes(intervals, from, to) : null,
+        /** Longest stretch without water since tracking began; null when no supply was logged. */
+        longestGapMinutes: intervals.length ? longestGapMinutes(intervals, trackedFrom, to) : null,
         runningNow: perGate.filter((g) => g.last && isWaterTurnedOn(g.last)).length,
       },
       gateStats: perGate
