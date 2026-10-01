@@ -1515,9 +1515,16 @@ router.delete(
 
       const villa = await prisma.villa.findFirst({
         where: { id: villaId, societyId },
-        select: { id: true, area: true, monthlyMaintenance: true },
+        select: { id: true, area: true, monthlyMaintenance: true, maintenanceExemptFromPeriod: true },
       });
       if (!villa) return res.status(404).json({ message: "Villa not found" });
+      // A villa with billing stopped stays out of every cycle until billing is resumed
+      // from the Villas page (which restores its cycles itself).
+      if (villa.maintenanceExemptFromPeriod && villa.maintenanceExemptFromPeriod <= cycle.periodKey) {
+        return res.status(409).json({
+          message: "Billing is stopped for this villa. Resume billing from the Villas page first.",
+        });
+      }
 
       const rule = await prisma.maintenanceCycleRule.findUnique({ where: { cycleId } });
       if (!rule) {

@@ -455,7 +455,7 @@ router.post(
 );
 
 // POST /api/villas/maintenance-enrollment - mark villas as paying / not paying maintenance.
-// Takes effect from next month's cycle; dues already raised stay payable.
+// Takes effect from the next collection cycle not yet created; dues already raised stay payable.
 router.post(
   "/maintenance-enrollment",
   requireAuth,
@@ -480,14 +480,25 @@ router.post(
       }
 
       const currentPeriod = localMonthKey(new Date());
-      const fromPeriod = nextMonthKey(currentPeriod);
+      // A month's cycle is created after the month ends (September's on ~1 October), so
+      // "from next calendar month" still billed a villa switched off during September for
+      // September. The change applies from the next cycle that has not been created yet.
+      const latestCycle = await prisma.maintenanceCollectionCycle.findFirst({
+        where: { societyId },
+        orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }],
+        select: { periodYear: true, periodMonth: true },
+      });
+      const fromPeriod = latestCycle
+        ? nextMonthKey(`${latestCycle.periodYear}-${String(latestCycle.periodMonth).padStart(2, "0")}`)
+        : currentPeriod;
       const changing = villas.filter((v) =>
         enrolled ? v.maintenanceExemptFromPeriod != null : v.maintenanceExemptFromPeriod == null,
       );
       const changingIds = changing.map((v) => v.id);
 
-      // A villa that was never billed has no dues to keep, so it stops from this month
-      // (e.g. a newly added villa); villas already billed stop from next month.
+      // A villa that was never billed has no dues to keep, so it stops from this month at
+      // the latest (e.g. a newly added villa); villas already billed stop from the next
+      // cycle not yet created.
       const billedVillaIds = new Set<string>();
       if (!enrolled && changingIds.length > 0) {
         const billed = await prisma.villaMaintenanceSnapshot.findMany({
@@ -497,8 +508,9 @@ router.post(
         });
         billed.forEach((s) => billedVillaIds.add(s.villaId));
       }
+      const neverBilledFrom = currentPeriod < fromPeriod ? currentPeriod : fromPeriod;
       const stopPeriodFor = (villaId: string) =>
-        billedVillaIds.has(villaId) ? fromPeriod : currentPeriod;
+        billedVillaIds.has(villaId) ? fromPeriod : neverBilledFrom;
 
       const futureCycleRowsUpdated = await prisma.$transaction(
         async (tx) => {
@@ -551,7 +563,7 @@ router.post(
 
       const effectiveFromPeriod =
         !enrolled && changingIds.length > 0 && changingIds.every((id) => !billedVillaIds.has(id))
-          ? currentPeriod
+          ? neverBilledFrom
           : fromPeriod;
 
       changingIds.forEach(invalidateReconcileCache);
