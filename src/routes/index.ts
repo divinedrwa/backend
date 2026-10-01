@@ -1,4 +1,6 @@
-import { Router } from "express";
+import { Router, type NextFunction, type Request, type Response } from "express";
+import { blockVisitorOnlyWrites } from "../lib/visitorOnlyAccess";
+import { requireAuth } from "../middlewares/auth";
 import authRoutes from "../modules/auth/routes";
 import legalRoutes from "../modules/legal/routes";
 import publicRoutes from "../modules/public/routes";
@@ -87,6 +89,23 @@ import guardPatrolsRoutes from "../modules/guards/patrols";
 import guardOperationsRoutes from "../modules/guards/operations";
 
 const router = Router();
+
+// Residents of a villa with billing stopped use the app for visitor management only. The app
+// hides these screens; refuse the matching writes too (complaints, amenity bookings, poll votes,
+// water requests) so older builds or direct API calls can't use them. Reads are left alone.
+router.use(
+  [
+    "/complaints",
+    "/amenity-bookings",
+    "/polls",
+    "/residents/complaints",
+    "/residents/book-amenity",
+    "/residents/water-requests",
+  ],
+  (req: Request, res: Response, next: NextFunction) =>
+    req.method === "POST" ? requireAuth(req, res, next) : next(),
+  blockVisitorOnlyWrites(["POST"]),
+);
 
 // Auth & public — specialized rate limits on top of global apiLimiter
 router.use("/public", applyRateLimitIfEnabled(publicLimiter), publicRoutes);

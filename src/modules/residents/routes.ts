@@ -21,7 +21,7 @@ import { validateBody } from "../../middlewares/validate";
 import { isCloudinaryConfigured, uploadProfileImageBuffer } from "../../services/cloudinaryProfile";
 import { MaintenanceBillingRole, UserRole, SOSStatus } from "@prisma/client";
 import { loadEarlyCycleExpensesPreview } from "./expense-early-cycle-preview";
-import { isVisitorOnlyResident } from "../../lib/visitorOnlyAccess";
+import { isVisitorOnlyForVilla } from "../../lib/visitorOnlyAccess";
 import {
   resolveFamilyMemberLinkedUserId,
 } from "../../lib/familyVisitorDelegation";
@@ -98,9 +98,9 @@ const RESIDENT_TYPE_LABEL: Record<string, string> = {
   FAMILY_MEMBER: "Family member",
 };
 
-function formatResidentMeResponse(user: Record<string, unknown>) {
+async function formatResidentMeResponse(user: Record<string, unknown>) {
   const villa = user.villa as
-    | { villaNumber?: string | null; block?: string | null; maintenanceExemptFromPeriod?: string | null }
+    | { id?: string | null; villaNumber?: string | null; block?: string | null; maintenanceExemptFromPeriod?: string | null }
     | null
     | undefined;
   const unit = user.unit as { label?: string | null } | null | undefined;
@@ -115,8 +115,9 @@ function formatResidentMeResponse(user: Record<string, unknown>) {
     propertyDisplayName: parts.length ? parts.join(" · ") : null,
     unitDisplayName: unit?.label ?? null,
     occupantRoleLabel: RESIDENT_TYPE_LABEL[rt] ?? rt,
-    // Residents of a villa that doesn't pay maintenance get the visitor features only.
-    visitorOnlyAccess: isVisitorOnlyResident(user.role, villa?.maintenanceExemptFromPeriod),
+    // Residents of a villa that does not pay maintenance get the visitor features only,
+    // once dues raised before billing stopped are paid (until then they can still pay them).
+    visitorOnlyAccess: await isVisitorOnlyForVilla(user.role, villa),
   };
 }
 
@@ -468,7 +469,7 @@ async function updateResidentProfile(req: Request, res: Response, next: NextFunc
 
     return res.json({
       message: "Profile updated successfully",
-      user: formatResidentMeResponse(user as Record<string, unknown>),
+      user: await formatResidentMeResponse(user as Record<string, unknown>),
     });
   } catch (error) {
     next(error);
@@ -489,7 +490,7 @@ router.get("/me", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async (req, re
       return res.status(404).json({ message: "Profile not found" });
     }
 
-    return res.json({ user: formatResidentMeResponse(user as Record<string, unknown>) });
+    return res.json({ user: await formatResidentMeResponse(user as Record<string, unknown>) });
   } catch (error) {
     next(error);
   }
