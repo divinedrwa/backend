@@ -16,6 +16,7 @@ import { prisma } from "../../lib/prisma";
 import { parseMonthYearFromQuery } from "../../lib/societyTime";
 import {
   ensureVillaLedgersAligned,
+  NOT_ENROLLED_EXCLUSION_REASON,
   syncBillingUserCyclePaymentsFromSnapshot,
   syncVillaBillingCyclesFromSnapshots,
 } from "../billing-cycle/billing-collection-link";
@@ -1046,7 +1047,7 @@ router.get("/year-report/:year", async (req, res, next) => {
         // that have neither Maintenance records nor snapshots.
         prisma.villa.findMany({
           where: { societyId },
-          select: { monthlyMaintenance: true },
+          select: { monthlyMaintenance: true, maintenanceExemptFromPeriod: true },
         }),
       ]);
 
@@ -1093,11 +1094,18 @@ router.get("/year-report/:year", async (req, res, next) => {
     }
 
     // Fallback: sum of current villa.monthlyMaintenance (only used when
-    // neither historical source has data for a month).
-    const currentMonthlyTotal = villas.reduce(
-      (sum, v) => sum + Number(v.monthlyMaintenance),
-      0
-    );
+    // neither historical source has data for a month). Villas with billing
+    // stopped on or before the month are not billed, so they are left out.
+    const currentMonthlyTotalFor = (month: number) => {
+      const periodKey = `${year}-${String(month).padStart(2, "0")}`;
+      return villas.reduce(
+        (sum, v) =>
+          v.maintenanceExemptFromPeriod != null && v.maintenanceExemptFromPeriod <= periodKey
+            ? sum
+            : sum + Number(v.monthlyMaintenance),
+        0
+      );
+    };
 
     // Build per-month collected totals from payments.
     const collectedByMonth = new Map<number, number>();
@@ -1121,7 +1129,7 @@ router.get("/year-report/:year", async (req, res, next) => {
       const hasSnapshot = expectedFromSnapshots.has(month);
       const totalAmount = hasSnapshot
         ? expectedFromSnapshots.get(month)!
-        : (expectedFromMaintenance.get(month) ?? currentMonthlyTotal);
+        : (expectedFromMaintenance.get(month) ?? currentMonthlyTotalFor(month));
 
       // When snapshots exist, use snapshot paidAmount (reconciled) for
       // collected; otherwise fall back to raw MaintenancePayment sums.
@@ -1270,6 +1278,42 @@ router.get("/shortfall/:fyId", async (req, res, next) => {
   }
 });
 
+/** Billing stop / resume records for one villa, newest first (from the admin audit log). */
+async function loadVillaBillingChanges(societyId: string, villaId: string, villaNumber: string) {
+  const rows = await prisma.adminAuditLog.findMany({
+    where: {
+      societyId,
+      entityType: "Villa",
+      action: { in: ["VILLA_MAINTENANCE_UNENROLLED", "VILLA_MAINTENANCE_ENROLLED"] },
+      // Bulk changes made before per-villa entries were logged without an entityId.
+      OR: [{ entityId: villaId }, { entityId: null }],
+    },
+    orderBy: { createdAt: "desc" },
+    take: 100,
+    select: { action: true, entityId: true, metadata: true, createdAt: true, admin: { select: { name: true } } },
+  });
+  const num = (v: unknown) => (typeof v === "number" ? v : null);
+  return rows
+    .filter((r) => {
+      if (r.entityId === villaId) return true;
+      const meta = r.metadata as { villaNumbers?: unknown } | null;
+      return Array.isArray(meta?.villaNumbers) && meta.villaNumbers.includes(villaNumber);
+    })
+    .slice(0, 50)
+    .map((r) => {
+      const meta = (r.metadata ?? {}) as Record<string, unknown>;
+      return {
+        action: r.action === "VILLA_MAINTENANCE_UNENROLLED" ? ("STOPPED" as const) : ("RESUMED" as const),
+        fromPeriod: typeof meta.effectiveFromPeriod === "string" ? meta.effectiveFromPeriod : null,
+        reason: typeof meta.reason === "string" ? meta.reason : null,
+        oldDues: num(meta.oldDues),
+        advanceCredit: num(meta.advanceCredit),
+        at: r.createdAt,
+        by: r.admin?.name ?? null,
+      };
+    });
+}
+
 // GET /api/maintenance-management/villa-history/:villaId
 // Get complete payment history for a villa (snapshots + legacy maintenance rows).
 router.get("/villa-history/:villaId", async (req, res, next) => {
@@ -1287,6 +1331,8 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
         block: true,
         ownerName: true,
         monthlyMaintenance: true,
+        maintenanceExemptFromPeriod: true,
+        maintenanceExemptReason: true,
       },
     });
 
@@ -1294,7 +1340,7 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
       return res.status(404).json({ message: "Villa not found" });
     }
 
-    const [snapshots, maintenanceRecords, payments] = await Promise.all([
+    const [snapshots, maintenanceRecords, payments, stoppedCycles, billingChanges] = await Promise.all([
       prisma.villaMaintenanceSnapshot.findMany({
         where: { villaId, cycle: { societyId } },
         include: {
@@ -1330,7 +1376,14 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
         orderBy: [{ year: "desc" }, { month: "desc" }],
         take: 48,
       }),
+      // Months skipped because billing was stopped for this villa.
+      prisma.cycleVillaExclusion.findMany({
+        where: { villaId, reason: NOT_ENROLLED_EXCLUSION_REASON, cycle: { societyId } },
+        select: { cycleId: true },
+      }),
+      loadVillaBillingChanges(societyId, villaId, villa.villaNumber),
     ]);
+    const stoppedCycleIds = new Set(stoppedCycles.map((e) => e.cycleId));
 
     type HistoryRow = {
       year: number;
@@ -1369,7 +1422,10 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
         receiptNumber: latestPayment?.receiptNumber ?? null,
         paymentMode: latestPayment?.paymentMode ?? null,
         transactionId: latestPayment?.transactionId ?? null,
-        cycleTitle: snap.cycle.title,
+        // Older app builds only show the title, so the reason a month is ₹0 goes there.
+        cycleTitle: stoppedCycleIds.has(snap.cycleId)
+          ? `${snap.cycle.title} · Billing stopped`
+          : snap.cycle.title,
       });
     }
 
@@ -1421,6 +1477,7 @@ router.get("/villa-history/:villaId", async (req, res, next) => {
     return res.json({
       villa,
       history,
+      billingChanges,
       statistics: {
         totalPayments: payments.length,
         totalPaid,

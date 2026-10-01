@@ -54,7 +54,7 @@ function parseMoney(raw: string): number | null {
   return Number.isFinite(n) ? n : null;
 }
 
-/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: defaultFloor (0 = ground, 1 = first, …; header may be defaultFloor, default_floor, Default Floor, etc.), ownerUsername, ownerPassword. Suggested occupant units are created from `floors` (1 → GF only, 2 → GF+FF, 3 → GF+FF+SF, etc.). */
+/** POST /api/import/villas-csv — CSV columns: villaNumber,floors,area,block,ownerName,ownerEmail,ownerPhone,monthlyMaintenance — optional: defaultFloor (0 = ground, 1 = first, …; header may be defaultFloor, default_floor, Default Floor, etc.), ownerUsername, ownerPassword, billingStoppedFrom ("YYYY-MM", villa not billed from that month), billingStopReason. Suggested occupant units are created from `floors` (1 → GF only, 2 → GF+FF, 3 → GF+FF+SF, etc.). */
 router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
   try {
     const buf = req.file?.buffer;
@@ -133,6 +133,15 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
         defaultFloorIndex = Math.floor(df);
       }
 
+      // Optional (as written by the villas export): month from which the villa is not billed.
+      const billingStoppedFrom = getCsvFieldLoose(r, "billingStoppedFrom").trim();
+      if (billingStoppedFrom && !/^\d{4}-(0[1-9]|1[0-2])$/.test(billingStoppedFrom)) {
+        result.errors.push({ line, message: "billingStoppedFrom must be a month like 2026-09, or blank" });
+        result.skipped++;
+        continue;
+      }
+      const billingStopReason = getCsvFieldLoose(r, "billingStopReason").trim().slice(0, 200);
+
       const areaVal = parseMoney(r.area ?? "");
       const maintenance = parseMoney(r.monthlyMaintenance ?? "");
       if (maintenance == null || maintenance <= 0) {
@@ -166,6 +175,13 @@ router.post("/villas-csv", upload.single("file"), async (req, res, next) => {
               ownerEmail: r.ownerEmail?.trim() || undefined,
               ownerPhone: r.ownerPhone?.trim() || undefined,
               monthlyMaintenance: maintenance,
+              // A new villa is in no cycle yet; cycles created from this month on leave it out.
+              ...(billingStoppedFrom
+                ? {
+                    maintenanceExemptFromPeriod: billingStoppedFrom,
+                    maintenanceExemptReason: billingStopReason || "Imported from CSV",
+                  }
+                : {}),
             },
           });
           await ensureBillingAccountForProperty(tx, { societyId, villaId: v.id });

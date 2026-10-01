@@ -15,6 +15,7 @@ import {
   restoreReenrolledVillaCycles,
 } from "../billing-cycle/billing-collection-link";
 import { invalidateReconcileCache } from "../billing-cycle/services/resident-pending-dues";
+import { getVillaCreditBalancesBulk } from "../maintenance-management/credit-walker";
 import { RESIDENT_LIKE_ROLES } from "../../lib/residentLike";
 import { validateBody } from "../../middlewares/validate";
 import { auditFromRequest } from "../../services/audit.service";
@@ -104,10 +105,70 @@ const bulkMaintenanceAmountSchema = z.object({
     .default([]),
 });
 
-const maintenanceEnrollmentSchema = z.object({
+const maintenanceEnrollmentSchema = z
+  .object({
+    villaIds: z.array(z.string().min(1)).min(1).max(500),
+    enrolled: z.boolean(),
+    /** Why billing stops (vacant, under construction, …) — required when stopping. */
+    reason: z.string().trim().max(200).optional(),
+  })
+  .refine((b) => b.enrolled || (b.reason?.length ?? 0) >= 2, {
+    message: "A reason is required to stop billing",
+    path: ["reason"],
+  });
+
+const enrollmentPreviewSchema = z.object({
   villaIds: z.array(z.string().min(1)).min(1).max(500),
-  enrolled: z.boolean(),
 });
+
+/** First collection period a stop/resume made now applies to: the next cycle not yet created. */
+async function nextUncreatedCyclePeriod(societyId: string): Promise<string> {
+  const latestCycle = await prisma.maintenanceCollectionCycle.findFirst({
+    where: { societyId },
+    orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }],
+    select: { periodYear: true, periodMonth: true },
+  });
+  return latestCycle
+    ? nextMonthKey(`${latestCycle.periodYear}-${String(latestCycle.periodMonth).padStart(2, "0")}`)
+    : localMonthKey(new Date());
+}
+
+/**
+ * What stopping billing leaves behind per villa: dues already raised (stay payable), advance
+ * credit on record (kept; used when billing resumes) and residents who become visitor-only
+ * once those dues are cleared.
+ */
+async function loadEnrollmentImpact(societyId: string, villaIds: string[]) {
+  const [openSnapshots, credits, residents] = await Promise.all([
+    prisma.villaMaintenanceSnapshot.findMany({
+      where: { villaId: { in: villaIds }, cycle: { societyId }, status: { notIn: ["PAID", "WAIVED"] } },
+      select: { villaId: true, expectedAmount: true, lateFeeAmount: true, paidAmount: true },
+    }),
+    getVillaCreditBalancesBulk(prisma, { societyId }),
+    prisma.user.groupBy({
+      by: ["villaId"],
+      where: { societyId, villaId: { in: villaIds }, role: UserRole.RESIDENT, isActive: true },
+      _count: { _all: true },
+    }),
+  ]);
+  const oldDues = new Map<string, number>();
+  for (const s of openSnapshots) {
+    const remaining = Number(s.expectedAmount) + Number(s.lateFeeAmount ?? 0) - Number(s.paidAmount);
+    if (remaining > 0) oldDues.set(s.villaId, (oldDues.get(s.villaId) ?? 0) + remaining);
+  }
+  const residentCount = new Map(residents.map((r) => [r.villaId, r._count._all]));
+  const round = (n: number) => Math.round(n * 100) / 100;
+  return new Map(
+    villaIds.map((id) => [
+      id,
+      {
+        oldDues: round(oldDues.get(id) ?? 0),
+        advanceCredit: round(Math.max(0, credits.get(id) ?? 0)),
+        residents: residentCount.get(id) ?? 0,
+      },
+    ]),
+  );
+}
 
 function nextMonthKey(monthKey: string): string {
   const [y, m] = monthKey.split("-").map(Number);
@@ -454,6 +515,36 @@ router.post(
   }
 );
 
+// POST /api/villas/maintenance-enrollment/preview - what stopping billing would leave per villa
+// (old dues, advance credit, residents affected) so the admin sees it before confirming.
+router.post(
+  "/maintenance-enrollment/preview",
+  requireAuth,
+  requireRole(UserRole.ADMIN),
+  validateBody(enrollmentPreviewSchema),
+  async (req, res, next) => {
+    try {
+      const { societyId } = req.auth!;
+      const ids = [...new Set((req.body as z.infer<typeof enrollmentPreviewSchema>).villaIds)];
+      const villas = await prisma.villa.findMany({
+        where: { societyId, id: { in: ids } },
+        select: { id: true, villaNumber: true, block: true },
+      });
+      const villaIds = villas.map((v) => v.id);
+      const [fromPeriod, impact] = await Promise.all([
+        nextUncreatedCyclePeriod(societyId),
+        loadEnrollmentImpact(societyId, villaIds),
+      ]);
+      return res.json({
+        fromPeriod,
+        villas: villas.map((v) => ({ villaId: v.id, villaNumber: v.villaNumber, block: v.block, ...impact.get(v.id)! })),
+      });
+    } catch (error) {
+      next(error);
+    }
+  },
+);
+
 // POST /api/villas/maintenance-enrollment - mark villas as paying / not paying maintenance.
 // Takes effect from the next collection cycle not yet created; dues already raised stay payable.
 router.post(
@@ -464,7 +555,7 @@ router.post(
   async (req, res, next) => {
     try {
       const { societyId, userId } = req.auth!;
-      const { villaIds, enrolled } = req.body as z.infer<typeof maintenanceEnrollmentSchema>;
+      const { villaIds, enrolled, reason } = req.body as z.infer<typeof maintenanceEnrollmentSchema>;
       const ids = [...new Set(villaIds)];
 
       const villas = await prisma.villa.findMany({
@@ -483,14 +574,7 @@ router.post(
       // A month's cycle is created after the month ends (September's on ~1 October), so
       // "from next calendar month" still billed a villa switched off during September for
       // September. The change applies from the next cycle that has not been created yet.
-      const latestCycle = await prisma.maintenanceCollectionCycle.findFirst({
-        where: { societyId },
-        orderBy: [{ periodYear: "desc" }, { periodMonth: "desc" }],
-        select: { periodYear: true, periodMonth: true },
-      });
-      const fromPeriod = latestCycle
-        ? nextMonthKey(`${latestCycle.periodYear}-${String(latestCycle.periodMonth).padStart(2, "0")}`)
-        : currentPeriod;
+      const fromPeriod = await nextUncreatedCyclePeriod(societyId);
       const changing = villas.filter((v) =>
         enrolled ? v.maintenanceExemptFromPeriod != null : v.maintenanceExemptFromPeriod == null,
       );
@@ -526,7 +610,7 @@ router.post(
               const [year, month] = period.split("-").map(Number);
               await tx.villa.updateMany({
                 where: { id: { in: groupIds } },
-                data: { maintenanceExemptFromPeriod: period },
+                data: { maintenanceExemptFromPeriod: period, maintenanceExemptReason: reason ?? null },
               });
               const futureCycles = await tx.maintenanceCollectionCycle.findMany({
                 where: {
@@ -553,7 +637,7 @@ router.post(
             }
             await tx.villa.updateMany({
               where: { id: { in: changingIds } },
-              data: { maintenanceExemptFromPeriod: null },
+              data: { maintenanceExemptFromPeriod: null, maintenanceExemptReason: null },
             });
           }
           return rows;
@@ -568,18 +652,24 @@ router.post(
 
       changingIds.forEach(invalidateReconcileCache);
       if (changingIds.length > 0) {
-        auditFromRequest(req, {
-          societyId,
-          adminId: userId,
-          action: enrolled ? "VILLA_MAINTENANCE_ENROLLED" : "VILLA_MAINTENANCE_UNENROLLED",
-          entityType: "Villa",
-          entityId: changingIds.length === 1 ? changingIds[0] : null,
-          metadata: {
-            villaNumbers: changing.map((v) => v.villaNumber),
-            effectiveFromPeriod,
-            futureCycleRowsUpdated,
-          },
-        });
+        // One entry per villa so each villa's history shows its own stop / resume record,
+        // with the dues and advance credit it had at that moment.
+        const impact = enrolled ? null : await loadEnrollmentImpact(societyId, changingIds);
+        for (const v of changing) {
+          auditFromRequest(req, {
+            societyId,
+            adminId: userId,
+            action: enrolled ? "VILLA_MAINTENANCE_ENROLLED" : "VILLA_MAINTENANCE_UNENROLLED",
+            entityType: "Villa",
+            entityId: v.id,
+            metadata: {
+              villaNumbers: [v.villaNumber],
+              effectiveFromPeriod: enrolled ? fromPeriod : stopPeriodFor(v.id),
+              ...(enrolled ? {} : { reason, ...impact?.get(v.id) }),
+              batchSize: changing.length,
+            },
+          });
+        }
       }
 
       return res.json({

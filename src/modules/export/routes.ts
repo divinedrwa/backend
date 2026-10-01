@@ -66,6 +66,9 @@ router.get("/villas-csv", async (req, res, next) => {
       "defaultFloor",
       "ownerUsername",
       "ownerPassword",
+      // "YYYY-MM" from which the villa is not billed (blank = pays maintenance), and why.
+      "billingStoppedFrom",
+      "billingStopReason",
     ];
 
     const rows = villas.map((v) => {
@@ -88,6 +91,8 @@ router.get("/villas-csv", async (req, res, next) => {
         defaultFloor,
         "",
         "",
+        v.maintenanceExemptFromPeriod ?? "",
+        v.maintenanceExemptReason ?? "",
       ];
     });
 
