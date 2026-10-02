@@ -279,11 +279,9 @@ async function sendVisitorNotifications(
       case VisitorTransitionType.GUARD_CHECKOUT:
       case VisitorTransitionType.AUTO_CHECKOUT:
         title = "Visitor Checked Out";
-        body =
-          transition.fromStatus === VisitorStatus.PENDING_APPROVAL ||
-          transition.fromStatus === VisitorStatus.APPROVED
-            ? `${visitor.name} left the gate without entering`
-            : `${visitor.name} has left`;
+        // Guards can mark exit on any open visit — often the visitor was let in while the
+        // household hadn't answered yet — so the message is the same whatever the status.
+        body = `${visitor.name} has left`;
         notificationType = "VISITOR_CHECKED_OUT";
         break;
 
