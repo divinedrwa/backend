@@ -1,0 +1,84 @@
+name: CI
+
+# Runs on every push to main and on pull requests. In Render, set Auto-Deploy to
+# "After CI checks pass" so a failing check stops the deploy (see docs/DEPLOY_CHECKLIST.md).
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  checks:
+    name: Type check, lint, tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      NODE_ENV: test
+      # Unit tests mock the database. This address cannot connect, so a test that
+      # reaches for a real database fails instead of touching live data.
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:1/ci
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:1/ci
+      JWT_SECRET: ci-only-secret-not-used-anywhere-else-0123456789
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      - run: npx prisma generate
+      - name: Type check
+        run: npm run typecheck
+      - name: Lint
+        run: npm run lint
+      - name: Migration safety (no DROP TABLE / TRUNCATE)
+        run: npm run verify:migrations-safe
+      - name: Tests
+        run: npm test
+
+  migrations:
+    name: Migrations apply on a fresh database
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ci
+          POSTGRES_PASSWORD: ci
+          POSTGRES_DB: ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DATABASE_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+      DIRECT_URL: postgresql://ci:ci@127.0.0.1:5432/ci
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: npm ci
+      # A new migration that cannot run on an empty database (or breaks an earlier
+      # one) is caught here, before it reaches Render's pre-deploy step.
+      - name: Apply every migration to a fresh database
+        run: npx prisma migrate deploy
+      # Fails when schema.prisma has a change that no migration creates — the cause of
+      # "column does not exist" outages. Informational until the two known differences
+      # (Parcel.status default, Vehicle.villaId foreign key) are resolved against production;
+      # then remove `continue-on-error` to make it blocking.
+      - name: Schema matches migrations
+        continue-on-error: true
+        run: npx prisma migrate diff --from-url "$DATABASE_URL" --to-schema-datamodel prisma/schema.prisma --exit-code
