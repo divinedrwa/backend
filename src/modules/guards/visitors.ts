@@ -23,6 +23,7 @@ import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 import { findActiveGuardShift } from "../../lib/guardShiftActive";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
+import { occupiedFloorsOfVilla } from "./visitFlatTargets";
 import { expectedCheckoutAtForVisitorType } from "../../lib/visitorTypePresets";
 import {
   hashVisitorPublicPassToken,
@@ -179,6 +180,31 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
 
     type VisitRow = { villaId: string; unitId: string; residentUserId: string | null };
     const visitRows: VisitRow[] = [];
+    // One visit row per (flat, floor): a floor chosen twice must not collide on the unique key.
+    const visitRowKeys = new Set<string>();
+    // Residents to ask who have no floor assigned (no floor row can reach them).
+    const extraNotifyTargets: VisitorApprovalTarget[] = [];
+    const addVisitRow = (row: VisitRow): void => {
+      const key = `${row.villaId}:${row.unitId}`;
+      if (visitRowKeys.has(key)) {
+        if (row.residentUserId) {
+          extraNotifyTargets.push({ villaId: row.villaId, residentUserId: row.residentUserId });
+        }
+        return;
+      }
+      visitRowKeys.add(key);
+      visitRows.push(row);
+    };
+    /**
+     * Flat only (no floor, no person): ask every floor that has someone living there, not just the
+     * flat's default floor. Returns false when nobody has a floor, so the default floor is used.
+     */
+    const addFlatWideRows = async (villaId: string): Promise<boolean> => {
+      const { unitIds, unplacedResidentIds } = await occupiedFloorsOfVilla(prisma, { societyId, villaId });
+      for (const rid of unplacedResidentIds) extraNotifyTargets.push({ villaId, residentUserId: rid });
+      for (const unitId of unitIds) addVisitRow({ villaId, unitId, residentUserId: null });
+      return unitIds.length > 0;
+    };
 
     if (visitTargets?.length) {
       for (const t of visitTargets) {
@@ -227,6 +253,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
             unitId = resolved;
           }
         } else {
+          if (await addFlatWideRows(t.villaId)) continue;
           const resolved = await getOrCreateDefaultUnitIdForVilla({
             societyId,
             villaId: t.villaId,
@@ -239,7 +266,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
           }
           unitId = resolved;
         }
-        visitRows.push({
+        addVisitRow({
           villaId: t.villaId,
           unitId,
           residentUserId: t.residentUserId?.trim() || null,
@@ -257,6 +284,7 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
         });
       }
       for (const villaId of uniqueVillaIds) {
+        if (await addFlatWideRows(villaId)) continue;
         const resolved = await getOrCreateDefaultUnitIdForVilla({ societyId, villaId });
         if (!resolved) {
           return res.status(400).json({
@@ -264,17 +292,20 @@ router.post("/visitor-checkin", requireRole(UserRole.GUARD), validateBody(checkI
               "One or more properties have no occupant units. Add at least one unit per villa before check-in.",
           });
         }
-        visitRows.push({ villaId, unitId: resolved, residentUserId: null });
+        addVisitRow({ villaId, unitId: resolved, residentUserId: null });
       }
     }
 
     const uniqueVillaIds = [...new Set(visitRows.map((r) => r.villaId))];
 
-    const notifyTargets: VisitorApprovalTarget[] = visitRows.map((r) => ({
-      villaId: r.villaId,
-      unitId: r.residentUserId ? undefined : r.unitId,
-      residentUserId: r.residentUserId ?? undefined,
-    }));
+    const notifyTargets: VisitorApprovalTarget[] = [
+      ...visitRows.map((r) => ({
+        villaId: r.villaId,
+        unitId: r.residentUserId ? undefined : r.unitId,
+        residentUserId: r.residentUserId ?? undefined,
+      })),
+      ...extraNotifyTargets,
+    ];
 
     const society = await prisma.society.findUnique({
       where: { id: societyId },
