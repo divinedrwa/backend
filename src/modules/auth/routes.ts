@@ -43,14 +43,17 @@ import { sendPasswordResetEmail } from "../../services/email.service";
 const router = Router();
 
 /**
- * Rate limit credential checks per IP. Tuned for human typing rate, not
- * automated stuffing: 20 attempts / 15 min returns 429. Combined with
- * `app.set("trust proxy", 1)`, the limiter sees the real client IP behind
- * the standard one-hop reverse proxy.
+ * Rate limit failed credential checks per IP. An IP address is shared by everyone on a society's
+ * Wi-Fi (or a mobile carrier), so this only has to stop one address spraying many accounts: 60
+ * failures / 15 min. Successful logins are not counted — counting them used to lock a whole
+ * society out after 20 sign-ins in 15 minutes (e.g. rollout day). Per-account brute force is
+ * handled by `lib/loginThrottle`. With `app.set("trust proxy", 1)` the limiter sees the real
+ * client IP behind the one-hop reverse proxy.
  */
 const loginRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  limit: 20,
+  limit: 60,
+  skipSuccessfulRequests: true,
   standardHeaders: "draft-7",
   legacyHeaders: false,
   message: {

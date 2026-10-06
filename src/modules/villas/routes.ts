@@ -6,6 +6,7 @@ import {
   syncVillaOccupantUnits,
 } from "../../lib/propertyInfrastructure";
 import { getPagination, paginationMeta } from "../../lib/pagination";
+import { resolveVillaListPagination } from "./listPagination";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { Prisma, UserRole } from "@prisma/client";
@@ -179,8 +180,8 @@ function nextMonthKey(monthKey: string): string {
 // ?maintenance=paying|not_paying filters by maintenance enrollment)
 router.get("/", requireAuth, async (req, res, next) => {
   try {
-    const { societyId } = req.auth!;
-    const pagination = getPagination(req);
+    const { societyId, role } = req.auth!;
+    const pagination = resolveVillaListPagination(role, req.query, getPagination(req));
 
     const rawSearch =
       typeof req.query.search === "string"

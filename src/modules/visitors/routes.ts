@@ -3,6 +3,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { getPagination, paginationMeta } from "../../lib/pagination";
 import { getOrCreateDefaultUnitIdForVilla } from "../../lib/propertyInfrastructure";
+import { occupiedFloorsOfVilla } from "../guards/visitFlatTargets";
 import { prisma } from "../../lib/prisma";
 import { localDayRange } from "../../lib/societyTime";
 import { requireAuth, requireRole } from "../../middlewares/auth";
@@ -169,17 +170,30 @@ router.post(
 
       const villaVisitsCreate: { villaId: string; unitId: string; notifiedAt: Date }[] = [];
       for (const villaId of body.villaIds) {
-        const unitId = await getOrCreateDefaultUnitIdForVilla({
+        // One row per floor with a resident, so residents on every floor see the visit — not
+        // only those on the flat's default floor. A flat nobody lives on falls back to the default.
+        const { unitIds } = await occupiedFloorsOfVilla(prisma, {
           societyId: req.auth!.societyId,
           villaId,
         });
-        if (!unitId) {
-          return res.status(400).json({
-            message:
-              "One or more properties have no occupant units. Add at least one unit per villa (e.g. Ground floor / First floor) before checking in visitors.",
-          });
+        const floors =
+          unitIds.length > 0
+            ? unitIds
+            : [
+                await getOrCreateDefaultUnitIdForVilla({
+                  societyId: req.auth!.societyId,
+                  villaId,
+                }),
+              ];
+        for (const unitId of floors) {
+          if (!unitId) {
+            return res.status(400).json({
+              message:
+                "One or more properties have no occupant units. Add at least one unit per villa (e.g. Ground floor / First floor) before checking in visitors.",
+            });
+          }
+          villaVisitsCreate.push({ villaId, unitId, notifiedAt: new Date() });
         }
-        villaVisitsCreate.push({ villaId, unitId, notifiedAt: new Date() });
       }
 
       if (body.gateId) {

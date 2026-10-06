@@ -16,6 +16,8 @@
 import rateLimit, { ipKeyGenerator, type Options } from 'express-rate-limit';
 import type { Request, Response, NextFunction } from 'express';
 import { logger } from '../lib/logger';
+import { readBearerOrCookieToken } from '../lib/tenantAuthCookie';
+import { verifyAuthToken } from '../utils/jwt';
 
 /**
  * Paths the global apiLimiter must not touch:
@@ -41,9 +43,24 @@ function skipGlobalLimiter(req: Request): boolean {
  * `req.ip` is rejected by v8 validation and lets IPv6 clients rotate addresses
  * within a subnet to bypass the limit.
  */
-function userOrIpKey(req: Request): string {
+export function userOrIpKey(req: Request): string {
   const auth = (req as Request & { auth?: { userId?: string } }).auth;
-  return auth?.userId || ipKeyGenerator(req.ip || 'unknown');
+  if (auth?.userId) return auth.userId;
+
+  // The global limiter runs before authentication, so `req.auth` is never set here and every
+  // request used to be counted per IP: everyone on one society Wi-Fi (or one mobile-carrier
+  // address) shared a single budget. Identify the caller from a valid token instead. A missing,
+  // expired or forged token falls back to the IP, so it cannot be used to dodge the limit.
+  try {
+    const token = readBearerOrCookieToken(req.headers.authorization, req.headers.cookie);
+    if (token) {
+      const payload = verifyAuthToken(token);
+      if (typeof payload?.userId === 'string' && payload.userId) return payload.userId;
+    }
+  } catch {
+    // invalid token: count against the IP below
+  }
+  return ipKeyGenerator(req.ip || 'unknown');
 }
 
 /**
@@ -85,13 +102,15 @@ function createLimiter(config: {
 /**
  * AUTH LIMITER - Prevents brute force login attacks
  * 
- * Limit: 10 failed login attempts per 15 minutes
- * Why generous: Prevents brute force while allowing legitimate users who forget password
- * Risk: ZERO - Only blocks rapid-fire login attempts (bots)
+ * Limit: 100 failed auth requests per IP per 15 minutes
+ * This is a ceiling per IP *address*, which a whole society shares on one Wi-Fi (or a mobile
+ * carrier shares across customers), so it must be far above what a few people mistyping
+ * passwords on rollout day produce. The real brute-force protection is per account
+ * (`lib/loginThrottle`: 5 failures → 1 min lockout, growing to 30 min).
  */
 export const authLimiter = createLimiter({
   windowMs: 15 * 60 * 1000, // 15 minutes
-  max: 10, // 10 attempts (was 5, increased for safety)
+  max: 100,
   skipSuccessfulRequests: true, // Don't penalize successful logins
   message: 'Too many login attempts. Please try again in 15 minutes.',
 });
