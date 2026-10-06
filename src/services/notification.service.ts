@@ -5,6 +5,29 @@ import { NotificationCategory, UserRole } from "@prisma/client";
 import { RESIDENT_LIKE_ROLES } from "../lib/residentLike";
 import { isCategoryMutable } from "../lib/notificationPreferences";
 import { withoutVisitorOnlyRecipients } from "../lib/visitorOnlyAccess";
+import { preparePushText, callerHint } from "../lib/pushText";
+
+/**
+ * The payload with readable text, or null when it has none. A push with no words reaches the phone as a placeholder
+ * notification ("Notification" / "Notification"), so it is neither sent nor stored; the log names who asked for it.
+ */
+function readablePayload(payload: NotificationPayload, where: string, extra?: Record<string, unknown>): NotificationPayload | null {
+  const text = preparePushText(payload);
+  if (!text) {
+    logger.error(
+      { where, dataType: payload.data?.type, dataKeys: payload.data ? Object.keys(payload.data) : [], caller: callerHint(), ...extra },
+      "Push dropped: it had no title and no body (it would have shown as a blank \"Notification\")",
+    );
+    return null;
+  }
+  if (text.title !== payload.title || text.body !== payload.body) {
+    logger.warn(
+      { where, dataType: payload.data?.type, hadTitle: Boolean(payload.title?.trim()), hadBody: Boolean(payload.body?.trim()), caller: callerHint(), ...extra },
+      "Push text was empty or invisible in part; filled in",
+    );
+  }
+  return { ...payload, title: text.title, body: text.body };
+}
 
 // Initialize Firebase Admin SDK (if not already initialized).
 // Prefer FIREBASE_SERVICE_ACCOUNT_JSON from .env (dotenv must load before this module — see app.ts).
@@ -76,6 +99,9 @@ export class NotificationService {
     payload: NotificationPayload,
     options?: SendToUserOptions,
   ): Promise<void> {
+    const safe = readablePayload(payload, "sendToUser", { userId, category: options?.category });
+    if (!safe) return;
+    payload = safe;
     try {
       logger.debug({
         targetUserId: userId,
@@ -186,6 +212,9 @@ export class NotificationService {
     options?: SendToUserOptions,
   ): Promise<void> {
     if (userIds.length === 0) return;
+    const safe = readablePayload(payload, "sendToUsers", { userCount: userIds.length, category: options?.category });
+    if (!safe) return;
+    payload = safe;
     userIds = await withoutVisitorOnlyRecipients(userIds, options?.category, payload.data);
     if (userIds.length === 0) return;
     logger.info({ userCount: userIds.length }, "Sending notification to users (bulk)");
@@ -340,6 +369,9 @@ export class NotificationService {
       logger.warn("No push tokens provided");
       return;
     }
+    const safe = readablePayload(payload, "sendToTokens", { tokenCount: tokens.length });
+    if (!safe) return;
+    payload = safe;
 
     /** Firebase `sendEachForMulticast` allows at most 500 registration tokens per call. */
     const FCM_MULTICAST_MAX = 500;
@@ -454,6 +486,9 @@ export class NotificationService {
     topic: string,
     payload: NotificationPayload
   ): Promise<void> {
+    const safe = readablePayload(payload, "sendToTopic", { topic });
+    if (!safe) return;
+    payload = safe;
     try {
       logger.info({ topic }, "Sending notification to topic");
 
@@ -639,6 +674,9 @@ export async function deliverNoticeNotificationsToResidents(params: {
   /** Defaults to NOTICE (notice board). Use BROADCAST for society-wide banners / campaigns. */
   category?: NotificationCategory;
 }): Promise<{ residentCount: number; deviceTokensSent: number }> {
+  const safeText = readablePayload({ title: params.title, body: params.body, data: params.data }, "deliverNoticeNotificationsToResidents", { societyId: params.societyId, category: params.category });
+  if (!safeText) return { residentCount: 0, deviceTokensSent: 0 };
+  params = { ...params, title: safeText.title, body: safeText.body };
   const userIds = await withoutVisitorOnlyRecipients(
     [...new Set(params.userIds)],
     params.category ?? NotificationCategory.NOTICE,
