@@ -2,6 +2,7 @@ import { Router } from "express";
 import { prisma } from "../../lib/prisma";
 import { requireAuth, requireRole } from "../../middlewares/auth";
 import { ParcelStatus, UserRole } from "@prisma/client";
+import { parcelVisibleToResidentWhere } from "../../lib/parcelAudience";
 
 const router = Router();
 
@@ -16,7 +17,7 @@ router.get("/my-parcels", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user || !user.villaId) {
@@ -27,6 +28,7 @@ router.get("/my-parcels", requireRole(UserRole.RESIDENT, UserRole.ADMIN), async 
       where: {
         villaId: user.villaId,
         societyId,
+        ...parcelVisibleToResidentWhere(user.unitId),
         ...(status && { status: status as ParcelStatus }),
       },
       orderBy: [{ leftAtGate: "desc" }, { receivedAt: "desc" }],
@@ -59,7 +61,7 @@ router.get("/parcels-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN), a
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user || !user.villaId) {
@@ -72,6 +74,7 @@ router.get("/parcels-pending", requireRole(UserRole.RESIDENT, UserRole.ADMIN), a
       where: {
         villaId: user.villaId,
         societyId,
+        ...parcelVisibleToResidentWhere(user.unitId),
         status: ParcelStatus.RECEIVED,
       },
       orderBy: { receivedAt: "desc" },
@@ -96,7 +99,7 @@ router.patch("/parcels/:id/collected", requireRole(UserRole.RESIDENT, UserRole.A
     // Get user's villa
     const user = await prisma.user.findFirst({
       where: { id: userId, societyId },
-      select: { villaId: true },
+      select: { villaId: true, unitId: true },
     });
 
     if (!user || !user.villaId) {
@@ -109,6 +112,7 @@ router.patch("/parcels/:id/collected", requireRole(UserRole.RESIDENT, UserRole.A
         id,
         villaId: user.villaId,
         societyId,
+        ...parcelVisibleToResidentWhere(user.unitId),
       },
     });
 

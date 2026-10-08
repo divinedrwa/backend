@@ -571,6 +571,7 @@ model Unit {
   villa         Villa          @relation(fields: [villaId], references: [id], onDelete: Cascade)
   users         User[]
   visitorVillas VisitorVilla[]
+  parcels       Parcel[]
 
   @@unique([villaId, unitCode])
   @@index([societyId])
@@ -1300,6 +1301,8 @@ model Parcel {
   id              String       @id @default(cuid())
   societyId       String
   villaId         String
+  /// Floor (unit) of the flat the parcel is for; null = the whole flat (every resident of the villa).
+  unitId          String?
   deliveryService String?      // Added for mobile API
   trackingNumber  String?      // Added for mobile API
   senderName      String?      // Added for mobile API
@@ -1316,9 +1319,11 @@ model Parcel {
 
   society Society @relation(fields: [societyId], references: [id], onDelete: Cascade)
   villa   Villa   @relation(fields: [villaId], references: [id], onDelete: Cascade)
+  unit    Unit?   @relation(fields: [unitId], references: [id], onDelete: SetNull)
 
   @@index([societyId])
   @@index([villaId])
+  @@index([unitId])
   @@index([status])
   @@index([societyId, receivedAt])
   @@index([societyId, leftAtGate, status])

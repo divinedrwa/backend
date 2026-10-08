@@ -6,7 +6,7 @@ import { validateBody } from "../../middlewares/validate";
 import { NotificationCategory, UserRole, ParcelStatus } from "@prisma/client";
 import { notifyUsers } from "../../services/notification.service";
 import { resolveGuardLogRange } from "./guardLogRange";
-import { residentLikeRoleFilter } from "../../lib/residentLike";
+import { parcelRecipientWhere, withFlatLabels } from "../../lib/parcelAudience";
 
 const router = Router();
 
@@ -20,6 +20,8 @@ export function normalizeParcelDescription(description?: string | null): string 
 // Validation schema
 const logParcelSchema = z.object({
   villaId: z.string(),
+  /** Floor of the flat the parcel is for; omit for the whole flat. */
+  unitId: z.string().optional(),
   deliveryService: z.string().trim().optional(),
   trackingNumber: z.string().trim().optional(),
   senderName: z.string().trim().optional(),
@@ -32,7 +34,7 @@ const logParcelSchema = z.object({
 router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logParcelSchema), async (req, res, next) => {
   try {
     const { societyId } = req.auth!;
-    const { villaId, deliveryService, trackingNumber, senderName, description, photoUrl, leftAtGate } = req.body;
+    const { villaId, unitId, deliveryService, trackingNumber, senderName, description, photoUrl, leftAtGate } = req.body;
 
     // Verify villa exists
     const villa = await prisma.villa.findFirst({
@@ -43,10 +45,19 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
       return res.status(404).json({ message: "Villa not found" });
     }
 
+    // The floor, when given, must belong to this flat.
+    const unit = unitId
+      ? await prisma.unit.findFirst({ where: { id: unitId, villaId, societyId }, select: { id: true, label: true } })
+      : null;
+    if (unitId && !unit) {
+      return res.status(400).json({ message: "Invalid floor for the selected flat" });
+    }
+
     const parcel = await prisma.parcel.create({
       data: {
         societyId,
         villaId,
+        unitId: unit?.id ?? null,
         deliveryService,
         trackingNumber,
         senderName,
@@ -60,23 +71,21 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
         villa: {
           select: {
             villaNumber: true,
+            block: true,
           },
         },
+        unit: { select: { label: true } },
       },
     });
 
-    // Notify villa residents about new parcel
+    // Notify the residents the parcel is for (the chosen floor, or the whole flat)
     void (async () => {
       try {
         const residents = await prisma.user.findMany({
-          where: {
-            villaId,
-            societyId,
-            ...residentLikeRoleFilter,
-            isActive: true,
-          },
+          where: parcelRecipientWhere({ societyId, villaId, unitId: unit?.id }),
           select: { id: true },
         });
+        const where = unit ? `villa ${villa.villaNumber} (${unit.label})` : `villa ${villa.villaNumber}`;
         if (residents.length > 0) {
           const atGate = leftAtGate === true;
           await notifyUsers(
@@ -84,12 +93,13 @@ router.post("/parcel-received", requireRole(UserRole.GUARD), validateBody(logPar
             {
               title: atGate ? "Parcel left at gate" : "New parcel received",
               body: atGate
-                ? `${deliveryService ? `Your ${deliveryService}` : "A"} parcel is waiting at the gate for villa ${villa.villaNumber}. Please collect it.`
-                : `A parcel has been received at security for villa ${villa.villaNumber}.${description ? ` (${description})` : ""}`,
+                ? `${deliveryService ? `Your ${deliveryService}` : "A"} parcel is waiting at the gate for ${where}. Please collect it.`
+                : `A parcel has been received at security for ${where}.${description ? ` (${description})` : ""}`,
               data: {
                 type: atGate ? "PARCEL_LEFT_AT_GATE" : "PARCEL_RECEIVED",
                 parcelId: parcel.id,
                 villaId,
+                ...(unit ? { unitId: unit.id } : {}),
                 leftAtGate: atGate ? "true" : "false",
               },
             },
@@ -124,14 +134,16 @@ router.get("/parcels-pending", requireRole(UserRole.GUARD), async (req, res, nex
         villa: {
           select: {
             villaNumber: true,
+            block: true,
           },
         },
+        unit: { select: { label: true } },
       },
       orderBy: [{ leftAtGate: "desc" }, { receivedAt: "asc" }], // Gate pickups first
     });
 
     return res.json({
-      parcels: pendingParcels,
+      parcels: pendingParcels.map(withFlatLabels),
       count: pendingParcels.length,
     });
   } catch (error) {
@@ -196,8 +208,10 @@ router.get(["/parcels-today", "/my-parcels"], requireRole(UserRole.GUARD), async
         villa: {
           select: {
             villaNumber: true,
+            block: true,
           },
         },
+        unit: { select: { label: true } },
       },
       orderBy: { receivedAt: "desc" },
     });
@@ -206,7 +220,7 @@ router.get(["/parcels-today", "/my-parcels"], requireRole(UserRole.GUARD), async
     const pending = parcels.filter((p) => p.status === ParcelStatus.RECEIVED);
 
     return res.json({
-      parcels,
+      parcels: parcels.map(withFlatLabels),
       summary: {
         total: parcels.length,
         collected: collected.length,
