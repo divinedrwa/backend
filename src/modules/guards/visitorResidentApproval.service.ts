@@ -7,6 +7,7 @@ import type { Prisma, PrismaClient } from "@prisma/client";
 import { NotificationService } from "../../services/notification.service";
 import { logger } from "../../lib/logger";
 import { VISITOR_TYPE_LABEL } from "../../lib/visitorTypePresets";
+import { findActiveShiftsForSociety } from "../../lib/guardShiftActive";
 import {
   recomputeVisitorAggregateApproval as recomputeFromStateManager,
   resolveVisitorApprovalRecipientIds as resolveFromStateManager,
@@ -147,13 +148,45 @@ export async function notifyResidentsVisitorApprovalRequest(params: {
   return { recipientUserCount: residents.length };
 }
 
+/**
+ * Guards who should hear a resident's decision: the guard who logged the visitor (they may have
+ * moved away from the gate) plus every guard on shift right now, at any gate. Only active guard
+ * accounts count. When none qualify (nobody on shift, creator gone), every active guard is told
+ * so a decision is never dropped.
+ */
+export async function resolveApprovalOutcomeGuardIds(params: {
+  prisma: PrismaClient;
+  societyId: string;
+  createdByGuardId?: string | null;
+  now?: Date;
+}): Promise<string[]> {
+  const shifts = await findActiveShiftsForSociety(params.prisma, {
+    societyId: params.societyId,
+    now: params.now,
+    include: {},
+  });
+  const candidates = new Set<string>(shifts.map((sh) => sh.guardId));
+  if (params.createdByGuardId) candidates.add(params.createdByGuardId);
+
+  const activeGuard = { societyId: params.societyId, role: UserRole.GUARD, isActive: true };
+  if (candidates.size > 0) {
+    const found = await params.prisma.user.findMany({
+      where: { ...activeGuard, id: { in: [...candidates] } },
+      select: { id: true },
+    });
+    if (found.length > 0) return [...new Set(found.map((u) => u.id))];
+  }
+  const all = await params.prisma.user.findMany({ where: activeGuard, select: { id: true } });
+  return [...new Set(all.map((u) => u.id))];
+}
+
 export async function notifyGuardsVisitorApprovalOutcome(params: {
   prisma: PrismaClient;
   societyId: string;
   visitorId: string;
   visitorName: string;
   outcome: "APPROVED" | "REJECTED";
-  /** Guard who checked this visitor in (`Visitor.createdBy`) — they get the push first; falls back to all guards if unset/invalid */
+  /** Guard who checked this visitor in (`Visitor.createdBy`) — told in addition to every guard on shift; see resolveApprovalOutcomeGuardIds */
   createdByGuardId?: string | null;
 }): Promise<void> {
   const title =
@@ -170,31 +203,11 @@ export async function notifyGuardsVisitorApprovalOutcome(params: {
     societyId: params.societyId,
   };
 
-  const guardIds: string[] = [];
-  if (params.createdByGuardId) {
-    const creator = await params.prisma.user.findFirst({
-      where: {
-        id: params.createdByGuardId,
-        societyId: params.societyId,
-        role: UserRole.GUARD,
-        isActive: true,
-      },
-      select: { id: true },
-    });
-    if (creator) {
-      guardIds.push(creator.id);
-    }
-  }
-
-  if (guardIds.length === 0) {
-    const guards = await params.prisma.user.findMany({
-      where: { societyId: params.societyId, role: UserRole.GUARD, isActive: true },
-      select: { id: true },
-    });
-    guardIds.push(...guards.map((g) => g.id));
-  }
-
-  const uniqueGuardIds = [...new Set(guardIds)];
+  const uniqueGuardIds = await resolveApprovalOutcomeGuardIds({
+    prisma: params.prisma,
+    societyId: params.societyId,
+    createdByGuardId: params.createdByGuardId,
+  });
 
   logger.info({
     visitorId: params.visitorId,
